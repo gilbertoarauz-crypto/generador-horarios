@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
-import random
 import io
+import random
 import pandas as pd
 import streamlit as st
 
@@ -8,7 +8,7 @@ st.title("📅 Generador Automático de Horarios")
 
 # Configuración interactiva en la web
 semanas = st.sidebar.slider("Semanas a generar", 1, 4, 1)
-fecha_inicio = st.sidebar.date_input("Fecha de inicio", datetime.now())
+fecha_inicio_date = st.sidebar.date_input("Fecha de inicio", datetime.now())
 
 # Formulario para agregar empleados
 st.subheader("1. Configuración de Personal")
@@ -40,7 +40,7 @@ if st.session_state.empleados:
 
 
 # Lógica de generación de horarios
-def generar_malla(empleados_list, semanas_count, fecha_base):
+def generar_malla(empleados_list, semanas_count, fecha_base_date):
     turnos = {
         "Mañana": {"inicio": 7, "fin": 15},
         "Tarde": {"inicio": 15, "fin": 23},
@@ -48,6 +48,9 @@ def generar_malla(empleados_list, semanas_count, fecha_base):
     }
     programacion = []
     dias_totales = semanas_count * 7
+
+    # Convertir date a datetime
+    fecha_base = datetime.combine(fecha_base_date, datetime.min.time())
 
     for emp in empleados_list:
         dias_libres = [
@@ -123,7 +126,7 @@ if (
     and st.session_state.empleados
 ):
     df_resultado = generar_malla(
-        st.session_state.empleados, semanas, fecha_inicio
+        st.session_state.empleados, semanas, fecha_inicio_date
     )
     st.subheader("2. Horario Generado")
     st.dataframe(df_resultado)
