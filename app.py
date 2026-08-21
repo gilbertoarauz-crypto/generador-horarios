@@ -5,8 +5,8 @@ import random
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Generador de Horarios por Cargo", layout="wide")
-st.title("📅 Generador de Horarios con Excepciones Diarias por Cargo")
+st.set_page_config(page_title="Generador de Horarios por Demanda", layout="wide")
+st.title("📅 Generador de Horarios con Cupos por Turno y Cargo")
 
 # ==========================================
 # CATÁLOGO DE HORARIOS PREDEFINIDOS
@@ -89,93 +89,48 @@ if uploaded_file is not None:
         st.error(f"Error al procesar el archivo: {e}")
 
 # ==========================================
-# 2. SELECTOR VISUAL CON EXCEPCIONES DIARIAS
+# 2. CONFIGURACIÓN DE CUPOS POR TURNO Y CARGO
 # ==========================================
-matriz_reglas = {}
+matriz_cupos = {}
 
 if df_empleados is not None:
-    st.subheader("2. Selección de Horarios por Cargo")
-    st.info("Configura el horario base para la semana laboral y marca los días que requieren horarios diferentes.")
+    st.subheader("2. Requerimientos de Personal (Cupos por Turno)")
+    st.info("Selecciona los turnos para el cargo e indica la cantidad de personas necesarias por turno.")
 
     cargos_unicos = df_empleados["CARGO"].dropna().unique().tolist()
 
     for cargo in cargos_unicos:
-        with st.expander(f"🔹 Seleccionar turnos para: {cargo}", expanded=True):
-            matriz_reglas[cargo] = {}
+        with st.expander(f"🔹 Configurar requirimientos para: {cargo}", expanded=True):
+            matriz_cupos[cargo] = {}
             
-            # 1. Horario General Base L-V
-            st.markdown("#### 📌 Horario Base (Lunes a Viernes)")
-            col_gen_1, col_gen_2 = st.columns([3, 2])
-            with col_gen_1:
-                turnos_base_lv = st.multiselect(
-                    "Turnos generales Lunes-Viernes",
-                    options=CATALOGO_TURNOS,
-                    default=["08:00-17:00", "11:00-19:00"],
-                    key=f"ms_base_{cargo}"
-                )
-            with col_gen_2:
-                txt_base_lv = st.text_input("Nuevo turno L-V (opcional)", key=f"tx_base_{cargo}")
+            # Selector de turnos base para el cargo
+            turnos_sel = st.multiselect(
+                f"Turnos habilitados para {cargo}",
+                options=CATALOGO_TURNOS,
+                default=["03:00-11:00", "11:00-19:00", "19:00-27:00"],
+                key=f"ms_turnos_{cargo}"
+            )
             
-            list_base_lv = list(turnos_base_lv) + ([txt_base_lv.strip()] if txt_base_lv.strip() else [])
-
-            # 2. Casillas para seleccionar excepciones en la semana laboral
-            st.markdown("#### ⚡ Marcar si algún día de la semana laboral NO es igual al horario base:")
-            cols_chk = st.columns(5)
-            dias_excepcion = {}
-            dias_laborales = ["LUNES", "MARTES", "MIÉRCOLES", "JUEVES", "VIERNES"]
-            
-            for idx_d, d_nom in enumerate(dias_laborales):
-                with cols_chk[idx_d]:
-                    dias_excepcion[d_nom] = st.checkbox(f"{d_nom} es diferente", key=f"chk_diff_{cargo}_{d_nom}")
-
-            # Desplegar campos para los días marcados como diferentes
-            for d_nom in dias_laborales:
-                if dias_excepcion[d_nom]:
-                    st.markdown(f"**Horarios específicos para {d_nom}:**")
-                    c1, c2 = st.columns([3, 2])
-                    with c1:
-                        t_spec = st.multiselect(
-                            f"Turnos para {d_nom}",
-                            options=CATALOGO_TURNOS,
-                            default=["06:00-15:00"],
-                            key=f"ms_spec_{cargo}_{d_nom}"
+            if turnos_sel:
+                st.markdown("**Cantidad de personas requeridas por turno (Lunes a Domingo):**")
+                cols_cupos = st.columns(len(turnos_sel))
+                
+                for idx_t, turno in enumerate(turnos_sel):
+                    with cols_cupos[idx_t]:
+                        # Definir por defecto 1 o 2 personas según el turno
+                        cant = st.number_input(
+                            label=f"Turno {turno}",
+                            min_value=1,
+                            max_value=20,
+                            value=1,
+                            key=f"num_{cargo}_{turno}"
                         )
-                    with c2:
-                        txt_spec = st.text_input(f"Nuevo turno {d_nom} (opcional)", key=f"tx_spec_{cargo}_{d_nom}")
-                    matriz_reglas[cargo][d_nom] = list(t_spec) + ([txt_spec.strip()] if txt_spec.strip() else [])
-                else:
-                    matriz_reglas[cargo][d_nom] = list_base_lv
-
-            # 3. Fin de Semana (Sábado y Domingo)
-            st.markdown("#### 🗓️ Fin de Semana")
-            col_sab, col_dom = st.columns(2)
-            
-            with col_sab:
-                st.markdown("**SÁBADO**")
-                turnos_sab = st.multiselect(
-                    "Turnos Sábado",
-                    options=CATALOGO_TURNOS,
-                    default=["08:00-15:00 CAP"],
-                    key=f"ms_sab_{cargo}"
-                )
-                txt_sab = st.text_input("Nuevo turno Sábado (opcional)", key=f"tx_sab_{cargo}")
-                matriz_reglas[cargo]["SÁBADO"] = list(turnos_sab) + ([txt_sab.strip()] if txt_sab.strip() else [])
-
-            with col_dom:
-                st.markdown("**DOMINGO**")
-                turnos_dom = st.multiselect(
-                    "Turnos Domingo",
-                    options=CATALOGO_TURNOS,
-                    default=["08:00-15:00 CAP"],
-                    key=f"ms_dom_{cargo}"
-                )
-                txt_dom = st.text_input("Nuevo turno Domingo (opcional)", key=f"tx_dom_{cargo}")
-                matriz_reglas[cargo]["DOMINGO"] = list(turnos_dom) + ([txt_dom.strip()] if txt_dom.strip() else [])
+                        matriz_cupos[cargo][turno] = cant
 
 # ==========================================
-# 3. LÓGICA DE GENERACIÓN
+# 3. LÓGICA DE GENERACIÓN CON CUPOS Y RESTRICCIONES
 # ==========================================
-def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_cargos):
+def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_cupos):
     dias_totales = semanas_count * 7
     fecha_base = datetime.combine(fecha_base_date, datetime.min.time())
 
@@ -188,78 +143,117 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_car
         fecha_fmt = f_actual.strftime("%d-%b")
         columnas_fechas.append(f"{nombre_dia}\n{fecha_fmt}")
 
-    filas_horario = []
+    # Estructura base para guardar resultados
+    programacion_matriz = {emp["CODIGO"]: {
+        "CODIGO": emp["CODIGO"],
+        "NOMBRE": emp["NOMBRE"],
+        "CARGO": emp["CARGO"],
+        "ESTADO": str(emp.get("ESTADO", "ACTIVO")).strip().upper(),
+        "SALIDA_PREVIA": None
+    } for _, emp in df_personal.iterrows()}
 
-    for _, emp in df_personal.iterrows():
-        codigo_emp = emp.get("CODIGO", "")
-        nombre_emp = emp.get("NOMBRE", "")
-        cargo_emp = emp.get("CARGO", "")
-        estado_emp = str(emp.get("ESTADO", "ACTIVO")).strip().upper()
+    # Asignar Días Libres (1 por semana) y Vacaciones
+    dias_libres_emp = {}
+    for cod, datos in programacion_matriz.items():
+        if datos["ESTADO"] == "VACACIONES":
+            dias_libres_emp[cod] = list(range(dias_totales))
+        else:
+            dias_libres_emp[cod] = [random.randint(0, 6) + (s * 7) for s in range(semanas_count)]
 
-        fila = {"CODIGO": codigo_emp, "NOMBRE": nombre_emp, "CARGO": cargo_emp}
+    # Recorrido día por día (cobertura equitativa de turnos)
+    for idx_dia, col_nombre in enumerate(columnas_fechas):
+        fecha_col = fechas_dt[idx_dia]
+        
+        # Agrupar empleados disponibles por cargo para este día
+        cargos = list(reglas_cupos.keys())
+        
+        for cargo in cargos:
+            cupos_cargo = reglas_cupos[cargo] # Dict {"03:00-11:00": 2, ...}
+            
+            # Buscar empleados de este cargo activos y que no tengan día libre hoy
+            empleados_cargo = [
+                cod for cod, d in programacion_matriz.items()
+                if d["CARGO"] == cargo and idx_dia not in dias_libres_emp[cod]
+            ]
+            
+            random.shuffle(empleados_cargo)
+            
+            # Crear lista extendida de turnos a cubrir según la demanda (ej: ["03:00-11:00", "03:00-11:00", "11:00-19:00", ...])
+            turnos_a_cubrir = []
+            for t_nom, requeridos in cupos_cargo.items():
+                turnos_a_cubrir.extend([t_nom] * requeridos)
 
-        dias_libres = [random.randint(0, 6) + (s * 7) for s in range(semanas_count)]
-        es_vacaciones = estado_emp == "VACACIONES"
+            # Asignar turnos a los empleados disponibles
+            for cod_emp in empleados_cargo:
+                salida_ant = programacion_matriz[cod_emp]["SALIDA_PREVIA"]
+                turno_asignado = None
+                nueva_salida = None
 
-        salida_anterior_dt = None
-
-        for idx, col_nombre in enumerate(columnas_fechas):
-            fecha_col = fechas_dt[idx]
-            nombre_dia_semana = dias_semana_es[fecha_col.weekday()]
-
-            if es_vacaciones:
-                fila[col_nombre] = "VACACIONES"
-                salida_anterior_dt = None
-            elif idx in dias_libres:
-                fila[col_nombre] = "L"
-                salida_anterior_dt = None
-            else:
-                opciones_turnos = reglas_cargos.get(cargo_emp, {}).get(nombre_dia_semana, [])
-                opciones_turnos = list(opciones_turnos)
-
-                random.shuffle(opciones_turnos)
-                turno_seleccionado = None
-                nueva_salida_dt = None
-
-                for t_candidato in opciones_turnos:
+                # Intentar asignar de la lista de requeridos
+                for t_candidato in list(turnos_a_cubrir):
                     parsed_h = extraer_horas(t_candidato)
                     if parsed_h:
                         h_ini, m_ini, h_fin, m_fin = parsed_h
                         entrada_dt = fecha_col.replace(hour=h_ini, minute=m_ini)
 
-                        if calcular_descanso_suficiente(salida_anterior_dt, entrada_dt, min_horas=12):
-                            turno_seleccionado = t_candidato
+                        if calcular_descanso_suficiente(salida_ant, entrada_dt, min_horas=12):
+                            turno_asignado = t_candidato
+                            turnos_a_cubrir.remove(t_candidato) # Consumir el cupo
                             
                             if h_fin >= 24:
-                                nueva_salida_dt = (fecha_col + timedelta(days=1)).replace(hour=h_fin - 24, minute=m_fin)
+                                nueva_salida = (fecha_col + timedelta(days=1)).replace(hour=h_fin - 24, minute=m_fin)
                             elif h_fin < h_ini:
-                                nueva_salida_dt = (fecha_col + timedelta(days=1)).replace(hour=h_fin, minute=m_fin)
+                                nueva_salida = (fecha_col + timedelta(days=1)).replace(hour=h_fin, minute=m_fin)
                             else:
-                                nueva_salida_dt = fecha_col.replace(hour=h_fin, minute=m_fin)
+                                nueva_salida = fecha_col.replace(hour=h_fin, minute=m_fin)
                             break
+                
+                # Si no había requerimiento pendiente o no cumplía descanso, dar turno alternativo válido
+                if turno_asignado is None:
+                    for t_alt in cupos_cargo.keys():
+                        parsed_h = extraer_horas(t_alt)
+                        if parsed_h:
+                            h_ini, m_ini, h_fin, m_fin = parsed_h
+                            entrada_dt = fecha_col.replace(hour=h_ini, minute=m_ini)
+                            if calcular_descanso_suficiente(salida_ant, entrada_dt, min_horas=12):
+                                turno_asignado = t_alt
+                                if h_fin >= 24:
+                                    nueva_salida = (fecha_col + timedelta(days=1)).replace(hour=h_fin - 24, minute=m_fin)
+                                else:
+                                    nueva_salida = fecha_col.replace(hour=h_fin, minute=m_fin)
+                                break
 
-                if turno_seleccionado is None:
-                    if opciones_turnos:
-                        fila[col_nombre] = "L (Descanso)"
-                        salida_anterior_dt = None
-                    else:
-                        fila[col_nombre] = "08:00-17:00"
-                        salida_anterior_dt = fecha_col.replace(hour=17, minute=0)
+                if turno_asignado:
+                    programacion_matriz[cod_emp][col_nombre] = turno_asignado
+                    programacion_matriz[cod_emp]["SALIDA_PREVIA"] = nueva_salida
                 else:
-                    fila[col_nombre] = turno_seleccionado
-                    salida_anterior_dt = nueva_salida_dt
+                    programacion_matriz[cod_emp][col_nombre] = "L (Descanso)"
+                    programacion_matriz[cod_emp]["SALIDA_PREVIA"] = None
 
-        filas_horario.append(fila)
+        # Marcar días libres y vacaciones en el resultado
+        for cod_emp, d in programacion_matriz.items():
+            if idx_dia in dias_libres_emp[cod_emp]:
+                if d["ESTADO"] == "VACACIONES":
+                    programacion_matriz[cod_emp][col_nombre] = "VACACIONES"
+                else:
+                    programacion_matriz[cod_emp][col_nombre] = "L"
+                programacion_matriz[cod_emp]["SALIDA_PREVIA"] = None
 
-    return pd.DataFrame(filas_horario)
+    # Formatear la matriz final limpiando columnas auxiliares
+    filas_finales = []
+    for cod_emp, datos in programacion_matriz.items():
+        d_limpio = {k: v for k, v in datos.items() if k not in ["ESTADO", "SALIDA_PREVIA"]}
+        filas_finales.append(d_limpio)
+
+    return pd.DataFrame(filas_finales)
 
 # ==========================================
 # 4. PROCESAMIENTO Y EXPORTACIÓN
 # ==========================================
 if df_empleados is not None:
-    if st.button("⚡ Generar Malla Horaria Personalizada"):
+    if st.button("⚡ Generar Malla Horaria con Demanda de Personal"):
         df_resultado = generar_malla_matriz(
-            df_empleados, semanas, fecha_inicio_date, matriz_reglas
+            df_empleados, semanas, fecha_inicio_date, matriz_cupos
         )
 
         st.subheader("3. Malla Horaria Generada")
