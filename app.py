@@ -1,11 +1,12 @@
 from datetime import datetime, timedelta
 import io
+import re
 import random
 import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="Generador de Horarios por Cargo", layout="wide")
-st.title("📅 Generador de Horarios Personalizados por Cargo y Día")
+st.title("📅 Generador de Horarios con Validación de 12h de Descanso")
 
 # ==========================================
 # CONFIGURACIÓN GENERAL
@@ -25,12 +26,28 @@ dias_semana_es = [
 ]
 
 # ==========================================
-# 1. CARGA DE PERSONAL (EXCEL / CSV)
+# FUNCIONES AUXILIARES DE TIEMPO
+# ==========================================
+def extraer_horas(texto_turno):
+    """Extrae la hora de entrada y salida de un texto como '19:00-27:00 AT'"""
+    coincidencia = re.search(r"(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})", str(texto_turno))
+    if coincidencia:
+        h_ini, m_ini, h_fin, m_fin = map(int, coincidencia.groups())
+        return h_ini, m_ini, h_fin, m_fin
+    return None
+
+def calcular_descanso_suficiente(salida_previa_dt, entrada_actual_dt, min_horas=12):
+    """Verifica si entre dos fechas/horas existen al menos min_horas de descanso."""
+    if salida_previa_dt is None:
+        return True
+    diferencia_horas = (entrada_actual_dt - salida_previa_dt).total_seconds() / 3600.0
+    return diferencia_horas >= min_horas
+
+# ==========================================
+# 1. CARGA DE PERSONAL
 # ==========================================
 st.subheader("1. Cargar Lista de Personal")
-uploaded_file = st.file_uploader(
-    "Subir archivo Excel o CSV", type=["xlsx", "csv"]
-)
+uploaded_file = st.file_uploader("Subir archivo Excel o CSV", type=["xlsx", "csv"])
 
 df_empleados = None
 
@@ -41,36 +58,28 @@ if uploaded_file is not None:
         else:
             df_empleados = pd.read_excel(uploaded_file)
 
-        df_empleados.columns = [
-            str(c).upper().strip() for c in df_empleados.columns
-        ]
+        df_empleados.columns = [str(c).upper().strip() for c in df_empleados.columns]
 
         columnas_requeridas = {"CODIGO", "NOMBRE", "CARGO"}
         if not columnas_requeridas.issubset(set(df_empleados.columns)):
-            st.error(
-                f"El archivo debe contener las columnas: {columnas_requeridas}"
-            )
+            st.error(f"El archivo debe contener las columnas: {columnas_requeridas}")
             df_empleados = None
         else:
             if "ESTADO" not in df_empleados.columns:
                 df_empleados["ESTADO"] = "ACTIVO"
-            st.success(
-                f"¡Se cargaron {len(df_empleados)} empleados exitosamente!"
-            )
+            st.success(f"¡Se cargaron {len(df_empleados)} empleados exitosamente!")
             st.dataframe(df_empleados, use_container_width=True)
     except Exception as e:
         st.error(f"Error al procesar el archivo: {e}")
 
 # ==========================================
-# 2. CONFIGURACIÓN DE HORARIOS POR CARGO Y DÍA
+# 2. CONFIGURACIÓN DE HORARIOS POR CARGO
 # ==========================================
 matriz_reglas = {}
 
 if df_empleados is not None:
-    st.subheader("2. Matriz de Horarios por Cargo y Tipología de Día")
-    st.info(
-        "Define los horarios permitidos (separados por coma) para cada día de la semana según el cargo."
-    )
+    st.subheader("2. Matriz de Horarios por Cargo y Día")
+    st.info("Ingresa los turnos en formato HH:MM-HH:MM (ejemplo: 08:00-17:00, 19:00-27:00).")
 
     cargos_unicos = df_empleados["CARGO"].dropna().unique().tolist()
 
@@ -79,11 +88,7 @@ if df_empleados is not None:
             matriz_reglas[cargo] = {}
             cols = st.columns(7)
             for idx_dia, dia_nombre in enumerate(dias_semana_es):
-                val_defecto = (
-                    "08:00-17:00, 11:00-19:00"
-                    if idx_dia < 5
-                    else "08:00-15:00 CAP"
-                )
+                val_defecto = "08:00-17:00, 11:00-19:00" if idx_dia < 5 else "08:00-15:00 CAP"
                 matriz_reglas[cargo][dia_nombre] = cols[idx_dia].text_area(
                     label=dia_nombre,
                     value=val_defecto,
@@ -94,9 +99,7 @@ if df_empleados is not None:
 # ==========================================
 # 3. LÓGICA DE GENERACIÓN
 # ==========================================
-def generar_malla_matriz(
-    df_personal, semanas_count, fecha_base_date, reglas_cargos
-):
+def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_cargos):
     dias_totales = semanas_count * 7
     fecha_base = datetime.combine(fecha_base_date, datetime.min.time())
 
@@ -117,18 +120,12 @@ def generar_malla_matriz(
         cargo_emp = emp.get("CARGO", "")
         estado_emp = str(emp.get("ESTADO", "ACTIVO")).strip().upper()
 
-        fila = {
-            "CODIGO": codigo_emp,
-            "NOMBRE": nombre_emp,
-            "CARGO": cargo_emp,
-        }
+        fila = {"CODIGO": codigo_emp, "NOMBRE": nombre_emp, "CARGO": cargo_emp}
 
-        # 1 día libre por semana
-        dias_libres = [
-            random.randint(0, 6) + (s * 7) for s in range(semanas_count)
-        ]
-
+        dias_libres = [random.randint(0, 6) + (s * 7) for s in range(semanas_count)]
         es_vacaciones = estado_emp == "VACACIONES"
+
+        salida_anterior_dt = None
 
         for idx, col_nombre in enumerate(columnas_fechas):
             fecha_col = fechas_dt[idx]
@@ -136,21 +133,48 @@ def generar_malla_matriz(
 
             if es_vacaciones:
                 fila[col_nombre] = "VACACIONES"
+                salida_anterior_dt = None
             elif idx in dias_libres:
                 fila[col_nombre] = "L"
+                salida_anterior_dt = None
             else:
-                # Obtener horarios permitidos para ese cargo y día específico
-                turnos_txt = reglas_cargos.get(cargo_emp, {}).get(
-                    nombre_dia_semana, ""
-                )
-                opciones_turnos = [
-                    t.strip() for t in turnos_txt.split(",") if t.strip()
-                ]
+                turnos_txt = reglas_cargos.get(cargo_emp, {}).get(nombre_dia_semana, "")
+                opciones_turnos = [t.strip() for t in turnos_txt.split(",") if t.strip()]
 
-                if opciones_turnos:
-                    fila[col_nombre] = random.choice(opciones_turnos)
+                random.shuffle(opciones_turnos)
+                turno_seleccionado = None
+                nueva_salida_dt = None
+
+                for t_candidato in opciones_turnos:
+                    parsed_h = extraer_horas(t_candidato)
+                    if parsed_h:
+                        h_ini, m_ini, h_fin, m_fin = parsed_h
+                        entrada_dt = fecha_col.replace(hour=h_ini, minute=m_ini)
+
+                        # Evaluar si cumple 12h de descanso previo
+                        if calcular_descanso_suficiente(salida_anterior_dt, entrada_dt, min_horas=12):
+                            turno_seleccionado = t_candidato
+                            
+                            # Calcular la nueva hora de salida exacta
+                            if h_fin >= 24:
+                                nueva_salida_dt = (fecha_col + timedelta(days=1)).replace(hour=h_fin - 24, minute=m_fin)
+                            elif h_fin < h_ini:
+                                nueva_salida_dt = (fecha_col + timedelta(days=1)).replace(hour=h_fin, minute=m_fin)
+                            else:
+                                nueva_salida_dt = fecha_col.replace(hour=h_fin, minute=m_fin)
+                            break
+
+                # Si ningún turno cumple las 12 horas, asigna día LIBRE para proteger al trabajador
+                if turno_seleccionado is None:
+                    if opciones_turnos:
+                        fila[col_nombre] = "L (Descanso)"
+                        salida_anterior_dt = None
+                    else:
+                        fila[col_nombre] = "08:00-17:00"
+                        salida_anterior_dt = fecha_col.replace(hour=17, minute=0)
                 else:
-                    fila[col_nombre] = "08:00-17:00"
+                    fila[col_nombre] = turno_seleccionado
+                    salida_anterior_dt = nueva_salida_dt
 
         filas_horario.append(fila)
 
@@ -170,9 +194,7 @@ if df_empleados is not None:
 
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            df_resultado.to_excel(
-                writer, index=False, sheet_name="Programación"
-            )
+            df_resultado.to_excel(writer, index=False, sheet_name="Programación")
 
         st.download_button(
             label="📥 Descargar Excel Matriz",
