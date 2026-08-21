@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="Generador de Horarios por Cargo", layout="wide")
-st.title("📅 Generador de Horarios con Selector por Días y Semana Laboral")
+st.title("📅 Generador de Horarios con Excepciones Diarias por Cargo")
 
 # ==========================================
 # CATÁLOGO DE HORARIOS PREDEFINIDOS
@@ -89,13 +89,13 @@ if uploaded_file is not None:
         st.error(f"Error al procesar el archivo: {e}")
 
 # ==========================================
-# 2. SELECTOR VISUAL DE HORARIOS POR CARGO
+# 2. SELECTOR VISUAL CON EXCEPCIONES DIARIAS
 # ==========================================
 matriz_reglas = {}
 
 if df_empleados is not None:
     st.subheader("2. Selección de Horarios por Cargo")
-    st.info("Puedes usar una regla unificada para Lunes a Viernes o personalizar cada día de la semana.")
+    st.info("Configura el horario base para la semana laboral y marca los días que requieren horarios diferentes.")
 
     cargos_unicos = df_empleados["CARGO"].dropna().unique().tolist()
 
@@ -103,77 +103,74 @@ if df_empleados is not None:
         with st.expander(f"🔹 Seleccionar turnos para: {cargo}", expanded=True):
             matriz_reglas[cargo] = {}
             
-            # Opción para repetición rápida Lunes a Viernes
-            repetir_lv = st.checkbox(
-                "Usar mismo horario para toda la semana laboral (Lunes a Viernes)",
-                value=True,
-                key=f"chk_lv_{cargo}"
-            )
+            # 1. Horario General Base L-V
+            st.markdown("#### 📌 Horario Base (Lunes a Viernes)")
+            col_gen_1, col_gen_2 = st.columns([3, 2])
+            with col_gen_1:
+                turnos_base_lv = st.multiselect(
+                    "Turnos generales Lunes-Viernes",
+                    options=CATALOGO_TURNOS,
+                    default=["08:00-17:00", "11:00-19:00"],
+                    key=f"ms_base_{cargo}"
+                )
+            with col_gen_2:
+                txt_base_lv = st.text_input("Nuevo turno L-V (opcional)", key=f"tx_base_{cargo}")
+            
+            list_base_lv = list(turnos_base_lv) + ([txt_base_lv.strip()] if txt_base_lv.strip() else [])
 
-            if repetir_lv:
-                col_lv, col_sab, col_dom = st.columns(3)
-                
-                with col_lv:
-                    st.markdown("**LUNES A VIERNES**")
-                    turnos_lv = st.multiselect(
-                        "Turnos Lunes-Viernes",
-                        options=CATALOGO_TURNOS,
-                        default=["08:00-17:00", "11:00-19:00"],
-                        key=f"ms_lv_{cargo}"
-                    )
-                    txt_lv = st.text_input("Nuevo turno L-V (opcional)", key=f"tx_lv_{cargo}")
-                    list_lv = list(turnos_lv) + ([txt_lv.strip()] if txt_lv.strip() else [])
-                    
-                    # Asignar a los 5 días de la semana laboral
-                    for d in ["LUNES", "MARTES", "MIÉRCOLES", "JUEVES", "VIERNES"]:
-                        matriz_reglas[cargo][d] = list_lv
+            # 2. Casillas para seleccionar excepciones en la semana laboral
+            st.markdown("#### ⚡ Marcar si algún día de la semana laboral NO es igual al horario base:")
+            cols_chk = st.columns(5)
+            dias_excepcion = {}
+            dias_laborales = ["LUNES", "MARTES", "MIÉRCOLES", "JUEVES", "VIERNES"]
+            
+            for idx_d, d_nom in enumerate(dias_laborales):
+                with cols_chk[idx_d]:
+                    dias_excepcion[d_nom] = st.checkbox(f"{d_nom} es diferente", key=f"chk_diff_{cargo}_{d_nom}")
 
-                with col_sab:
-                    st.markdown("**SÁBADO**")
-                    turnos_sab = st.multiselect(
-                        "Turnos Sábado",
-                        options=CATALOGO_TURNOS,
-                        default=["08:00-15:00 CAP"],
-                        key=f"ms_sab_{cargo}"
-                    )
-                    txt_sab = st.text_input("Nuevo turno Sábado (opcional)", key=f"tx_sab_{cargo}")
-                    matriz_reglas[cargo]["SÁBADO"] = list(turnos_sab) + ([txt_sab.strip()] if txt_sab.strip() else [])
-
-                with col_dom:
-                    st.markdown("**DOMINGO**")
-                    turnos_dom = st.multiselect(
-                        "Turnos Domingo",
-                        options=CATALOGO_TURNOS,
-                        default=["08:00-15:00 CAP"],
-                        key=f"ms_dom_{cargo}"
-                    )
-                    txt_dom = st.text_input("Nuevo turno Domingo (opcional)", key=f"tx_dom_{cargo}")
-                    matriz_reglas[cargo]["DOMINGO"] = list(turnos_dom) + ([txt_dom.strip()] if txt_dom.strip() else [])
-
-            else:
-                # Vista detallada día por día
-                cols = st.columns(7)
-                for idx_dia, dia_nombre in enumerate(dias_semana_es):
-                    defecto = ["08:00-17:00", "11:00-19:00"] if idx_dia < 5 else ["08:00-15:00 CAP"]
-                    
-                    with cols[idx_dia]:
-                        st.markdown(f"**{dia_nombre}**")
-                        turnos_sel = st.multiselect(
-                            "Turnos base",
+            # Desplegar campos para los días marcados como diferentes
+            for d_nom in dias_laborales:
+                if dias_excepcion[d_nom]:
+                    st.markdown(f"**Horarios específicos para {d_nom}:**")
+                    c1, c2 = st.columns([3, 2])
+                    with c1:
+                        t_spec = st.multiselect(
+                            f"Turnos para {d_nom}",
                             options=CATALOGO_TURNOS,
-                            default=[t for t in defecto if t in CATALOGO_TURNOS],
-                            key=f"ms_{cargo}_{dia_nombre}"
+                            default=["06:00-15:00"],
+                            key=f"ms_spec_{cargo}_{d_nom}"
                         )
-                        turno_extra = st.text_input(
-                            "Nuevo turno (opcional)",
-                            key=f"tx_{cargo}_{dia_nombre}"
-                        )
-                        
-                        turnos_totales = list(turnos_sel)
-                        if turno_extra.strip():
-                            turnos_totales.append(turno_extra.strip())
-                            
-                        matriz_reglas[cargo][dia_nombre] = turnos_totales
+                    with c2:
+                        txt_spec = st.text_input(f"Nuevo turno {d_nom} (opcional)", key=f"tx_spec_{cargo}_{d_nom}")
+                    matriz_reglas[cargo][d_nom] = list(t_spec) + ([txt_spec.strip()] if txt_spec.strip() else [])
+                else:
+                    matriz_reglas[cargo][d_nom] = list_base_lv
+
+            # 3. Fin de Semana (Sábado y Domingo)
+            st.markdown("#### 🗓️ Fin de Semana")
+            col_sab, col_dom = st.columns(2)
+            
+            with col_sab:
+                st.markdown("**SÁBADO**")
+                turnos_sab = st.multiselect(
+                    "Turnos Sábado",
+                    options=CATALOGO_TURNOS,
+                    default=["08:00-15:00 CAP"],
+                    key=f"ms_sab_{cargo}"
+                )
+                txt_sab = st.text_input("Nuevo turno Sábado (opcional)", key=f"tx_sab_{cargo}")
+                matriz_reglas[cargo]["SÁBADO"] = list(turnos_sab) + ([txt_sab.strip()] if txt_sab.strip() else [])
+
+            with col_dom:
+                st.markdown("**DOMINGO**")
+                turnos_dom = st.multiselect(
+                    "Turnos Domingo",
+                    options=CATALOGO_TURNOS,
+                    default=["08:00-15:00 CAP"],
+                    key=f"ms_dom_{cargo}"
+                )
+                txt_dom = st.text_input("Nuevo turno Domingo (opcional)", key=f"tx_dom_{cargo}")
+                matriz_reglas[cargo]["DOMINGO"] = list(turnos_dom) + ([txt_dom.strip()] if txt_dom.strip() else [])
 
 # ==========================================
 # 3. LÓGICA DE GENERACIÓN
