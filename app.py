@@ -89,6 +89,9 @@ dias_semana_es = [
     "DOMINGO",
 ]
 
+if "matriz_demanda_guardada" not in st.session_state:
+    st.session_state.matriz_demanda_guardada = {}
+
 # ==========================================
 # FUNCIONES AUXILIARES DE TIEMPO Y TURNO
 # ==========================================
@@ -136,7 +139,7 @@ def parsear_fecha_incidencia(val_fecha, anio_referencia):
     except Exception:
         return None
 
-def calcular_patron_dias_libres(semanas_count, libres_base, festivos_list, fecha_inicio_dt):
+def calcular_patron_dias_libres(semanas_count, libres_base, festivos_list, fecha_inicio_dt, dias_consecutivos_previos=0):
     dias_totales = semanas_count * 7
     intentos = 0
     while intentos < 500:
@@ -154,8 +157,9 @@ def calcular_patron_dias_libres(semanas_count, libres_base, festivos_list, fecha
             libres_sem = random.sample(dias_semana, cant_libres_semana)
             dias_libres_indices.update(libres_sem)
         
+        # Validar no superar 10 días laborados continuos acumulando el historial previo
         valido = True
-        consecutivos = 0
+        consecutivos = dias_consecutivos_previos
         for dia_i in range(dias_totales):
             if dia_i in dias_libres_indices:
                 consecutivos = 0
@@ -224,7 +228,7 @@ if uploaded_prev_file is not None:
             df_semana_anterior = pd.read_excel(uploaded_prev_file)
         
         df_semana_anterior.columns = [str(c).upper().strip() for c in df_semana_anterior.columns]
-        st.info("✅ Malla de la semana anterior cargada para empalmar descansos y rotaciones.")
+        st.info("✅ Malla de la semana anterior cargada correctamente para empalmar descansos y rotaciones.")
     except Exception as e:
         st.warning(f"No se pudo leer la semana anterior: {e}")
 
@@ -254,7 +258,7 @@ if df_empleados is not None:
         
         matriz_demanda[cargo] = {d: {} for d in dias_semana_es}
 
-        # PRECARGA AUTOMÁTICA DE MATRIZ DE DEMANDA CON DEFAULTS
+        # PRECARGA AUTOMÁTICA DE MATRIZ DE DEMANDA
         dias_hábiles = ["LUNES", "MARTES", "MIÉRCOLES", "JUEVES", "VIERNES"]
         for dh in dias_hábiles:
             for t_def in defaults_cargo["habil"]:
@@ -362,8 +366,10 @@ if df_empleados is not None:
                     cant_d = st.number_input(f"Dom: {t_nom}", min_value=1, max_value=20, value=1, key=f"num_dom_{cargo}_{t_nom}")
                     matriz_demanda[cargo]["DOMINGO"][t_nom] = cant_d
 
+        st.session_state.matriz_demanda_guardada = matriz_demanda
+
 # ==========================================
-# 3. LÓGICA DE GENERACIÓN EMPALMADA (CORREGIDA)
+# 3. LÓGICA DE GENERACIÓN INTEGRADA Y RIGUROSA
 # ==========================================
 def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda, libres_base, festivos_list, df_prev=None):
     dias_totales = semanas_count * 7
@@ -382,18 +388,32 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
     programacion_matriz = {}
     dias_libres_emp = {}
 
+    # PARSER INTELIGENTE DEL HISTORIAL DE LA SEMANA ANTERIOR
     info_historial = {}
     if df_prev is not None and "CODIGO" in df_prev.columns:
-        ult_col = df_prev.columns[-1]
+        cols_dias_prev = [c for c in df_prev.columns if c not in ["CODIGO", "NOMBRE", "CARGO", "ESTADO"]]
+        
         for _, fila in df_prev.iterrows():
-            c_cod = fila["CODIGO"]
-            val_ult = str(fila[ult_col]).strip()
+            c_cod = str(fila["CODIGO"]).strip()
             
+            # Obtener el último turno registrado (Domingo o último disponible)
+            val_ult = "L"
+            if cols_dias_prev:
+                val_ult = str(fila[cols_dias_prev[-1]]).strip()
+            
+            # Calcular cuántos días seguidos venía trabajando al final del historial
+            dias_consecutivos = 0
+            for col_d in reversed(cols_dias_prev):
+                val_dia = str(fila[col_d]).strip().upper()
+                if val_dia in ["L", "L (DESCANSO)", "VACACIONES", "PERMISO", "LICENCIA", "INCAPACIDAD"]:
+                    break
+                dias_consecutivos += 1
+
             salida_calc = None
             franja_calc = None
             vino_desc = False
             
-            if val_ult.upper() in ["L", "L (DESCANSO)", "VACACIONES", "PERMISO", "LICENCIA"]:
+            if val_ult.upper() in ["L", "L (DESCANSO)", "VACACIONES", "PERMISO", "LICENCIA", "INCAPACIDAD"]:
                 vino_desc = True
             else:
                 parsed_h = extraer_horas(val_ult)
@@ -411,16 +431,17 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             info_historial[c_cod] = {
                 "salida": salida_calc,
                 "franja": franja_calc,
-                "vino_descanso": vino_desc
+                "vino_descanso": vino_desc,
+                "dias_consecutivos": dias_consecutivos
             }
 
     analistas_cods = [
-        row["CODIGO"] for _, row in df_personal.iterrows() 
+        str(row["CODIGO"]).strip() for _, row in df_personal.iterrows() 
         if "ANALISTA" in str(row["CARGO"]).upper()
     ]
 
     for _, emp in df_personal.iterrows():
-        cod = emp["CODIGO"]
+        cod = str(emp["CODIGO"]).strip()
         f_ini_inc = parsear_fecha_incidencia(emp.get("INCIDENCIA_INI"), anio_ref)
         f_fin_inc = parsear_fecha_incidencia(emp.get("INCIDENCIA_FIN"), anio_ref)
         tipo_inc = str(emp.get("INCIDENCIA_TIPO", "")).strip().upper()
@@ -440,8 +461,12 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             "VINO_DE_DESCANSO": hist.get("vino_descanso", False),
         }
 
-        libres_calculados = calcular_patron_dias_libres(semanas_count, libres_base, festivos_list, fecha_base)
+        # Calcular patrón de libres considerando el acumulado de días trabajados previamente
+        libres_calculados = calcular_patron_dias_libres(
+            semanas_count, libres_base, festivos_list, fecha_base, hist.get("dias_consecutivos", 0)
+        )
         
+        # Filtro de máximo 1 analista en libre el mismo día hábil (L-V)
         if cod in analistas_cods:
             for s in range(semanas_count):
                 libres_sem = [idx for idx in libres_calculados if (s * 7) <= idx < ((s + 1) * 7)]
