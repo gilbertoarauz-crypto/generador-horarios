@@ -44,7 +44,7 @@ dias_semana_es = [
 ]
 
 # ==========================================
-# FUNCIONES AUXILIARES DE TIEMPO
+# FUNCIONES AUXILIARES DE TIEMPO Y DATO
 # ==========================================
 def extraer_horas(texto_turno):
     coincidencia = re.search(r"(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})", str(texto_turno))
@@ -58,6 +58,17 @@ def calcular_descanso_suficiente(salida_previa_dt, entrada_actual_dt, min_horas=
         return True
     diferencia_horas = (entrada_actual_dt - salida_previa_dt).total_seconds() / 3600.0
     return diferencia_horas >= min_horas
+
+def parsear_fecha_incidencia(val_fecha, anio_referencia):
+    if pd.isna(val_fecha) or str(val_fecha).strip() == "":
+        return None
+    try:
+        dt = pd.to_datetime(val_fecha, dayfirst=True)
+        if dt.year == 1970 or dt.year != anio_referencia:
+            dt = dt.replace(year=anio_referencia)
+        return dt.date()
+    except Exception:
+        return None
 
 # ==========================================
 # 1. CARGA DE PERSONAL
@@ -74,15 +85,26 @@ if uploaded_file is not None:
         else:
             df_empleados = pd.read_excel(uploaded_file)
 
+        # Normalizar nombres de columnas
         df_empleados.columns = [str(c).upper().strip() for c in df_empleados.columns]
 
         columnas_requeridas = {"CODIGO", "NOMBRE", "CARGO"}
         if not columnas_requeridas.issubset(set(df_empleados.columns)):
-            st.error(f"El archivo debe contener las columnas: {columnas_requeridas}")
+            st.error(f"El archivo debe contener al menos las columnas: {columnas_requeridas}")
             df_empleados = None
         else:
             if "ESTADO" not in df_empleados.columns:
                 df_empleados["ESTADO"] = "ACTIVO"
+            
+            # Estandarizar alias de columnas de incidencia
+            col_inc = [c for c in df_empleados.columns if "INCIDENCIA" in c]
+            col_f_ini = [c for c in df_empleados.columns if "FECHA INICI" in c or "FECHA_INICI" in c]
+            col_f_fin = [c for c in df_empleados.columns if "FECHA FIN" in c or "FECHA_FIN" in c]
+
+            df_empleados["INCIDENCIA_TIPO"] = df_empleados[col_inc[0]] if col_inc else None
+            df_empleados["INCIDENCIA_INI"] = df_empleados[col_f_ini[0]] if col_f_ini else None
+            df_empleados["INCIDENCIA_FIN"] = df_empleados[col_f_fin[0]] if col_f_fin else None
+
             st.success(f"¡Se cargaron {len(df_empleados)} empleados exitosamente!")
             st.dataframe(df_empleados, use_container_width=True)
     except Exception as e:
@@ -91,7 +113,7 @@ if uploaded_file is not None:
 # ==========================================
 # 2. CONFIGURACIÓN COMPLETA DE REGLAS Y CUPOS
 # ==========================================
-matriz_demanda = {} # Estructura: {cargo: {dia: {turno: cantidad}}}
+matriz_demanda = {}
 
 if df_empleados is not None:
     st.subheader("2. Configuración de Horarios y Requerimientos por Cargo")
@@ -103,7 +125,6 @@ if df_empleados is not None:
         with st.expander(f"🔹 Configuración para: {cargo}", expanded=True):
             matriz_demanda[cargo] = {d: {} for d in dias_semana_es}
             
-            # --- SECCIÓN LUNES A VIERNES ---
             st.markdown("#### 📌 Semana Laboral (Lunes a Viernes)")
             col_lv1, col_lv2 = st.columns([3, 2])
             with col_lv1:
@@ -118,7 +139,6 @@ if df_empleados is not None:
             
             turnos_final_lv = list(t_base_lv) + ([txt_base_lv.strip()] if txt_base_lv.strip() else [])
 
-            # Casillas para días diferentes en L-V
             st.markdown("**Marcar si algún día de la semana laboral es diferente:**")
             cols_chk = st.columns(5)
             dias_excepcion = {}
@@ -128,7 +148,6 @@ if df_empleados is not None:
                 with cols_chk[idx_d]:
                     dias_excepcion[d_nom] = st.checkbox(f"{d_nom}", key=f"chk_{cargo}_{d_nom}")
 
-            # Definición de turnos por cada día L-V
             turnos_por_dia_lv = {}
             for d_nom in dias_laborales:
                 if dias_excepcion[d_nom]:
@@ -142,7 +161,6 @@ if df_empleados is not None:
                 else:
                     turnos_por_dia_lv[d_nom] = turnos_final_lv
 
-            # Configuración de cupos L-V (unificada o por día especial)
             st.markdown("**Cantidad de personas requeridas por turno (Lunes a Viernes):**")
             turnos_unicos_lv = list(set([t for lista in turnos_por_dia_lv.values() for t in lista]))
             if turnos_unicos_lv:
@@ -154,7 +172,6 @@ if df_empleados is not None:
                             if t_nom in turnos_por_dia_lv[d_nom]:
                                 matriz_demanda[cargo][d_nom][t_nom] = cant
 
-            # --- SECCIÓN FIN DE SEMANA ---
             st.markdown("---")
             st.markdown("#### 🗓️ Fin de Semana (Sábado y Domingo)")
             col_sab, col_dom = st.columns(2)
@@ -178,11 +195,12 @@ if df_empleados is not None:
                     matriz_demanda[cargo]["DOMINGO"][t_nom] = cant_d
 
 # ==========================================
-# 3. LÓGICA DE GENERACIÓN MANTENIENDO 12H DE DESCANSO
+# 3. LÓGICA DE GENERACIÓN CON INCIDENCIAS Y DESCANSO (12H)
 # ==========================================
 def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda):
     dias_totales = semanas_count * 7
     fecha_base = datetime.combine(fecha_base_date, datetime.min.time())
+    anio_ref = fecha_base_date.year
 
     columnas_fechas = []
     fechas_dt = []
@@ -193,38 +211,59 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
         fecha_fmt = f_actual.strftime("%d-%b")
         columnas_fechas.append(f"{nombre_dia}\n{fecha_fmt}")
 
-    programacion_matriz = {emp["CODIGO"]: {
-        "CODIGO": emp["CODIGO"],
-        "NOMBRE": emp["NOMBRE"],
-        "CARGO": emp["CARGO"],
-        "ESTADO": str(emp.get("ESTADO", "ACTIVO")).strip().upper(),
-        "SALIDA_PREVIA": None
-    } for _, emp in df_personal.iterrows()}
-
-    # Días Libres
+    programacion_matriz = {}
     dias_libres_emp = {}
-    for cod, datos in programacion_matriz.items():
-        if datos["ESTADO"] == "VACACIONES":
-            dias_libres_emp[cod] = list(range(dias_totales))
-        else:
-            dias_libres_emp[cod] = [random.randint(0, 6) + (s * 7) for s in range(semanas_count)]
+
+    # Procesar datos por empleado incluyendo incidencias
+    for _, emp in df_personal.iterrows():
+        cod = emp["CODIGO"]
+        f_ini_inc = parsear_fecha_incidencia(emp.get("INCIDENCIA_INI"), anio_ref)
+        f_fin_inc = parsear_fecha_incidencia(emp.get("INCIDENCIA_FIN"), anio_ref)
+        tipo_inc = str(emp.get("INCIDENCIA_TIPO", "")).strip().upper()
+
+        programacion_matriz[cod] = {
+            "CODIGO": cod,
+            "NOMBRE": emp["NOMBRE"],
+            "CARGO": emp["CARGO"],
+            "ESTADO": str(emp.get("ESTADO", "ACTIVO")).strip().upper(),
+            "INCIDENCIA_TIPO": tipo_inc if tipo_inc and tipo_inc != "NAN" else None,
+            "INCIDENCIA_INI": f_ini_inc,
+            "INCIDENCIA_FIN": f_fin_inc,
+            "SALIDA_PREVIA": None
+        }
+
+        # Días Libres Rotativos (1 por semana)
+        dias_libres_emp[cod] = [random.randint(0, 6) + (s * 7) for s in range(semanas_count)]
 
     # Procesar día a día
     for idx_dia, col_nombre in enumerate(columnas_fechas):
         fecha_col = fechas_dt[idx_dia]
+        fecha_actual_date = fecha_col.date()
         nombre_dia_semana = dias_semana_es[fecha_col.weekday()]
         
+        # 1. Identificar ausentes por Incidencia/Vacaciones en el día
+        empleados_con_incidencia_hoy = set()
+        for cod_emp, d in programacion_matriz.items():
+            if d["INCIDENCIA_TIPO"] and d["INCIDENCIA_INI"] and d["INCIDENCIA_FIN"]:
+                if d["INCIDENCIA_INI"] <= fecha_actual_date <= d["INCIDENCIA_FIN"]:
+                    programacion_matriz[cod_emp][col_nombre] = d["INCIDENCIA_TIPO"]
+                    programacion_matriz[cod_emp]["SALIDA_PREVIA"] = None
+                    empleados_con_incidencia_hoy.add(cod_emp)
+
+        # 2. Asignación por Cargo
         for cargo, dem_dias in reglas_demanda.items():
-            cupos_hoy = dem_dias.get(nombre_dia_semana, {}) # Dict {turno: cantidad}
+            cupos_hoy = dem_dias.get(nombre_dia_semana, {})
             
+            # Filtrar candidatos (Excluye franco rotativo y con incidencia activa)
             empleados_cargo = [
                 cod for cod, d in programacion_matriz.items()
-                if d["CARGO"] == cargo and idx_dia not in dias_libres_emp[cod]
+                if d["CARGO"] == cargo 
+                and idx_dia not in dias_libres_emp[cod]
+                and cod not in empleados_con_incidencia_hoy
             ]
             
             random.shuffle(empleados_cargo)
             
-            # Requerimientos pendientes
             turnos_a_cubrir = []
             for t_nom, req in cupos_hoy.items():
                 turnos_a_cubrir.extend([t_nom] * req)
@@ -252,7 +291,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                                 nueva_salida = fecha_col.replace(hour=h_fin, minute=m_fin)
                             break
                 
-                # Asignación alternativa de descanso
+                # Respaldo si no encaja en turnos principales
                 if turno_asignado is None:
                     for t_alt in cupos_hoy.keys():
                         parsed_h = extraer_horas(t_alt)
@@ -274,18 +313,19 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     programacion_matriz[cod_emp][col_nombre] = "L (Descanso)"
                     programacion_matriz[cod_emp]["SALIDA_PREVIA"] = None
 
-        # Marcado de OFF y VACACIONES
+        # 3. Asignación de Francos / Días Libres Rotativos
         for cod_emp, d in programacion_matriz.items():
-            if idx_dia in dias_libres_emp[cod_emp]:
-                if d["ESTADO"] == "VACACIONES":
-                    programacion_matriz[cod_emp][col_nombre] = "VACACIONES"
-                else:
-                    programacion_matriz[cod_emp][col_nombre] = "L"
+            if idx_dia in dias_libres_emp[cod_emp] and cod_emp not in empleados_con_incidencia_hoy:
+                programacion_matriz[cod_emp][col_nombre] = "L"
                 programacion_matriz[cod_emp]["SALIDA_PREVIA"] = None
 
+    # Limpiar columnas internas
     filas_finales = []
     for cod_emp, datos in programacion_matriz.items():
-        d_limpio = {k: v for k, v in datos.items() if k not in ["ESTADO", "SALIDA_PREVIA"]}
+        d_limpio = {
+            k: v for k, v in datos.items() 
+            if k not in ["ESTADO", "SALIDA_PREVIA", "INCIDENCIA_TIPO", "INCIDENCIA_INI", "INCIDENCIA_FIN"]
+        }
         filas_finales.append(d_limpio)
 
     return pd.DataFrame(filas_finales)
