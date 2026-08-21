@@ -4,10 +4,11 @@ import random
 import pandas as pd
 import streamlit as st
 
-st.title("📅 Generador Automático de Horarios")
+st.set_page_config(page_title="Generador de Horarios", layout="wide")
+st.title("📅 Generador Automático de Horarios (Malla Horizontal)")
 
-# Configuración interactiva en la web
-semanas = st.sidebar.slider("Semanas a generar", 1, 4, 1)
+# Configuración interactiva
+semanas = st.sidebar.slider("Semanas a generar", 1, 4, 2)
 fecha_inicio_date = st.sidebar.date_input("Fecha de inicio", datetime.now())
 
 # Formulario para agregar empleados
@@ -17,128 +18,104 @@ if "empleados" not in st.session_state:
 
 with st.form("form_empleado"):
     col1, col2, col3, col4 = st.columns(4)
-    codigo = col1.text_input("Código")
-    nombre = col2.text_input("Nombre")
-    cargo = col3.text_input("Cargo")
-    tarea = col4.text_input("Tarea")
+    codigo = col1.text_input("CÓDIGO")
+    nombre = col2.text_input("NOMBRE")
+    cargo = col3.text_input("CARGO")
+    tarea = col4.text_input("TAREA / ESTADO", value="07:00-16:00")
     agregar = st.form_submit_button("Agregar Empleado")
 
     if agregar and codigo and nombre:
         st.session_state.empleados.append(
             {
-                "codigo": codigo,
-                "nombre": nombre,
-                "cargo": cargo,
-                "tarea": tarea,
+                "CODIGO": codigo,
+                "NOMBRE": nombre,
+                "CARGO": cargo,
+                "TAREA": tarea,
             }
         )
         st.success(f"Empleado {nombre} agregado.")
 
-# Mostrar lista de empleados actual
+# Mostrar lista de empleados
 if st.session_state.empleados:
     st.write("Empleados registrados:", pd.DataFrame(st.session_state.empleados))
 
 
-# Lógica de generación de horarios
-def generar_malla(empleados_list, semanas_count, fecha_base_date):
-    turnos = {
-        "Mañana": {"inicio": 7, "fin": 15},
-        "Tarde": {"inicio": 15, "fin": 23},
-        "Noche": {"inicio": 23, "fin": 7},
-    }
-    programacion = []
+# Generador en formato matriz (horizontal)
+def generar_malla_horizontal(empleados_list, semanas_count, fecha_base_date):
     dias_totales = semanas_count * 7
-
-    # Convertir date a datetime
     fecha_base = datetime.combine(fecha_base_date, datetime.min.time())
 
+    # Nombres de días en español
+    dias_semana_es = [
+        "LUNES",
+        "MARTES",
+        "MIÉRCOLES",
+        "JUEVES",
+        "VIERNES",
+        "SÁBADO",
+        "DOMINGO",
+    ]
+
+    # Crear encabezados con estructura de Fecha y Día
+    columnas_fechas = []
+    fechas_dt = []
+    for i in range(dias_totales):
+        f_actual = fecha_base + timedelta(days=i)
+        fechas_dt.append(f_actual)
+        nombre_dia = dias_semana_es[f_actual.weekday()]
+        fecha_fmt = f_actual.strftime("%d-%b")
+        columnas_fechas.append(f"{nombre_dia}\n{fecha_fmt}")
+
+    filas_horario = []
+
     for emp in empleados_list:
+        fila = {
+            "CÓDIGO": emp["CODIGO"],
+            "NOMBRE": emp["NOMBRE"],
+            "CARGO": emp["CARGO"],
+        }
+
+        # Días libres (1 por semana)
         dias_libres = [
             random.randint(0, 6) + (s * 7) for s in range(semanas_count)
         ]
-        ultimo_fin = None
 
-        for dia_idx in range(dias_totales):
-            fecha_actual = fecha_base + timedelta(days=dia_idx)
+        # Si el estado del empleado es VACACIONES, se asigna a toda la matriz
+        es_vacaciones = emp["TAREA"].strip().upper() == "VACACIONES"
 
-            if dia_idx in dias_libres:
-                programacion.append(
-                    {
-                        "Código": emp["codigo"],
-                        "Nombre": emp["nombre"],
-                        "Cargo": emp["cargo"],
-                        "Tarea": "N/A",
-                        "Fecha": fecha_actual.strftime("%Y-%m-%d"),
-                        "Turno": "LIBRE",
-                        "Entrada": "OFF",
-                        "Salida": "OFF",
-                    }
-                )
-                ultimo_fin = None
-                continue
+        for idx, col_nombre in enumerate(columnas_fechas):
+            if es_vacaciones:
+                fila[col_nombre] = "VACACIONES"
+            elif idx in dias_libres:
+                fila[col_nombre] = "L"
+            else:
+                fila[col_nombre] = emp["TAREA"]
 
-            turnos_validos = []
-            for n_turno, horas in turnos.items():
-                h_entrada = fecha_actual.replace(
-                    hour=horas["inicio"], minute=0, second=0
-                )
-                if (
-                    ultimo_fin is None
-                    or (h_entrada - ultimo_fin).total_seconds() / 3600 >= 12
-                ):
-                    turnos_validos.append((n_turno, horas))
+        filas_horario.append(fila)
 
-            n_turno, horas = (
-                random.choice(turnos_validos)
-                if turnos_validos
-                else ("Mañana", turnos["Mañana"])
-            )
-
-            h_entrada = fecha_actual.replace(hour=horas["inicio"], minute=0)
-            h_salida = (
-                (fecha_actual + timedelta(days=1)).replace(
-                    hour=horas["fin"], minute=0
-                )
-                if horas["fin"] < horas["inicio"]
-                else fecha_actual.replace(hour=horas["fin"], minute=0)
-            )
-
-            ultimo_fin = h_salida
-            programacion.append(
-                {
-                    "Código": emp["codigo"],
-                    "Nombre": emp["nombre"],
-                    "Cargo": emp["cargo"],
-                    "Tarea": emp["tarea"],
-                    "Fecha": fecha_actual.strftime("%Y-%m-%d"),
-                    "Turno": n_turno,
-                    "Entrada": f"{horas['inicio']:02d}:00",
-                    "Salida": f"{horas['fin']:02d}:00",
-                }
-            )
-
-    return pd.DataFrame(programacion)
+    return pd.DataFrame(filas_horario)
 
 
-# Botón para procesar y descargar
+# Generación y visualización
 if (
     st.button("⚡ Generar Horarios")
     and st.session_state.empleados
 ):
-    df_resultado = generar_malla(
+    df_matriz = generar_malla_horizontal(
         st.session_state.empleados, semanas, fecha_inicio_date
     )
-    st.subheader("2. Horario Generado")
-    st.dataframe(df_resultado)
 
-    # Convertir DataFrame a Excel para descarga en web
+    st.subheader("2. Malla Horaria")
+    st.dataframe(df_matriz, use_container_width=True)
+
+    # Exportación a Excel con formato horizontal
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df_resultado.to_excel(writer, index=False)
+        df_matriz.to_excel(writer, index=False, sheet_name="Programación")
 
     st.download_button(
-        label="📥 Descargar Excel",
+        label="📥 Descargar Excel Matriz",
         data=output.getvalue(),
-        file_name="horario_generado.xlsx",
+        file_name="horario_matriz.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
