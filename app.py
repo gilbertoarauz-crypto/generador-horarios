@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="Generador de Horarios por Cargo", layout="wide")
-st.title("📅 Generador de Horarios con Selector de Turnos por Cargo")
+st.title("📅 Generador de Horarios con Selector por Días y Semana Laboral")
 
 # ==========================================
 # CATÁLOGO DE HORARIOS PREDEFINIDOS
@@ -94,45 +94,89 @@ if uploaded_file is not None:
 matriz_reglas = {}
 
 if df_empleados is not None:
-    st.subheader("2. Selección de Horarios por Cargo y Día")
-    st.info("Selecciona los turnos permitidos desde la lista desplegable o añade nuevos turnos personalizados si lo requieres.")
+    st.subheader("2. Selección de Horarios por Cargo")
+    st.info("Puedes usar una regla unificada para Lunes a Viernes o personalizar cada día de la semana.")
 
     cargos_unicos = df_empleados["CARGO"].dropna().unique().tolist()
 
     for cargo in cargos_unicos:
         with st.expander(f"🔹 Seleccionar turnos para: {cargo}", expanded=True):
             matriz_reglas[cargo] = {}
-            cols = st.columns(7)
             
-            for idx_dia, dia_nombre in enumerate(dias_semana_es):
-                # Opciones por defecto dependiendo del día
-                defecto = ["08:00-17:00", "11:00-19:00"] if idx_dia < 5 else ["08:00-15:00 CAP"]
+            # Opción para repetición rápida Lunes a Viernes
+            repetir_lv = st.checkbox(
+                "Usar mismo horario para toda la semana laboral (Lunes a Viernes)",
+                value=True,
+                key=f"chk_lv_{cargo}"
+            )
+
+            if repetir_lv:
+                col_lv, col_sab, col_dom = st.columns(3)
                 
-                with cols[idx_dia]:
-                    st.markdown(f"**{dia_nombre}**")
-                    turnos_sel = st.multiselect(
-                        label="Turnos base",
+                with col_lv:
+                    st.markdown("**LUNES A VIERNES**")
+                    turnos_lv = st.multiselect(
+                        "Turnos Lunes-Viernes",
                         options=CATALOGO_TURNOS,
-                        default=[t for t in defecto if t in CATALOGO_TURNOS],
-                        key=f"ms_{cargo}_{dia_nombre}"
+                        default=["08:00-17:00", "11:00-19:00"],
+                        key=f"ms_lv_{cargo}"
                     )
+                    txt_lv = st.text_input("Nuevo turno L-V (opcional)", key=f"tx_lv_{cargo}")
+                    list_lv = list(turnos_lv) + ([txt_lv.strip()] if txt_lv.strip() else [])
                     
-                    turno_extra = st.text_input(
-                        label="Nuevo turno (opcional)",
-                        value="",
-                        placeholder="Ej: 14:00-22:00",
-                        key=f"tx_{cargo}_{dia_nombre}"
+                    # Asignar a los 5 días de la semana laboral
+                    for d in ["LUNES", "MARTES", "MIÉRCOLES", "JUEVES", "VIERNES"]:
+                        matriz_reglas[cargo][d] = list_lv
+
+                with col_sab:
+                    st.markdown("**SÁBADO**")
+                    turnos_sab = st.multiselect(
+                        "Turnos Sábado",
+                        options=CATALOGO_TURNOS,
+                        default=["08:00-15:00 CAP"],
+                        key=f"ms_sab_{cargo}"
                     )
+                    txt_sab = st.text_input("Nuevo turno Sábado (opcional)", key=f"tx_sab_{cargo}")
+                    matriz_reglas[cargo]["SÁBADO"] = list(turnos_sab) + ([txt_sab.strip()] if txt_sab.strip() else [])
+
+                with col_dom:
+                    st.markdown("**DOMINGO**")
+                    turnos_dom = st.multiselect(
+                        "Turnos Domingo",
+                        options=CATALOGO_TURNOS,
+                        default=["08:00-15:00 CAP"],
+                        key=f"ms_dom_{cargo}"
+                    )
+                    txt_dom = st.text_input("Nuevo turno Domingo (opcional)", key=f"tx_dom_{cargo}")
+                    matriz_reglas[cargo]["DOMINGO"] = list(turnos_dom) + ([txt_dom.strip()] if txt_dom.strip() else [])
+
+            else:
+                # Vista detallada día por día
+                cols = st.columns(7)
+                for idx_dia, dia_nombre in enumerate(dias_semana_es):
+                    defecto = ["08:00-17:00", "11:00-19:00"] if idx_dia < 5 else ["08:00-15:00 CAP"]
                     
-                    # Unir turnos seleccionados + nuevo turno ingresado
-                    turnos_totales = list(turnos_sel)
-                    if turno_extra.strip():
-                        turnos_totales.append(turno_extra.strip())
+                    with cols[idx_dia]:
+                        st.markdown(f"**{dia_nombre}**")
+                        turnos_sel = st.multiselect(
+                            "Turnos base",
+                            options=CATALOGO_TURNOS,
+                            default=[t for t in defecto if t in CATALOGO_TURNOS],
+                            key=f"ms_{cargo}_{dia_nombre}"
+                        )
+                        turno_extra = st.text_input(
+                            "Nuevo turno (opcional)",
+                            key=f"tx_{cargo}_{dia_nombre}"
+                        )
                         
-                    matriz_reglas[cargo][dia_nombre] = turnos_totales
+                        turnos_totales = list(turnos_sel)
+                        if turno_extra.strip():
+                            turnos_totales.append(turno_extra.strip())
+                            
+                        matriz_reglas[cargo][dia_nombre] = turnos_totales
 
 # ==========================================
-# 3. LÓGICA DE GENERACIÓN CON VALIDACIÓN 12H
+# 3. LÓGICA DE GENERACIÓN
 # ==========================================
 def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_cargos):
     dias_totales = semanas_count * 7
