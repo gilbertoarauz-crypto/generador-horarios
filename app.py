@@ -33,7 +33,6 @@ st.sidebar.header("⚙️ Parámetros de Programación")
 semanas = st.sidebar.slider("Semanas a generar", 1, 4, 2)
 fecha_inicio_date = st.sidebar.date_input("Fecha de inicio", datetime.now())
 
-# Parámetros avanzados de descansos y festivos
 st.sidebar.markdown("---")
 st.sidebar.header("🏖️ Configuración de Descansos")
 libres_por_semana_base = st.sidebar.number_input("Días libres por semana (normal)", min_value=1, max_value=3, value=1)
@@ -304,7 +303,7 @@ if df_empleados is not None:
         st.session_state.matriz_demanda_guardada = matriz_demanda
 
 # ==========================================
-# 3. LÓGICA DE GENERACIÓN ESTRICTA CON REGLA ESPECIAL PARA ANALISTAS
+# 3. LÓGICA DE GENERACIÓN CON CONTROL RÍGIDO DE LIBRES
 # ==========================================
 def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda, libres_base, festivos_list):
     dias_totales = semanas_count * 7
@@ -340,8 +339,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             "SALIDA_PREVIA": None,
             "ULTIMA_FRANJA": None,
             "VINO_DE_DESCANSO": False,
-            "EN_CICLO_NOCHE_ANALISTA": False,
-            "DIAS_EN_NOCHE": 0
         }
 
         dias_libres_emp[cod] = calcular_patron_dias_libres(semanas_count, libres_base, festivos_list, fecha_base)
@@ -350,6 +347,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
         fecha_col = fechas_dt[idx_dia]
         fecha_actual_date = fecha_col.date()
         nombre_dia_semana = dias_semana_es[fecha_col.weekday()]
+        semana_actual = idx_dia // 7
         
         # 1. Aplicar incidencias (Vacaciones, Permisos)
         empleados_bloqueados_hoy = set()
@@ -359,57 +357,9 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     programacion_matriz[cod_emp][col_nombre] = d["INCIDENCIA_TIPO"]
                     programacion_matriz[cod_emp]["SALIDA_PREVIA"] = None
                     programacion_matriz[cod_emp]["VINO_DE_DESCANSO"] = True
-                    programacion_matriz[cod_emp]["EN_CICLO_NOCHE_ANALISTA"] = False
                     empleados_bloqueados_hoy.add(cod_emp)
 
-        # 2. REGLA ESPECIAL PARA ANALISTAS (Secuencia: Sáb 19:00-27:00 a Vie 19:00-27:00 -> Sáb L -> Dom 11:00-19:00)
-        for cod_emp, d in programacion_matriz.items():
-            if cod_emp in empleados_bloqueados_hoy:
-                continue
-                
-            es_analista = "ANALISTA" in str(d["CARGO"]).upper()
-
-            if es_analista:
-                # Inicio del ciclo de Noche el día Sábado
-                if nombre_dia_semana == "SÁBADO" and not d["EN_CICLO_NOCHE_ANALISTA"]:
-                    # Validar si el cupo de la noche está activo en las reglas
-                    d["EN_CICLO_NOCHE_ANALISTA"] = True
-                    d["DIAS_EN_NOCHE"] = 1
-                    programacion_matriz[cod_emp][col_nombre] = "19:00-27:00"
-                    programacion_matriz[cod_emp]["SALIDA_PREVIA"] = (fecha_col + timedelta(days=1)).replace(hour=3, minute=0)
-                    programacion_matriz[cod_emp]["ULTIMA_FRANJA"] = "NOCHE"
-                    empleados_bloqueados_hoy.add(cod_emp)
-                    continue
-
-                # Continuación de Noche de Domingo a Viernes
-                elif d["EN_CICLO_NOCHE_ANALISTA"] and d["DIAS_EN_NOCHE"] < 7:
-                    d["DIAS_EN_NOCHE"] += 1
-                    programacion_matriz[cod_emp][col_nombre] = "19:00-27:00"
-                    programacion_matriz[cod_emp]["SALIDA_PREVIA"] = (fecha_col + timedelta(days=1)).replace(hour=3, minute=0)
-                    programacion_matriz[cod_emp]["ULTIMA_FRANJA"] = "NOCHE"
-                    empleados_bloqueados_hoy.add(cod_emp)
-                    continue
-
-                # Final del ciclo de Noche: Sábado Libre
-                elif d["EN_CICLO_NOCHE_ANALISTA"] and d["DIAS_EN_NOCHE"] == 7 and nombre_dia_semana == "SÁBADO":
-                    programacion_matriz[cod_emp][col_nombre] = "L"
-                    programacion_matriz[cod_emp]["SALIDA_PREVIA"] = None
-                    programacion_matriz[cod_emp]["VINO_DE_DESCANSO"] = True
-                    d["EN_CICLO_NOCHE_ANALISTA"] = False
-                    d["DIAS_EN_NOCHE"] = 0
-                    empleados_bloqueados_hoy.add(cod_emp)
-                    continue
-
-                # Domingo siguiente tras el Libre: Turno Tarde 11:00-19:00
-                elif nombre_dia_semana == "DOMINGO" and d.get("VINO_DE_DESCANSO") and d.get("ULTIMA_FRANJA") == "NOCHE":
-                    programacion_matriz[cod_emp][col_nombre] = "11:00-19:00"
-                    programacion_matriz[cod_emp]["SALIDA_PREVIA"] = fecha_col.replace(hour=19, minute=0)
-                    programacion_matriz[cod_emp]["ULTIMA_FRANJA"] = "TARDE"
-                    programacion_matriz[cod_emp]["VINO_DE_DESCANSO"] = False
-                    empleados_bloqueados_hoy.add(cod_emp)
-                    continue
-
-        # 3. Aplicar Días Libres ('L') Obligatorios Generales
+        # 2. Aplicar Días Libres ('L') Obligatorios
         for cod_emp in programacion_matriz.keys():
             if idx_dia in dias_libres_emp[cod_emp] and cod_emp not in empleados_bloqueados_hoy:
                 programacion_matriz[cod_emp][col_nombre] = "L"
@@ -417,7 +367,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                 programacion_matriz[cod_emp]["VINO_DE_DESCANSO"] = True
                 empleados_bloqueados_hoy.add(cod_emp)
 
-        # 4. Asignación General de Turnos por Cargo
+        # 3. Asignación General de Turnos por Cargo
         for cargo, dem_dias in reglas_demanda.items():
             cupos_hoy = dem_dias.get(nombre_dia_semana, {})
             
@@ -428,13 +378,9 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             
             random.shuffle(empleados_cargo)
             
-            # Recalcular cupos descontando los analistas pre-asignados a la noche o tarde
-            turnos_ya_asignados = [programacion_matriz[c].get(col_nombre) for c in programacion_matriz if programacion_matriz[c]["CARGO"] == cargo]
             turnos_a_cubrir = []
             for t_nom, req in cupos_hoy.items():
-                cant_asig = turnos_ya_asignados.count(t_nom)
-                faltan = max(0, req - cant_asig)
-                turnos_a_cubrir.extend([t_nom] * faltan)
+                turnos_a_cubrir.extend([t_nom] * req)
 
             for cod_emp in empleados_cargo:
                 salida_ant = programacion_matriz[cod_emp]["SALIDA_PREVIA"]
@@ -498,11 +444,28 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     programacion_matriz[cod_emp][col_nombre] = "L"
                     programacion_matriz[cod_emp]["VINO_DE_DESCANSO"] = True
 
+    # 4. AUDITORÍA Y CORRECCIÓN FINAL POR SEMANA (GARANTIZA MÍNIMO 1 LIBRE POR SEMANA)
+    for cod_emp, datos in programacion_matriz.items():
+        for s in range(semanas_count):
+            cols_semana = columnas_fechas[s * 7 : (s + 1) * 7]
+            valores_semana = [datos.get(c) for c in cols_semana]
+            
+            # Verificar si no tuvo ningún libre o incidencia en la semana
+            tiene_descanso = any(
+                str(val).upper() in ["L", "VACACIONES", "PERMISO", "LICENCIA", "INCAPACIDAD"] or "INCIDENCIA" in str(val).upper()
+                for val in valores_semana
+            )
+            
+            if not tiene_descanso:
+                # Asignar libre forzado preferentemente el domingo o sábado de esa semana
+                col_forzada = cols_semana[-1] # Último día de la semana (Domingo)
+                datos[col_forzada] = "L"
+
     filas_finales = []
     for cod_emp, datos in programacion_matriz.items():
         d_limpio = {
             k: v for k, v in datos.items() 
-            if k not in ["ESTADO", "SALIDA_PREVIA", "INCIDENCIA_TIPO", "INCIDENCIA_INI", "INCIDENCIA_FIN", "ULTIMA_FRANJA", "VINO_DE_DESCANSO", "EN_CICLO_NOCHE_ANALISTA", "DIAS_EN_NOCHE"]
+            if k not in ["ESTADO", "SALIDA_PREVIA", "INCIDENCIA_TIPO", "INCIDENCIA_INI", "INCIDENCIA_FIN", "ULTIMA_FRANJA", "VINO_DE_DESCANSO"]
         }
         filas_finales.append(d_limpio)
 
