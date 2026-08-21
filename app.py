@@ -33,6 +33,22 @@ st.sidebar.header("⚙️ Parámetros de Programación")
 semanas = st.sidebar.slider("Semanas a generar", 1, 4, 2)
 fecha_inicio_date = st.sidebar.date_input("Fecha de inicio", datetime.now())
 
+# Parámetros avanzados de descansos y festivos
+st.sidebar.markdown("---")
+st.sidebar.header("🏖️ Configuración de Descansos")
+libres_por_semana_base = st.sidebar.number_input("Días libres por semana (normal)", min_value=1, max_value=3, value=1)
+tiene_festivo = st.sidebar.checkbox("¿Hay día festivo en el periodo?", value=False)
+
+fechas_festivas_sel = []
+if tiene_festivo:
+    dias_totales_temp = semanas * 7
+    fechas_posibles = [(fecha_inicio_date + timedelta(days=i)) for i in range(dias_totales_temp)]
+    fechas_festivas_sel = st.sidebar.multiselect(
+        "Seleccionar día(s) festivo(s):",
+        options=fechas_posibles,
+        format_func=lambda x: x.strftime("%d-%b-%Y")
+    )
+
 dias_semana_es = [
     "LUNES",
     "MARTES",
@@ -95,6 +111,42 @@ def parsear_fecha_incidencia(val_fecha, anio_referencia):
         return None
 
 # ==========================================
+# GENERACIÓN INTELIGENTE DE DÍAS LIBRES (MÁX 10 DÍAS SEGUIDOS)
+# ==========================================
+def calcular_patron_dias_libres(semanas_count, libres_base, fechas_festivas, fecha_inicio_dt):
+    dias_totales = semanas_count * 7
+    
+    while True:
+        dias_libres_indices = []
+        for s in range(semanas_count):
+            inicio_sem = fecha_inicio_dt + timedelta(days=s * 7)
+            fin_sem = inicio_sem + timedelta(days=6)
+            
+            # Verificar si hay festivos en esta semana específica
+            hay_festivo_sem = any(inicio_sem.date() <= f <= fin_sem.date() for f in fechas_festivas)
+            cant_libres_semana = libres_base + (1 if hay_festivo_sem else 0)
+            
+            # Seleccionar días libres en el rango de la semana
+            dias_semana = list(range(s * 7, (s + 1) * 7))
+            libres_sem = sorted(random.sample(dias_semana, cant_libres_semana))
+            dias_libres_indices.extend(libres_sem)
+        
+        # Validar regla de máximo 10 días laborados consecutivos
+        valido = True
+        consecutivos = 0
+        for dia_i in range(dias_totales):
+            if dia_i in dias_libres_indices:
+                consecutivos = 0
+            else:
+                consecutivos += 1
+                if consecutivos > 10:
+                    valido = False
+                    break
+        
+        if valido:
+            return set(dias_libres_indices)
+
+# ==========================================
 # 1. CARGA DE PERSONAL
 # ==========================================
 st.subheader("1. Cargar Lista de Personal")
@@ -138,7 +190,6 @@ if uploaded_file is not None:
 matriz_demanda = {}
 
 if df_empleados is not None:
-    # Encabezado con el Checkbox al costado del título
     col_tulo, col_chk_guardar = st.columns([2.5, 1.5])
     with col_tulo:
         st.subheader("2. Configuración de Horarios y Requerimientos por Cargo")
@@ -161,7 +212,6 @@ if df_empleados is not None:
             with st.expander(f"🔹 Configuración para: {cargo}", expanded=not usar_guardado):
                 matriz_demanda[cargo] = {d: {} for d in dias_semana_es}
                 
-                # --- SECCIÓN LUNES A VIERNES BASE ---
                 st.markdown("#### 📌 Semana Laboral Base (Lunes a Viernes)")
                 col_lv1, col_lv2 = st.columns([3, 2])
                 with col_lv1:
@@ -232,7 +282,6 @@ if df_empleados is not None:
                             for d_reg in dias_regulares:
                                 matriz_demanda[cargo][d_reg][t_nom] = cant_reg
 
-                # --- SECCIÓN FIN DE SEMANA ---
                 st.markdown("---")
                 st.markdown("#### 🗓️ Fin de Semana (Sábado y Domingo)")
                 col_sab, col_dom = st.columns(2)
@@ -255,13 +304,12 @@ if df_empleados is not None:
                         cant_d = st.number_input(f"Dom: {t_nom}", min_value=1, max_value=20, value=1, key=f"num_dom_{cargo}_{t_nom}")
                         matriz_demanda[cargo]["DOMINGO"][t_nom] = cant_d
 
-        # Guardar en memoria de sesión la configuración actual
         st.session_state.matriz_demanda_guardada = matriz_demanda
 
 # ==========================================
-# 3. LÓGICA DE GENERACIÓN (24H DESCANSO TRAS 'L' + ROTACIÓN N->T->M)
+# 3. LÓGICA DE GENERACIÓN (MÁX 10 DÍAS TRABAJO + 24H DESCANSO + ROTACIÓN)
 # ==========================================
-def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda):
+def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda, libres_base, festivos_list):
     dias_totales = semanas_count * 7
     fecha_base = datetime.combine(fecha_base_date, datetime.min.time())
     anio_ref = fecha_base_date.year
@@ -297,14 +345,15 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             "VINO_DE_DESCANSO": False
         }
 
-        dias_libres_emp[cod] = [random.randint(0, 6) + (s * 7) for s in range(semanas_count)]
+        # Calcular patrón de libres asegurando máximo 10 días laborados consecutivos
+        dias_libres_emp[cod] = calcular_patron_dias_libres(semanas_count, libres_base, festivos_list, fecha_base)
 
     for idx_dia, col_nombre in enumerate(columnas_fechas):
         fecha_col = fechas_dt[idx_dia]
         fecha_actual_date = fecha_col.date()
         nombre_dia_semana = dias_semana_es[fecha_col.weekday()]
         
-        # 1. Aplicar incidencias del día
+        # 1. Aplicar incidencias
         empleados_con_incidencia_hoy = set()
         for cod_emp, d in programacion_matriz.items():
             if d["INCIDENCIA_TIPO"] and d["INCIDENCIA_INI"] and d["INCIDENCIA_FIN"]:
@@ -314,7 +363,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     programacion_matriz[cod_emp]["VINO_DE_DESCANSO"] = True
                     empleados_con_incidencia_hoy.add(cod_emp)
 
-        # 2. Asignación de Turnos por Cargo
+        # 2. Asignación por Cargo
         for cargo, dem_dias in reglas_demanda.items():
             cupos_hoy = dem_dias.get(nombre_dia_semana, {})
             
@@ -393,7 +442,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     programacion_matriz[cod_emp][col_nombre] = "L (Descanso)"
                     programacion_matriz[cod_emp]["VINO_DE_DESCANSO"] = True
 
-        # 3. Asignación de Francos / Días Libres Rotativos 'L'
+        # 3. Asignación de Francos / Días Libres 'L'
         for cod_emp, d in programacion_matriz.items():
             if idx_dia in dias_libres_emp[cod_emp] and cod_emp not in empleados_con_incidencia_hoy:
                 programacion_matriz[cod_emp][col_nombre] = "L"
@@ -415,7 +464,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
 if df_empleados is not None:
     if st.button("⚡ Generar Malla Horaria Completa"):
         df_resultado = generar_malla_matriz(
-            df_empleados, semanas, fecha_inicio_date, matriz_demanda
+            df_empleados, semanas, fecha_inicio_date, matriz_demanda, libres_por_semana_base, fechas_festivas_sel
         )
 
         st.subheader("3. Malla Horaria Generada")
