@@ -353,7 +353,7 @@ if df_empleados is not None:
         st.session_state.matriz_demanda_guardada = matriz_demanda
 
 # ==========================================
-# 3. LÓGICA DE GENERACIÓN EMPALMADA (MÁX 1 ANALISTA LIBRE L-V)
+# 3. LÓGICA DE GENERACIÓN EMPALMADA (CORREGIDA)
 # ==========================================
 def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda, libres_base, festivos_list, df_prev=None):
     dias_totales = semanas_count * 7
@@ -404,7 +404,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                 "vino_descanso": vino_desc
             }
 
-    # REGLA Y FILTRO DE LIBRES: MÁXIMO 1 ANALISTA LIBRE POR DÍA EN L-V
     analistas_cods = [
         row["CODIGO"] for _, row in df_personal.iterrows() 
         if "ANALISTA" in str(row["CARGO"]).upper()
@@ -431,19 +430,19 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             "VINO_DE_DESCANSO": hist.get("vino_descanso", False),
         }
 
-        # Asignar libres asegurando máximo 1 analista libre el mismo día de L-V
+        # Asignar patrones de libres asegurando máximo 1 analista libre en L-V
         libres_calculados = calcular_patron_dias_libres(semanas_count, libres_base, festivos_list, fecha_base)
         
         if cod in analistas_cods:
             for s in range(semanas_count):
                 libres_sem = [idx for idx in libres_calculados if (s * 7) <= idx < ((s + 1) * 7)]
                 for libre_idx in libres_sem:
-                    nombre_d = dias_semana_es[fecha_base + timedelta(days=libre_idx)]
+                    # CORRECCIÓN DE ERROR EN FECHA INDEXADA
+                    dt_libre = fecha_base + timedelta(days=libre_idx)
+                    nombre_d = dias_semana_es[dt_libre.weekday()]
                     if nombre_d in ["LUNES", "MARTES", "MIÉRCOLES", "JUEVES", "VIERNES"]:
-                        # Contar cuántos analistas ya descansan ese día
                         libres_ya = sum(1 for a_c in dias_libres_emp if a_c in analistas_cods and libre_idx in dias_libres_emp[a_c])
                         if libres_ya >= 1:
-                            # Mover el libre a un día disponible
                             dias_posibles = [d_i for d_i in range(s * 7, (s + 1) * 7) if d_i not in libres_calculados]
                             if dias_posibles:
                                 libres_calculados.remove(libre_idx)
