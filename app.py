@@ -174,12 +174,20 @@ def calcular_patron_dias_libres(semanas_count, libres_base, festivos_list, fecha
     return set([random.randint(s * 7, (s * 7) + 6) for s in range(semanas_count)])
 
 # ==========================================
-# 1. CARGA DE PERSONAL
+# 1. CARGA DE PERSONAL Y SEMANA ANTERIOR
 # ==========================================
-st.subheader("1. Cargar Lista de Personal")
-uploaded_file = st.file_uploader("Subir archivo Excel o CSV", type=["xlsx", "csv"])
+st.subheader("1. Cargar Lista de Personal y Semana Anterior")
+
+col_f1, col_f2 = st.columns(2)
 
 df_empleados = None
+df_semana_anterior = None
+
+with col_f1:
+    uploaded_file = st.file_uploader("1. Subir Lista de Personal (Excel / CSV)", type=["xlsx", "csv"], key="file_personal")
+
+with col_f2:
+    uploaded_prev_file = st.file_uploader("2. Subir Malla de la Semana Anterior (Opcional)", type=["xlsx", "csv"], key="file_prev")
 
 if uploaded_file is not None:
     try:
@@ -209,7 +217,19 @@ if uploaded_file is not None:
             st.success(f"¡Se cargaron {len(df_empleados)} empleados exitosamente!")
             st.dataframe(df_empleados, use_container_width=True)
     except Exception as e:
-        st.error(f"Error al procesar el archivo: {e}")
+        st.error(f"Error al procesar el archivo de personal: {e}")
+
+if uploaded_prev_file is not None:
+    try:
+        if uploaded_prev_file.name.endswith(".csv"):
+            df_semana_anterior = pd.read_csv(uploaded_prev_file)
+        else:
+            df_semana_anterior = pd.read_excel(uploaded_prev_file)
+        
+        df_semana_anterior.columns = [str(c).upper().strip() for c in df_semana_anterior.columns]
+        st.info("✅ Malla de la semana anterior cargada para empalmar descansos y rotaciones.")
+    except Exception as e:
+        st.warning(f"No se pudo leer la semana anterior: {e}")
 
 # ==========================================
 # 2. CONFIGURACIÓN COMPLETA DE REGLAS Y CUPOS
@@ -238,7 +258,6 @@ if df_empleados is not None:
         with st.expander(f"🔹 Configuración para: {cargo}", expanded=not usar_default):
             matriz_demanda[cargo] = {d: {} for d in dias_semana_es}
             
-            # --- SECCIÓN LUNES A VIERNES BASE ---
             st.markdown("#### 📌 Semana Laboral Base (Lunes a Viernes)")
             col_lv1, col_lv2 = st.columns([3, 2])
             with col_lv1:
@@ -253,7 +272,6 @@ if df_empleados is not None:
             
             turnos_final_lv = list(t_base_lv) + ([txt_base_lv.strip()] if txt_base_lv.strip() else [])
 
-            # --- OPCIÓN DE DÍAS DIFERENTES (EXCEPCIONES) ---
             st.markdown("**Marcar si algún día de la semana laboral es diferente:**")
             cols_chk = st.columns(5)
             dias_excepcion = {}
@@ -310,7 +328,6 @@ if df_empleados is not None:
                         for d_reg in dias_regulares:
                             matriz_demanda[cargo][d_reg][t_nom] = cant_reg
 
-            # --- SECCIÓN FIN DE SEMANA ---
             st.markdown("---")
             st.markdown("#### 🗓️ Fin de Semana (Sábado y Domingo)")
             col_sab, col_dom = st.columns(2)
@@ -333,10 +350,12 @@ if df_empleados is not None:
                     cant_d = st.number_input(f"Dom: {t_nom}", min_value=1, max_value=20, value=1, key=f"num_dom_{cargo}_{t_nom}")
                     matriz_demanda[cargo]["DOMINGO"][t_nom] = cant_d
 
+        st.session_state.matriz_demanda_guardada = matriz_demanda
+
 # ==========================================
-# 3. LÓGICA DE GENERACIÓN
+# 3. LÓGICA DE GENERACIÓN EMPALMADA CON HISTORIAL
 # ==========================================
-def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda, libres_base, festivos_list):
+def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda, libres_base, festivos_list, df_prev=None):
     dias_totales = semanas_count * 7
     fecha_base = datetime.combine(fecha_base_date, datetime.min.time())
     anio_ref = fecha_base_date.year
@@ -353,11 +372,46 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
     programacion_matriz = {}
     dias_libres_emp = {}
 
+    # Procesar historial previo
+    info_historial = {}
+    if df_prev is not None and "CODIGO" in df_prev.columns:
+        ult_col = df_prev.columns[-1]
+        for _, fila in df_prev.iterrows():
+            c_cod = fila["CODIGO"]
+            val_ult = str(fila[ult_col]).strip()
+            
+            salida_calc = None
+            franja_calc = None
+            vino_desc = False
+            
+            if val_ult.upper() in ["L", "L (DESCANSO)", "VACACIONES", "PERMISO", "LICENCIA"]:
+                vino_desc = True
+            else:
+                parsed_h = extraer_horas(val_ult)
+                if parsed_h:
+                    h_i, m_i, h_f, m_f = parsed_h
+                    dia_dom_prev = fecha_base - timedelta(days=1)
+                    if h_f >= 24:
+                        salida_calc = dia_dom_prev.replace(hour=h_f - 24, minute=m_f) + timedelta(days=1)
+                    elif h_f < h_i:
+                        salida_calc = dia_dom_prev.replace(hour=h_f, minute=m_f) + timedelta(days=1)
+                    else:
+                        salida_calc = dia_dom_prev.replace(hour=h_f, minute=m_f)
+                    franja_calc = clasificar_franja(val_ult)
+            
+            info_historial[c_cod] = {
+                "salida": salida_calc,
+                "franja": franja_calc,
+                "vino_descanso": vino_desc
+            }
+
     for _, emp in df_personal.iterrows():
         cod = emp["CODIGO"]
         f_ini_inc = parsear_fecha_incidencia(emp.get("INCIDENCIA_INI"), anio_ref)
         f_fin_inc = parsear_fecha_incidencia(emp.get("INCIDENCIA_FIN"), anio_ref)
         tipo_inc = str(emp.get("INCIDENCIA_TIPO", "")).strip().upper()
+
+        hist = info_historial.get(cod, {})
 
         programacion_matriz[cod] = {
             "CODIGO": cod,
@@ -367,9 +421,9 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             "INCIDENCIA_TIPO": tipo_inc if tipo_inc and tipo_inc != "NAN" else None,
             "INCIDENCIA_INI": f_ini_inc,
             "INCIDENCIA_FIN": f_fin_inc,
-            "SALIDA_PREVIA": None,
-            "ULTIMA_FRANJA": None,
-            "VINO_DE_DESCANSO": False,
+            "SALIDA_PREVIA": hist.get("salida"),
+            "ULTIMA_FRANJA": hist.get("franja"),
+            "VINO_DE_DESCANSO": hist.get("vino_descanso", False),
         }
 
         dias_libres_emp[cod] = calcular_patron_dias_libres(semanas_count, libres_base, festivos_list, fecha_base)
@@ -471,7 +525,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     programacion_matriz[cod_emp][col_nombre] = "L"
                     programacion_matriz[cod_emp]["VINO_DE_DESCANSO"] = True
 
-    # CONTROL Y AUDITORÍA FINAL DE DÍAS LIBRES OBLIGATORIOS POR SEMANA
+    # AUDITORÍA DE DÍAS LIBRES OBLIGATORIOS POR SEMANA
     for cod_emp, datos in programacion_matriz.items():
         for s in range(semanas_count):
             cols_semana = columnas_fechas[s * 7 : (s + 1) * 7]
@@ -502,7 +556,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
 if df_empleados is not None:
     if st.button("⚡ Generar Malla Horaria Completa"):
         df_resultado = generar_malla_matriz(
-            df_empleados, semanas, fecha_inicio_date, matriz_demanda, libres_por_semana_base, fechas_festivas_sel
+            df_empleados, semanas, fecha_inicio_date, matriz_demanda, libres_por_semana_base, fechas_festivas_sel, df_semana_anterior
         )
 
         st.subheader("3. Malla Horaria Generada")
