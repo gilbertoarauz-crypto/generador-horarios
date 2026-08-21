@@ -6,7 +6,25 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="Generador de Horarios por Cargo", layout="wide")
-st.title("📅 Generador de Horarios con Validación de 12h de Descanso")
+st.title("📅 Generador de Horarios con Selector de Turnos por Cargo")
+
+# ==========================================
+# CATÁLOGO DE HORARIOS PREDEFINIDOS
+# ==========================================
+CATALOGO_TURNOS = [
+    "03:00-11:00",
+    "06:00-15:00",
+    "07:00-16:00",
+    "08:00-15:00 CAP",
+    "08:00-17:00",
+    "11:00-19:00",
+    "11:00-19:00 AT",
+    "11:00-27:00 AT",
+    "19:00-27:00",
+    "19:00-35:00 AT",
+    "20:00-28:00",
+    "22:00-30:00",
+]
 
 # ==========================================
 # CONFIGURACIÓN GENERAL
@@ -29,7 +47,6 @@ dias_semana_es = [
 # FUNCIONES AUXILIARES DE TIEMPO
 # ==========================================
 def extraer_horas(texto_turno):
-    """Extrae la hora de entrada y salida de un texto como '19:00-27:00 AT'"""
     coincidencia = re.search(r"(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})", str(texto_turno))
     if coincidencia:
         h_ini, m_ini, h_fin, m_fin = map(int, coincidencia.groups())
@@ -37,7 +54,6 @@ def extraer_horas(texto_turno):
     return None
 
 def calcular_descanso_suficiente(salida_previa_dt, entrada_actual_dt, min_horas=12):
-    """Verifica si entre dos fechas/horas existen al menos min_horas de descanso."""
     if salida_previa_dt is None:
         return True
     diferencia_horas = (entrada_actual_dt - salida_previa_dt).total_seconds() / 3600.0
@@ -73,31 +89,50 @@ if uploaded_file is not None:
         st.error(f"Error al procesar el archivo: {e}")
 
 # ==========================================
-# 2. CONFIGURACIÓN DE HORARIOS POR CARGO
+# 2. SELECTOR VISUAL DE HORARIOS POR CARGO
 # ==========================================
 matriz_reglas = {}
 
 if df_empleados is not None:
-    st.subheader("2. Matriz de Horarios por Cargo y Día")
-    st.info("Ingresa los turnos en formato HH:MM-HH:MM (ejemplo: 08:00-17:00, 19:00-27:00).")
+    st.subheader("2. Selección de Horarios por Cargo y Día")
+    st.info("Selecciona los turnos permitidos desde la lista desplegable o añade nuevos turnos personalizados si lo requieres.")
 
     cargos_unicos = df_empleados["CARGO"].dropna().unique().tolist()
 
     for cargo in cargos_unicos:
-        with st.expander(f"🔹 Configurar horarios para: {cargo}", expanded=True):
+        with st.expander(f"🔹 Seleccionar turnos para: {cargo}", expanded=True):
             matriz_reglas[cargo] = {}
             cols = st.columns(7)
+            
             for idx_dia, dia_nombre in enumerate(dias_semana_es):
-                val_defecto = "08:00-17:00, 11:00-19:00" if idx_dia < 5 else "08:00-15:00 CAP"
-                matriz_reglas[cargo][dia_nombre] = cols[idx_dia].text_area(
-                    label=dia_nombre,
-                    value=val_defecto,
-                    key=f"{cargo}_{dia_nombre}",
-                    height=80,
-                )
+                # Opciones por defecto dependiendo del día
+                defecto = ["08:00-17:00", "11:00-19:00"] if idx_dia < 5 else ["08:00-15:00 CAP"]
+                
+                with cols[idx_dia]:
+                    st.markdown(f"**{dia_nombre}**")
+                    turnos_sel = st.multiselect(
+                        label="Turnos base",
+                        options=CATALOGO_TURNOS,
+                        default=[t for t in defecto if t in CATALOGO_TURNOS],
+                        key=f"ms_{cargo}_{dia_nombre}"
+                    )
+                    
+                    turno_extra = st.text_input(
+                        label="Nuevo turno (opcional)",
+                        value="",
+                        placeholder="Ej: 14:00-22:00",
+                        key=f"tx_{cargo}_{dia_nombre}"
+                    )
+                    
+                    # Unir turnos seleccionados + nuevo turno ingresado
+                    turnos_totales = list(turnos_sel)
+                    if turno_extra.strip():
+                        turnos_totales.append(turno_extra.strip())
+                        
+                    matriz_reglas[cargo][dia_nombre] = turnos_totales
 
 # ==========================================
-# 3. LÓGICA DE GENERACIÓN
+# 3. LÓGICA DE GENERACIÓN CON VALIDACIÓN 12H
 # ==========================================
 def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_cargos):
     dias_totales = semanas_count * 7
@@ -138,8 +173,8 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_car
                 fila[col_nombre] = "L"
                 salida_anterior_dt = None
             else:
-                turnos_txt = reglas_cargos.get(cargo_emp, {}).get(nombre_dia_semana, "")
-                opciones_turnos = [t.strip() for t in turnos_txt.split(",") if t.strip()]
+                opciones_turnos = reglas_cargos.get(cargo_emp, {}).get(nombre_dia_semana, [])
+                opciones_turnos = list(opciones_turnos)
 
                 random.shuffle(opciones_turnos)
                 turno_seleccionado = None
@@ -151,11 +186,9 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_car
                         h_ini, m_ini, h_fin, m_fin = parsed_h
                         entrada_dt = fecha_col.replace(hour=h_ini, minute=m_ini)
 
-                        # Evaluar si cumple 12h de descanso previo
                         if calcular_descanso_suficiente(salida_anterior_dt, entrada_dt, min_horas=12):
                             turno_seleccionado = t_candidato
                             
-                            # Calcular la nueva hora de salida exacta
                             if h_fin >= 24:
                                 nueva_salida_dt = (fecha_col + timedelta(days=1)).replace(hour=h_fin - 24, minute=m_fin)
                             elif h_fin < h_ini:
@@ -164,7 +197,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_car
                                 nueva_salida_dt = fecha_col.replace(hour=h_fin, minute=m_fin)
                             break
 
-                # Si ningún turno cumple las 12 horas, asigna día LIBRE para proteger al trabajador
                 if turno_seleccionado is None:
                     if opciones_turnos:
                         fila[col_nombre] = "L (Descanso)"
