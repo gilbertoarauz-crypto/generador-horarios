@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="Generador de Horarios Pro", layout="wide")
-st.title("📅 Generador de Horarios Avanzado & Módulo de Tareas")
+st.title("📅 Generador de Horarios Avanzado & Cobertura de Tareas")
 
 # ==========================================
 # CATÁLOGO DE HORARIOS PREDEFINIDOS
@@ -31,29 +31,29 @@ CATALOGO_TURNOS = [
 # ==========================================
 TURNOS_DEFAULT_POR_CARGO = {
     "Analista de Operaciones": {
-        "habil": ["06:00-15:00", "11:00-19:00", "03:00-11:00", "19:00-27:00"],
-        "sabado": ["06:00-15:00", "11:00-19:00", "03:00-11:00", "19:00-27:00"],
-        "domingo": ["11:00-19:00", "03:00-11:00", "19:00-27:00"]
+        "habil": ["03:00-11:00", "11:00-19:00", "06:00-15:00", "19:00-27:00"],
+        "sabado": ["03:00-11:00", "11:00-19:00", "19:00-27:00", "06:00-15:00"],
+        "domingo": ["03:00-11:00", "11:00-19:00", "19:00-27:00"]
     },
     "Auxiliar de Operaciones": {
-        "habil": ["11:00-19:00", "03:00-11:00", "19:00-27:00", "20:00-28:00"],
-        "sabado": ["11:00-19:00", "03:00-11:00", "19:00-27:00", "22:00-30:00"],
-        "domingo": ["11:00-19:00", "03:00-11:00", "19:00-27:00", "20:00-28:00"]
+        "habil": ["03:00-11:00", "03:00-11:00", "11:00-19:00", "11:00-19:00", "19:00-27:00", "20:00-28:00"],
+        "sabado": ["03:00-11:00", "03:00-11:00", "11:00-19:00", "11:00-19:00", "19:00-27:00", "22:00-30:00"],
+        "domingo": ["03:00-11:00", "03:00-11:00", "11:00-19:00", "11:00-19:00", "19:00-27:00", "20:00-28:00"]
     },
     "Operador Líder": {
-        "habil": ["20:00-28:00"],
+        "habil": ["20:00-28:00", "20:00-28:00"],
         "sabado": ["20:00-28:00"],
-        "domingo": ["20:00-28:00"]
+        "domingo": ["20:00-28:00", "20:00-28:00"]
     },
     "Técnico de Operaciones": {
-        "habil": ["11:00-19:00", "03:00-11:00", "19:00-27:00"],
-        "sabado": ["11:00-19:00", "03:00-11:00", "19:00-27:00"],
-        "domingo": ["11:00-19:00", "03:00-11:00", "19:00-27:00"]
+        "habil": ["03:00-11:00", "11:00-19:00", "19:00-27:00", "06:00-15:00"],
+        "sabado": ["03:00-11:00", "11:00-19:00", "19:00-27:00", "06:00-15:00"],
+        "domingo": ["03:00-11:00", "11:00-19:00", "19:00-27:00", "06:00-15:00"]
     },
     "Auxiliar de Alistamiento": {
-        "habil": ["20:00-28:00", "22:00-30:00", "08:00-17:00"],
-        "sabado": ["20:00-28:00", "22:00-30:00", "08:00-17:00"],
-        "domingo": ["20:00-28:00", "22:00-30:00", "08:00-17:00"]
+        "habil": ["08:00-17:00", "22:00-30:00", "20:00-28:00", "20:00-28:00"],
+        "sabado": ["08:00-17:00", "20:00-28:00", "22:00-30:00"],
+        "domingo": ["08:00-17:00", "20:00-28:00", "22:00-30:00", "20:00-28:00"]
     }
 }
 
@@ -227,29 +227,25 @@ if df_empleados is not None:
         matriz_demanda[cargo] = {d: {} for d in dias_semana_es}
         dias_habiles = ["LUNES", "MARTES", "MIÉRCOLES", "JUEVES", "VIERNES"]
         
+        # Mapear frecuencia de turnos repetidos
         for dh in dias_habiles:
             for t_def in defaults_cargo["habil"]:
-                matriz_demanda[cargo][dh][t_def] = 1
+                matriz_demanda[cargo][dh][t_def] = matriz_demanda[cargo][dh].get(t_def, 0) + 1
         for t_def in defaults_cargo["sabado"]:
-            matriz_demanda[cargo]["SÁBADO"][t_def] = 1
+            matriz_demanda[cargo]["SÁBADO"][t_def] = matriz_demanda[cargo]["SÁBADO"].get(t_def, 0) + 1
         for t_def in defaults_cargo["domingo"]:
-            matriz_demanda[cargo]["DOMINGO"][t_def] = 1
+            matriz_demanda[cargo]["DOMINGO"][t_def] = matriz_demanda[cargo]["DOMINGO"].get(t_def, 0) + 1
 
         with st.expander(f"🔹 Configuración para: {cargo}", expanded=not usar_default):
-            t_base_lv = st.multiselect("Turnos base Lunes-Viernes", options=CATALOGO_TURNOS, default=defaults_cargo["habil"], key=f"ms_base_{cargo}")
+            t_base_lv = st.multiselect("Turnos base Lunes-Viernes", options=CATALOGO_TURNOS, default=list(set(defaults_cargo["habil"])), key=f"ms_base_{cargo}")
             txt_base_lv = st.text_input("Nuevo turno L-V (opcional)", key=f"tx_base_{cargo}")
             turnos_final_lv = list(t_base_lv) + ([txt_base_lv.strip()] if txt_base_lv.strip() else [])
 
-            for d_reg in dias_habiles:
-                matriz_demanda[cargo][d_reg] = {t: 1 for t in turnos_final_lv}
-
             col_sab, col_dom = st.columns(2)
             with col_sab:
-                t_sab = st.multiselect("Turnos Sábado", options=CATALOGO_TURNOS, default=defaults_cargo["sabado"], key=f"ms_sab_{cargo}")
-                matriz_demanda[cargo]["SÁBADO"] = {t: 1 for t in t_sab}
+                t_sab = st.multiselect("Turnos Sábado", options=CATALOGO_TURNOS, default=list(set(defaults_cargo["sabado"])), key=f"ms_sab_{cargo}")
             with col_dom:
-                t_dom = st.multiselect("Turnos Domingo", options=CATALOGO_TURNOS, default=defaults_cargo["domingo"], key=f"ms_dom_{cargo}")
-                matriz_demanda[cargo]["DOMINGO"] = {t: 1 for t in t_dom}
+                t_dom = st.multiselect("Turnos Domingo", options=CATALOGO_TURNOS, default=list(set(defaults_cargo["domingo"])), key=f"ms_dom_{cargo}")
 
 # ==========================================
 # 3. GENERACIÓN DE MALLA
@@ -435,70 +431,110 @@ if "df_resultado" in st.session_state:
     st.markdown("---")
 
     # ==========================================
-    # 5. CARGA Y ANÁLISIS DE TAREAS OPERATIVAS
+    # 5. MÓDULO ADAPTADO CON TU FORMATO DE MATRIZ DE TAREAS
     # ==========================================
-    st.subheader("📋 4. Asignación y Cobertura de Tareas Operativas")
-    st.markdown("Sube un archivo de tareas para comparar las **horas/personas requeridas vs disponibles por cargo**.")
+    st.subheader("📋 4. Matriz de Cobertura de Tareas por Cargo")
+    st.markdown("Sube una tabla en tu formato (`CARGO`, `Habil`, `sabado`, `Domingo`) o utiliza la plantilla estándar integrada.")
 
-    def generar_plantilla_tareas():
-        ejemplo = pd.DataFrame([
-            {"TAREA": "Alistamiento de Pedidos", "CARGO": "Auxiliar de Alistamiento", "HORAS_REQUERIDAS": 8, "PRIORIDAD": "ALTA"},
-            {"TAREA": "Supervisión de Turno Noche", "CARGO": "Operador Líder", "HORAS_REQUERIDAS": 8, "PRIORIDAD": "CRÍTICA"},
-            {"TAREA": "Control de Inventario", "CARGO": "Analista de Operaciones", "HORAS_REQUERIDAS": 6, "PRIORIDAD": "MEDIA"}
-        ])
+    # Generar la plantilla en el formato exacto de tu imagen
+    def generar_plantilla_formato_imagen():
+        filas = []
+        for c, t_dict in TURNOS_DEFAULT_POR_CARGO.items():
+            max_len = max(len(t_dict["habil"]), len(t_dict["sabado"]), len(t_dict["domingo"]))
+            for i in range(max_len):
+                filas.append({
+                    "CARGO": c,
+                    "Habil": t_dict["habil"][i] if i < len(t_dict["habil"]) else "",
+                    "sabado": t_dict["sabado"][i] if i < len(t_dict["sabado"]) else "",
+                    "Domingo": t_dict["domingo"][i] if i < len(t_dict["domingo"]) else ""
+                })
+        df_mat = pd.DataFrame(filas)
         buf = io.BytesIO()
-        ejemplo.to_excel(buf, index=False)
+        df_mat.to_excel(buf, index=False)
         return buf.getvalue()
 
-    st.download_button(
-        label="📄 Descargar Plantilla de Ejemplo para Tareas",
-        data=generar_plantilla_tareas(),
-        file_name="Plantilla_Tareas.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    col_btn_down, col_upload = st.columns([1, 2])
+    with col_btn_down:
+        st.download_button(
+            label="📄 Descargar Plantilla Matriz de Tareas",
+            data=generar_plantilla_formato_imagen(),
+            file_name="Matriz_Tareas_Requeridas.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
-    file_tareas = st.file_uploader("Subir Archivo de Tareas (Excel/CSV)", type=["xlsx", "csv"], key="file_tareas")
+    with col_upload:
+        file_tareas = st.file_uploader("Subir Archivo de Matriz de Tareas (Opcional)", type=["xlsx", "csv"], key="file_tareas_matriz")
 
+    # Si sube archivo, lo leemos; si no, construimos el DataFrame default equivalente a la imagen
     if file_tareas is not None:
         try:
-            df_tareas = pd.read_csv(file_tareas) if file_tareas.name.endswith(".csv") else pd.read_excel(file_tareas)
-            df_tareas.columns = [str(c).upper().strip() for c in df_tareas.columns]
-
-            req_cols_t = {"TAREA", "CARGO", "HORAS_REQUERIDAS"}
-            if not req_cols_t.issubset(set(df_tareas.columns)):
-                st.error(f"El archivo debe tener las columnas: {req_cols_t}")
-            else:
-                cols_fechas_malla = [c for c in df_resultado.columns if c not in ["CODIGO", "NOMBRE", "CARGO"]]
-                
-                disponibilidad_por_cargo = {}
-                for cargo in df_resultado["CARGO"].unique():
-                    sub_df = df_resultado[df_resultado["CARGO"] == cargo]
-                    total_turnos_activos = 0
-                    
-                    for col in cols_fechas_malla:
-                        turnos = sub_df[col].apply(lambda x: 1 if str(x).strip().upper() not in ["L", "VACACIONES", "LICENCIA", "INCAPACIDAD", "PERMISO"] else 0)
-                        total_turnos_activos += turnos.sum()
-                    
-                    disponibilidad_por_cargo[cargo] = total_turnos_activos * 8
-
-                tareas_resumen = df_tareas.groupby("CARGO")["HORAS_REQUERIDAS"].sum().reset_index()
-                tareas_resumen["HORAS_DISPONIBLES"] = tareas_resumen["CARGO"].map(disponibilidad_por_cargo).fillna(0)
-                tareas_resumen["DIFERENCIA (HORAS)"] = tareas_resumen["HORAS_DISPONIBLES"] - tareas_resumen["HORAS_REQUERIDAS"]
-                tareas_resumen["ESTADO_COBERTURA"] = tareas_resumen["DIFERENCIA (HORAS)"].apply(
-                    lambda x: "✅ CUBIERTO" if x >= 0 else "❌ FALTAN HORAS"
-                )
-
-                st.markdown("#### 📊 Balance de Capacidad por Cargo")
-                st.dataframe(tareas_resumen, use_container_width=True)
-
-                st.markdown("#### 🎯 Cobertura de Tareas Individuales")
-                df_tareas["DISPONIBLE_EN_CARGO"] = df_tareas["CARGO"].map(disponibilidad_por_cargo).fillna(0)
-                df_tareas["ESTADO"] = df_tareas.apply(
-                    lambda row: "✅ Se puede cubrir" if row["DISPONIBLE_EN_CARGO"] >= row["HORAS_REQUERIDAS"] else "⚠️ Riesgo / Faltan Personas",
-                    axis=1
-                )
-                
-                st.dataframe(df_tareas[["TAREA", "CARGO", "HORAS_REQUERIDAS", "ESTADO"]], use_container_width=True)
-
+            df_matriz_req = pd.read_csv(file_tareas) if file_tareas.name.endswith(".csv") else pd.read_excel(file_tareas)
+            df_matriz_req.columns = [str(c).strip() for c in df_matriz_req.columns]
         except Exception as e:
-            st.error(f"Error al analizar las tareas: {e}")
+            st.error(f"Error al leer la matriz: {e}")
+            df_matriz_req = None
+    else:
+        # Reconstrucción idéntica a tu imagen de referencia
+        filas_default = []
+        for c, t_dict in TURNOS_DEFAULT_POR_CARGO.items():
+            max_len = max(len(t_dict["habil"]), len(t_dict["sabado"]), len(t_dict["domingo"]))
+            for i in range(max_len):
+                filas_default.append({
+                    "CARGO": c,
+                    "Habil": t_dict["habil"][i] if i < len(t_dict["habil"]) else "",
+                    "sabado": t_dict["sabado"][i] if i < len(t_dict["sabado"]) else "",
+                    "Domingo": t_dict["domingo"][i] if i < len(t_dict["domingo"]) else ""
+                })
+        df_matriz_req = pd.DataFrame(filas_default)
+
+    if df_matriz_req is not None:
+        st.markdown("#### 📌 Requerimientos de Tareas/Turnos Cargados")
+        st.dataframe(df_matriz_req, use_container_width=True)
+
+        # Cálculo de Auditoría de Cobertura Día a Día
+        cols_fechas_malla = [c for c in df_resultado.columns if c not in ["CODIGO", "NOMBRE", "CARGO"]]
+        
+        reporte_cobertura = []
+
+        for col_f in cols_fechas_malla:
+            dia_nombre_ext = col_f.split("\n")[0].upper()
+            
+            # Clasificar el día en 'Habil', 'sabado' o 'Domingo'
+            if dia_nombre_ext in ["SÁBADO", "SABADO"]:
+                tipo_col_mat = "sabado"
+            elif dia_nombre_ext == "DOMINGO":
+                tipo_col_mat = "Domingo"
+            else:
+                tipo_col_mat = "Habil"
+
+            # Encontrar columna en la matriz subida sin importar mayúsculas
+            col_target_mat = next((c for c in df_matriz_req.columns if c.lower() == tipo_col_mat.lower()), None)
+
+            if col_target_mat:
+                for cargo in df_resultado["CARGO"].unique():
+                    # Requeridos según la matriz de tareas
+                    sub_mat = df_matriz_req[df_matriz_req["CARGO"] == cargo]
+                    turnos_req = [str(x).strip() for x in sub_mat[col_target_mat].dropna().tolist() if str(x).strip() != ""]
+                    
+                    # Disponibles según la Malla Horaria generada
+                    sub_malla = df_resultado[df_resultado["CARGO"] == cargo]
+                    turnos_disp = [str(x).strip() for x in sub_malla[col_f].tolist() if str(x).strip().upper() not in ["L", "VACACIONES", "LICENCIA", "INCAPACIDAD", "PERMISO"]]
+
+                    cant_req = len(turnos_req)
+                    cant_disp = len(turnos_disp)
+                    diferencia = cant_disp - cant_req
+
+                    reporte_cobertura.append({
+                        "FECHA": col_f.replace("\n", " "),
+                        "CARGO": cargo,
+                        "TIPO DÍA": tipo_col_mat.capitalize(),
+                        "TAREAS/TURNOS REQUERIDOS": cant_req,
+                        "PERSONAL DISPONIBLE": cant_disp,
+                        "DIFERENCIA": diferencia,
+                        "ESTADO": "✅ COMPLETO" if diferencia >= 0 else f"⚠️ FALTAN {abs(diferencia)} PERSONAS"
+                    })
+
+        df_reporte = pd.DataFrame(reporte_cobertura)
+        
+        st.markdown("#### 📊 Resultado del Análisis de Cobertura Diario")
+        st.dataframe(df_reporte, use_container_width=True)
