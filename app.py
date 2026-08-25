@@ -219,7 +219,6 @@ if df_empleados is not None:
     cargos_unicos = df_empleados["CARGO"].dropna().unique().tolist()
 
     for cargo in cargos_unicos:
-        defaults_cargo = TURNOS_DEFAULT POR_CARGO if 'TURNOS_DEFAULT_POR_CARGO' in locals() else {}
         defaults_cargo = TURNOS_DEFAULT_POR_CARGO.get(
             cargo, 
             {"habil": ["03:00-11:00", "11:00-19:00", "19:00-27:00"], "sabado": ["08:00-15:00 CAP"], "domingo": ["08:00-15:00 CAP"]}
@@ -441,7 +440,6 @@ if "df_resultado" in st.session_state:
     st.subheader("📋 4. Asignación y Cobertura de Tareas Operativas")
     st.markdown("Sube un archivo de tareas para comparar las **horas/personas requeridas vs disponibles por cargo**.")
 
-    # Generar plantilla de descarga para ayudar al usuario
     def generar_plantilla_tareas():
         ejemplo = pd.DataFrame([
             {"TAREA": "Alistamiento de Pedidos", "CARGO": "Auxiliar de Alistamiento", "HORAS_REQUERIDAS": 8, "PRIORIDAD": "ALTA"},
@@ -470,7 +468,6 @@ if "df_resultado" in st.session_state:
             if not req_cols_t.issubset(set(df_tareas.columns)):
                 st.error(f"El archivo debe tener las columnas: {req_cols_t}")
             else:
-                # 1. Contar horas de trabajo disponibles por Cargo según la Malla
                 cols_fechas_malla = [c for c in df_resultado.columns if c not in ["CODIGO", "NOMBRE", "CARGO"]]
                 
                 disponibilidad_por_cargo = {}
@@ -479,14 +476,11 @@ if "df_resultado" in st.session_state:
                     total_turnos_activos = 0
                     
                     for col in cols_fechas_malla:
-                        # Contar los días que NO son descanso o incidencias
                         turnos = sub_df[col].apply(lambda x: 1 if str(x).strip().upper() not in ["L", "VACACIONES", "LICENCIA", "INCAPACIDAD", "PERMISO"] else 0)
                         total_turnos_activos += turnos.sum()
                     
-                    # Estimación base: 8 horas promedio por turno activo
                     disponibilidad_por_cargo[cargo] = total_turnos_activos * 8
 
-                # 2. Agrupar demandas de tareas por cargo
                 tareas_resumen = df_tareas.groupby("CARGO")["HORAS_REQUERIDAS"].sum().reset_index()
                 tareas_resumen["HORAS_DISPONIBLES"] = tareas_resumen["CARGO"].map(disponibilidad_por_cargo).fillna(0)
                 tareas_resumen["DIFERENCIA (HORAS)"] = tareas_resumen["HORAS_DISPONIBLES"] - tareas_resumen["HORAS_REQUERIDAS"]
@@ -497,9 +491,7 @@ if "df_resultado" in st.session_state:
                 st.markdown("#### 📊 Balance de Capacidad por Cargo")
                 st.dataframe(tareas_resumen, use_container_width=True)
 
-                # 3. Detalle por Tarea Individual
                 st.markdown("#### 🎯 Cobertura de Tareas Individuales")
-                
                 df_tareas["DISPONIBLE_EN_CARGO"] = df_tareas["CARGO"].map(disponibilidad_por_cargo).fillna(0)
                 df_tareas["ESTADO"] = df_tareas.apply(
                     lambda row: "✅ Se puede cubrir" if row["DISPONIBLE_EN_CARGO"] >= row["HORAS_REQUERIDAS"] else "⚠️ Riesgo / Faltan Personas",
