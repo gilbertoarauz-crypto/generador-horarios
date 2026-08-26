@@ -173,6 +173,14 @@ if uploaded_file is not None:
     except Exception as e:
         st.error(f"Error al procesar personal: {e}")
 
+if uploaded_prev_file is not None:
+    try:
+        df_semana_anterior = pd.read_csv(uploaded_prev_file) if uploaded_prev_file.name.endswith(".csv") else pd.read_excel(uploaded_prev_file)
+        df_semana_anterior.columns = [str(c).upper().strip() for c in df_semana_anterior.columns]
+        st.success("✅ Malla anterior cargada correctamente para empalmar rotación.")
+    except Exception as e:
+        st.warning(f"No se pudo leer la semana anterior: {e}")
+
 # ==========================================
 # 2. CONSTRUCCIÓN DE REGLAS DE DEMANDA
 # ==========================================
@@ -194,9 +202,9 @@ if df_empleados is not None:
         matriz_demanda[cargo]["DOMINGO"] = list(req_dom)
 
 # ==========================================
-# 3. GENERACIÓN DE MALLA HORARIA
+# 3. GENERACIÓN DE MALLA HORARIA EMPALMADA
 # ==========================================
-def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda, libres_base, festivos_list):
+def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda, libres_base, festivos_list, df_prev=None):
     dias_totales = semanas_count * 7
     fecha_base = datetime.combine(fecha_base_date, datetime.min.time())
     anio_ref = fecha_base_date.year
@@ -207,6 +215,27 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
         fechas_dt.append(f_actual)
         columnas_fechas.append(f"{dias_semana_es[f_actual.weekday()]}\n{f_actual.strftime('%d-%b')}")
 
+    # PARSEAR SEMANA ANTERIOR PARA MANTENER SECUENCIA
+    info_historial = {}
+    if df_prev is not None and "CODIGO" in df_prev.columns:
+        cols_dias_prev = [c for c in df_prev.columns if c not in ["CODIGO", "NOMBRE", "CARGO", "ESTADO"]]
+        if cols_dias_prev:
+            for _, fila in df_prev.iterrows():
+                c_cod = str(fila["CODIGO"]).strip()
+                val_ult = str(fila[cols_dias_prev[-1]]).strip()  # Último turno (Domingo anterior)
+                
+                # Averiguar si terminó trabajando y cuál fue su turno exacto
+                es_descanso_o_inc = val_ult.upper() in ["L", "AO", "VACACIONES", "LICENCIA", "INCAPACIDAD", "PERMISO"]
+                
+                turno_ult = None if es_descanso_o_inc else val_ult
+                franja_ult = None if es_descanso_o_inc else clasificar_franja(val_ult)
+
+                info_historial[c_cod] = {
+                    "ultimo_turno": turno_ult,
+                    "ultima_franja": franja_ult,
+                    "termino_en_descanso": es_descanso_o_inc
+                }
+
     analistas = [emp for _, emp in df_personal.iterrows() if "ANALISTA" in str(emp["CARGO"]).upper()]
     total_analistas = len(analistas)
 
@@ -215,14 +244,19 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
     for _, emp in df_personal.iterrows():
         cod = str(emp["CODIGO"]).strip()
         cargo_emp = str(emp["CARGO"]).strip()
+        hist = info_historial.get(cod, {})
+
+        # Si venía trabajando en el bloque anterior, mantenemos el mismo turno
+        turno_previo_bloque = hist.get("ultimo_turno") if not hist.get("termino_en_descanso", True) else None
+        franja_previa = hist.get("ultima_franja")
 
         programacion_matriz[cod] = {
             "CODIGO": cod, "NOMBRE": emp["NOMBRE"], "CARGO": cargo_emp,
             "INCIDENCIA_TIPO": emp.get("INCIDENCIA_TIPO"),
             "INCIDENCIA_INI": parsear_fecha_incidencia(emp.get("INCIDENCIA_INI"), anio_ref),
             "INCIDENCIA_FIN": parsear_fecha_incidencia(emp.get("INCIDENCIA_FIN"), anio_ref),
-            "TURNO_FIJO_BLOQUE": None,  # Mantiene exactamente el mismo turno durante todo el bloque
-            "ULTIMA_FRANJA": None
+            "TURNO_FIJO_BLOQUE": turno_previo_bloque,
+            "ULTIMA_FRANJA": franja_previa
         }
 
     # Asignación controlada de descansos
@@ -285,33 +319,32 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                 if d_emp["INCIDENCIA_TIPO"] and d_emp["INCIDENCIA_INI"] and d_emp["INCIDENCIA_FIN"]:
                     if d_emp["INCIDENCIA_INI"] <= fecha_actual_date <= d_emp["INCIDENCIA_FIN"]:
                         programacion_matriz[cod_emp][col_nombre] = d_emp["INCIDENCIA_TIPO"]
-                        d_emp["TURNO_FIJO_BLOQUE"] = None  # Al descansar se resetea para poder rotar después
+                        d_emp["TURNO_FIJO_BLOQUE"] = None
                         continue
 
                 # 2. Día Libre Programado
                 if idx_dia in dias_libres_emp[cod_emp]:
                     programacion_matriz[cod_emp][col_nombre] = "L"
-                    d_emp["TURNO_FIJO_BLOQUE"] = None  # Al descansar se resetea para poder rotar después
+                    d_emp["TURNO_FIJO_BLOQUE"] = None
                     continue
 
-                # 3. Asignación manteniendo exactamente EL MISMO TURNO hasta el descanso
+                # 3. Asignación empalmando el turno del bloque previo o rotando post-libre
                 turno_a_asignar = None
 
-                # Si ya tiene un turno fijado para este bloque de trabajo, intenta mantener ESE MISMO TURNO
+                # Si venía en un bloque activo (incluyendo la semana anterior), mantenemos el mismo turno
                 if d_emp["TURNO_FIJO_BLOQUE"] is not None:
                     mismo_turno = d_emp["TURNO_FIJO_BLOQUE"]
                     if mismo_turno in turnos_disponibles_dia:
                         turno_a_asignar = mismo_turno
                         turnos_disponibles_dia.remove(mismo_turno)
                     else:
-                        # Si ese turno exacto está ocupado, busca en su misma franja
                         franja_buscada = clasificar_franja(mismo_turno)
                         candidatos_misma_franja = [t for t in turnos_disponibles_dia if clasificar_franja(t) == franja_buscada]
                         if candidatos_misma_franja:
                             turno_a_asignar = candidatos_misma_franja[0]
                             turnos_disponibles_dia.remove(turno_a_asignar)
 
-                # Si viene saliendo de un descanso 'L' o incidencia, rota según la franja deseada
+                # Si rota post-descanso/incidencia
                 if turno_a_asignar is None and turnos_disponibles_dia:
                     franja_ult = d_emp["ULTIMA_FRANJA"]
                     franjas_permitidas = obtener_siguiente_franja_permitida(franja_ult) if franja_ult else ["NOCHE", "TARDE", "MAÑANA"]
@@ -339,7 +372,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
 if df_empleados is not None:
     if st.button("⚡ Generar Horarios y Auditar Tareas"):
         st.session_state.df_resultado = generar_malla_matriz(
-            df_empleados, semanas, fecha_inicio_date, matriz_demanda, libres_por_semana_base, fechas_festivas_sel
+            df_empleados, semanas, fecha_inicio_date, matriz_demanda, libres_por_semana_base, fechas_festivas_sel, df_semana_anterior
         )
 
 if "df_resultado" in st.session_state:
