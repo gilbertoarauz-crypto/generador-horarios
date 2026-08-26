@@ -90,7 +90,6 @@ def clasificar_franja(texto_turno):
         return "NOCHE"
 
 def obtener_siguiente_franja_permitida(franja_actual):
-    # Secuencia de rotación: NOCHE -> TARDE -> MAÑANA -> NOCHE
     if franja_actual == "NOCHE":
         return ["TARDE", "NOCHE"]
     elif franja_actual == "TARDE":
@@ -98,12 +97,6 @@ def obtener_siguiente_franja_permitida(franja_actual):
     elif franja_actual == "MAÑANA":
         return ["NOCHE", "MAÑANA"]
     return ["NOCHE", "TARDE", "MAÑANA"]
-
-def calcular_descanso_suficiente(salida_previa_dt, entrada_actual_dt, min_horas=12):
-    if salida_previa_dt is None:
-        return True
-    diferencia_horas = (entrada_actual_dt - salida_previa_dt).total_seconds() / 3600.0
-    return diferencia_horas >= min_horas
 
 def parsear_fecha_incidencia(val_fecha, anio_referencia):
     if pd.isna(val_fecha) or str(val_fecha).strip() == "":
@@ -116,7 +109,8 @@ def parsear_fecha_incidencia(val_fecha, anio_referencia):
     except Exception:
         return None
 
-def generar_dias_libres_exactos(semanas_count, libres_base, festivos_list, fecha_inicio_dt):
+def generar_dias_libres_exactos(semanas_count, libres_base, festivos_list, fecha_inicio_dt, es_analista=False):
+    """Garantiza la cantidad EXACTA de libres. Si es analista, restinge los libres a Jueves-Domingo."""
     dias_libres_indices = set()
     for s in range(semanas_count):
         inicio_sem = fecha_inicio_dt + timedelta(days=s * 7)
@@ -124,8 +118,13 @@ def generar_dias_libres_exactos(semanas_count, libres_base, festivos_list, fecha
         hay_festivo_sem = any(inicio_sem.date() <= f <= fin_sem.date() for f in festivos_list)
         cant_libres_semana = libres_base + (1 if hay_festivo_sem else 0)
         
-        dias_semana = list(range(s * 7, (s + 1) * 7))
-        dias_libres_indices.update(random.sample(dias_semana, cant_libres_semana))
+        if es_analista:
+            # Días 3, 4, 5, 6 corresponden a JUEVES, VIERNES, SÁBADO, DOMINGO
+            dias_permitidos = [s * 7 + i for i in [3, 4, 5, 6]]
+        else:
+            dias_permitidos = list(range(s * 7, (s + 1) * 7))
+            
+        dias_libres_indices.update(random.sample(dias_permitidos, cant_libres_semana))
     return dias_libres_indices
 
 # ==========================================
@@ -213,7 +212,7 @@ if df_empleados is not None:
         matriz_demanda[cargo]["DOMINGO"] = list(req_dom)
 
 # ==========================================
-# 3. GENERACIÓN CON ROTACIÓN Y DESCANSO DE 12H
+# 3. GENERACIÓN DE MALLA
 # ==========================================
 def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda, libres_base, festivos_list):
     dias_totales = semanas_count * 7
@@ -230,15 +229,18 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
 
     for _, emp in df_personal.iterrows():
         cod = str(emp["CODIGO"]).strip()
+        cargo_emp = str(emp["CARGO"]).strip()
+        es_analista = "ANALISTA" in cargo_emp.upper()
+
         programacion_matriz[cod] = {
-            "CODIGO": cod, "NOMBRE": emp["NOMBRE"], "CARGO": emp["CARGO"],
+            "CODIGO": cod, "NOMBRE": emp["NOMBRE"], "CARGO": cargo_emp,
             "INCIDENCIA_TIPO": emp.get("INCIDENCIA_TIPO"),
             "INCIDENCIA_INI": parsear_fecha_incidencia(emp.get("INCIDENCIA_INI"), anio_ref),
             "INCIDENCIA_FIN": parsear_fecha_incidencia(emp.get("INCIDENCIA_FIN"), anio_ref),
-            "SALIDA_PREVIA": None,
+            "TURNO_ACTUAL_BLOQUE": None,  # Mantiene la misma jornada hasta el descanso
             "ULTIMA_FRANJA": None
         }
-        dias_libres_emp[cod] = generar_dias_libres_exactos(semanas_count, libres_base, festivos_list, fecha_base)
+        dias_libres_emp[cod] = generar_dias_libres_exactos(semanas_count, libres_base, festivos_list, fecha_base, es_analista=es_analista)
 
     for idx_dia, col_nombre in enumerate(columnas_fechas):
         fecha_col = fechas_dt[idx_dia]
@@ -253,60 +255,57 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             for cod_emp in empleados_cargo:
                 d_emp = programacion_matriz[cod_emp]
 
-                # Incidencias
+                # 1. Incidencias
                 if d_emp["INCIDENCIA_TIPO"] and d_emp["INCIDENCIA_INI"] and d_emp["INCIDENCIA_FIN"]:
                     if d_emp["INCIDENCIA_INI"] <= fecha_actual_date <= d_emp["INCIDENCIA_FIN"]:
                         programacion_matriz[cod_emp][col_nombre] = d_emp["INCIDENCIA_TIPO"]
-                        programacion_matriz[cod_emp]["SALIDA_PREVIA"] = None
+                        d_emp["TURNO_ACTUAL_BLOQUE"] = None  # Reiniciar bloque tras incidencia
                         continue
 
-                # Día libre
+                # 2. Día Libre Programado
                 if idx_dia in dias_libres_emp[cod_emp]:
                     programacion_matriz[cod_emp][col_nombre] = "L"
-                    programacion_matriz[cod_emp]["SALIDA_PREVIA"] = None
+                    d_emp["TURNO_ACTUAL_BLOQUE"] = None  # Reiniciar bloque tras descanso 'L'
                     continue
 
-                # Filtrar turnos respetando la rotación (NOCHE -> TARDE -> MAÑANA -> NOCHE) y 12 horas libres
-                franja_ult = d_emp["ULTIMA_FRANJA"]
-                franjas_permitidas = obtener_siguiente_franja_permitida(franja_ult) if franja_ult else ["NOCHE", "TARDE", "MAÑANA"]
+                # 3. Asignación manteniendo estabilidad de turno/jornada
+                turno_a_asignar = None
 
-                turno_asignado = None
-                nueva_salida = None
+                # Si ya venía dentro de un bloque activo de trabajo, intentar asignarle SU MISMO TURNO
+                if d_emp["TURNO_ACTUAL_BLOQUE"] is not None:
+                    mismo_turno = d_emp["TURNO_ACTUAL_BLOQUE"]
+                    if mismo_turno in turnos_disponibles_dia:
+                        turno_a_asignar = mismo_turno
+                        turnos_disponibles_dia.remove(mismo_turno)
+                    else:
+                        # Si ese turno exacto no está libre hoy, busca otro de la MISMA FRANJA
+                        franja_buscada = clasificar_franja(mismo_turno)
+                        candidatos_misma_franja = [t for t in turnos_disponibles_dia if clasificar_franja(t) == franja_buscada]
+                        if candidatos_misma_franja:
+                            turno_a_asignar = candidatos_misma_franja[0]
+                            turnos_disponibles_dia.remove(turno_a_asignar)
 
-                # Intentar ordenar turnos candidatos dando preferencia a la franja de rotación correcta
-                turnos_candidatos = list(turnos_disponibles_dia)
-                turnos_candidatos.sort(key=lambda t: 0 if clasificar_franja(t) in franjas_permitidas else 1)
+                # Si inicia un nuevo bloque tras un descanso 'L' o incidencia
+                if turno_a_asignar is None:
+                    franja_ult = d_emp["ULTIMA_FRANJA"]
+                    franjas_permitidas = obtener_siguiente_franja_permitida(franja_ult) if franja_ult else ["NOCHE", "TARDE", "MAÑANA"]
 
-                for t_cand in turnos_candidatos:
-                    parsed_h = extraer_horas(t_cand)
-                    if parsed_h:
-                        h_i, m_i, h_f, m_f = parsed_h
-                        entrada_dt = fecha_col.replace(hour=h_i, minute=m_i)
+                    turnos_candidatos = list(turnos_disponibles_dia)
+                    turnos_candidatos.sort(key=lambda t: 0 if clasificar_franja(t) in franjas_permitidas else 1)
 
-                        # Validación estricta de las 12 horas de descanso
-                        if calcular_descanso_suficiente(d_emp["SALIDA_PREVIA"], entrada_dt, min_horas=12):
-                            turno_asignado = t_cand
-                            turnos_disponibles_dia.remove(t_cand)
+                    if turnos_candidatos:
+                        turno_a_asignar = turnos_candidatos[0]
+                        turnos_disponibles_dia.remove(turno_a_asignar)
+                    else:
+                        turnos_base = TURNOS_DEFAULT_POR_CARGO.get(cargo, {}).get("habil", ["08:00-17:00"])
+                        turno_a_asignar = turnos_base[0]
 
-                            # Calcular nueva salida exacta del turno
-                            if h_f >= 24:
-                                nueva_salida = (fecha_col + timedelta(days=1)).replace(hour=h_f - 24, minute=m_f)
-                            elif h_f < h_i:
-                                nueva_salida = (fecha_col + timedelta(days=1)).replace(hour=h_f, minute=m_f)
-                            else:
-                                nueva_salida = fecha_col.replace(hour=h_f, minute=m_f)
-                            break
+                # Guardar el turno fijado para el bloque
+                programacion_matriz[cod_emp][col_nombre] = turno_a_asignar
+                d_emp["TURNO_ACTUAL_BLOQUE"] = turno_a_asignar
+                d_emp["ULTIMA_FRANJA"] = clasificar_franja(turno_a_asignar)
 
-                if turno_asignado:
-                    programacion_matriz[cod_emp][col_nombre] = turno_asignado
-                    programacion_matriz[cod_emp]["SALIDA_PREVIA"] = nueva_salida
-                    programacion_matriz[cod_emp]["ULTIMA_FRANJA"] = clasificar_franja(turno_asignado)
-                else:
-                    # Si no encuentra turno válido por descansos o stock, se asigna el primer turno base disponible
-                    turnos_base = TURNOS_DEFAULT_POR_CARGO.get(cargo, {}).get("habil", ["08:00-17:00"])
-                    programacion_matriz[cod_emp][col_nombre] = turnos_base[0]
-
-    return pd.DataFrame([{k: v for k, v in datos.items() if k not in ["INCIDENCIA_TIPO", "INCIDENCIA_INI", "INCIDENCIA_FIN", "SALIDA_PREVIA", "ULTIMA_FRANJA"]} for datos in programacion_matriz.values()])
+    return pd.DataFrame([{k: v for k, v in datos.items() if k not in ["INCIDENCIA_TIPO", "INCIDENCIA_INI", "INCIDENCIA_FIN", "TURNO_ACTUAL_BLOQUE", "ULTIMA_FRANJA"]} for datos in programacion_matriz.values()])
 
 # ==========================================
 # 4. GENERACIÓN DE RESULTADOS Y AUDITORÍA
