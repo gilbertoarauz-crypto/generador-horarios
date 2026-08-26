@@ -68,8 +68,43 @@ if tiene_festivo:
 dias_semana_es = ["LUNES", "MARTES", "MIÉRCOLES", "JUEVES", "VIERNES", "SÁBADO", "DOMINGO"]
 
 # ==========================================
-# FUNCIONES AUXILIARES
+# FUNCIONES AUXILIARES DE TIEMPO Y ROTACIÓN
 # ==========================================
+def extraer_horas(texto_turno):
+    coincidencia = re.search(r"(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})", str(texto_turno))
+    if coincidencia:
+        h_ini, m_ini, h_fin, m_fin = map(int, coincidencia.groups())
+        return h_ini, m_ini, h_fin, m_fin
+    return None
+
+def clasificar_franja(texto_turno):
+    parsed = extraer_horas(texto_turno)
+    if not parsed:
+        return "MAÑANA"
+    h_ini = parsed[0]
+    if 0 <= h_ini < 11:
+        return "MAÑANA"
+    elif 11 <= h_ini < 18:
+        return "TARDE"
+    else:
+        return "NOCHE"
+
+def obtener_siguiente_franja_permitida(franja_actual):
+    # Secuencia de rotación: NOCHE -> TARDE -> MAÑANA -> NOCHE
+    if franja_actual == "NOCHE":
+        return ["TARDE", "NOCHE"]
+    elif franja_actual == "TARDE":
+        return ["MAÑANA", "TARDE"]
+    elif franja_actual == "MAÑANA":
+        return ["NOCHE", "MAÑANA"]
+    return ["NOCHE", "TARDE", "MAÑANA"]
+
+def calcular_descanso_suficiente(salida_previa_dt, entrada_actual_dt, min_horas=12):
+    if salida_previa_dt is None:
+        return True
+    diferencia_horas = (entrada_actual_dt - salida_previa_dt).total_seconds() / 3600.0
+    return diferencia_horas >= min_horas
+
 def parsear_fecha_incidencia(val_fecha, anio_referencia):
     if pd.isna(val_fecha) or str(val_fecha).strip() == "":
         return None
@@ -178,7 +213,7 @@ if df_empleados is not None:
         matriz_demanda[cargo]["DOMINGO"] = list(req_dom)
 
 # ==========================================
-# 3. GENERACIÓN DE MALLA HORARIA
+# 3. GENERACIÓN CON ROTACIÓN Y DESCANSO DE 12H
 # ==========================================
 def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda, libres_base, festivos_list):
     dias_totales = semanas_count * 7
@@ -199,7 +234,9 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             "CODIGO": cod, "NOMBRE": emp["NOMBRE"], "CARGO": emp["CARGO"],
             "INCIDENCIA_TIPO": emp.get("INCIDENCIA_TIPO"),
             "INCIDENCIA_INI": parsear_fecha_incidencia(emp.get("INCIDENCIA_INI"), anio_ref),
-            "INCIDENCIA_FIN": parsear_fecha_incidencia(emp.get("INCIDENCIA_FIN"), anio_ref)
+            "INCIDENCIA_FIN": parsear_fecha_incidencia(emp.get("INCIDENCIA_FIN"), anio_ref),
+            "SALIDA_PREVIA": None,
+            "ULTIMA_FRANJA": None
         }
         dias_libres_emp[cod] = generar_dias_libres_exactos(semanas_count, libres_base, festivos_list, fecha_base)
 
@@ -216,26 +253,63 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             for cod_emp in empleados_cargo:
                 d_emp = programacion_matriz[cod_emp]
 
+                # Incidencias
                 if d_emp["INCIDENCIA_TIPO"] and d_emp["INCIDENCIA_INI"] and d_emp["INCIDENCIA_FIN"]:
                     if d_emp["INCIDENCIA_INI"] <= fecha_actual_date <= d_emp["INCIDENCIA_FIN"]:
                         programacion_matriz[cod_emp][col_nombre] = d_emp["INCIDENCIA_TIPO"]
+                        programacion_matriz[cod_emp]["SALIDA_PREVIA"] = None
                         continue
 
+                # Día libre
                 if idx_dia in dias_libres_emp[cod_emp]:
                     programacion_matriz[cod_emp][col_nombre] = "L"
+                    programacion_matriz[cod_emp]["SALIDA_PREVIA"] = None
                     continue
 
-                if turnos_disponibles_dia:
-                    turno_asignado = turnos_disponibles_dia.pop(0)
-                    programacion_matriz[cod_emp][col_nombre] = turno_asignado
-                else:
-                    turnos_base_cargo = TURNOS_DEFAULT_POR_CARGO.get(cargo, {}).get("habil", ["08:00-17:00"])
-                    programacion_matriz[cod_emp][col_nombre] = turnos_base_cargo[0]
+                # Filtrar turnos respetando la rotación (NOCHE -> TARDE -> MAÑANA -> NOCHE) y 12 horas libres
+                franja_ult = d_emp["ULTIMA_FRANJA"]
+                franjas_permitidas = obtener_siguiente_franja_permitida(franja_ult) if franja_ult else ["NOCHE", "TARDE", "MAÑANA"]
 
-    return pd.DataFrame([{k: v for k, v in datos.items() if k not in ["INCIDENCIA_TIPO", "INCIDENCIA_INI", "INCIDENCIA_FIN"]} for datos in programacion_matriz.values()])
+                turno_asignado = None
+                nueva_salida = None
+
+                # Intentar ordenar turnos candidatos dando preferencia a la franja de rotación correcta
+                turnos_candidatos = list(turnos_disponibles_dia)
+                turnos_candidatos.sort(key=lambda t: 0 if clasificar_franja(t) in franjas_permitidas else 1)
+
+                for t_cand in turnos_candidatos:
+                    parsed_h = extraer_horas(t_cand)
+                    if parsed_h:
+                        h_i, m_i, h_f, m_f = parsed_h
+                        entrada_dt = fecha_col.replace(hour=h_i, minute=m_i)
+
+                        # Validación estricta de las 12 horas de descanso
+                        if calcular_descanso_suficiente(d_emp["SALIDA_PREVIA"], entrada_dt, min_horas=12):
+                            turno_asignado = t_cand
+                            turnos_disponibles_dia.remove(t_cand)
+
+                            # Calcular nueva salida exacta del turno
+                            if h_f >= 24:
+                                nueva_salida = (fecha_col + timedelta(days=1)).replace(hour=h_f - 24, minute=m_f)
+                            elif h_f < h_i:
+                                nueva_salida = (fecha_col + timedelta(days=1)).replace(hour=h_f, minute=m_f)
+                            else:
+                                nueva_salida = fecha_col.replace(hour=h_f, minute=m_f)
+                            break
+
+                if turno_asignado:
+                    programacion_matriz[cod_emp][col_nombre] = turno_asignado
+                    programacion_matriz[cod_emp]["SALIDA_PREVIA"] = nueva_salida
+                    programacion_matriz[cod_emp]["ULTIMA_FRANJA"] = clasificar_franja(turno_asignado)
+                else:
+                    # Si no encuentra turno válido por descansos o stock, se asigna el primer turno base disponible
+                    turnos_base = TURNOS_DEFAULT_POR_CARGO.get(cargo, {}).get("habil", ["08:00-17:00"])
+                    programacion_matriz[cod_emp][col_nombre] = turnos_base[0]
+
+    return pd.DataFrame([{k: v for k, v in datos.items() if k not in ["INCIDENCIA_TIPO", "INCIDENCIA_INI", "INCIDENCIA_FIN", "SALIDA_PREVIA", "ULTIMA_FRANJA"]} for datos in programacion_matriz.values()])
 
 # ==========================================
-# 4. GENERACIÓN DE RESULTADOS
+# 4. GENERACIÓN DE RESULTADOS Y AUDITORÍA
 # ==========================================
 if df_empleados is not None:
     if st.button("⚡ Generar Horarios y Auditar Tareas"):
@@ -251,7 +325,7 @@ if "df_resultado" in st.session_state:
     st.markdown("---")
 
     # ==========================================
-    # 5. REPORTE DE TAREAS NO CUBIERTAS (CON TURNO ESPECÍFICO)
+    # 5. REPORTE DE TAREAS NO CUBIERTAS
     # ==========================================
     st.subheader("🚨 Reporte de Tareas NO CUBIERTAS por Faltante de Personal")
 
@@ -276,8 +350,6 @@ if "df_resultado" in st.session_state:
 
             if diferencia < 0:
                 faltantes = abs(diferencia)
-                
-                # Identificar turnos requeridos que no se pudieron cubrir
                 copia_disp = list(turnos_disp)
                 turnos_sin_cubrir = []
                 for tr in turnos_req:
@@ -286,7 +358,6 @@ if "df_resultado" in st.session_state:
                     else:
                         turnos_sin_cubrir.append(tr)
                 
-                # Si por alguna razón la lista de turnos específicos difiere, mostramos los sobrantes requeridos
                 texto_turnos_faltantes = ", ".join(turnos_sin_cubrir) if turnos_sin_cubrir else "Variación en capacidad"
 
                 reporte_incompletos.append({
@@ -310,7 +381,6 @@ if "df_resultado" in st.session_state:
         with m2:
             st.metric("Total de Turnos/Tareas Desatendidas", df_incumplidas["PERSONAS FALTANTES"].sum())
         
-        # Se muestra la tabla incluyendo la nueva columna "TURNO NO CUBIERTO"
         st.dataframe(df_incumplidas, use_container_width=True)
     else:
         st.success("🎉 ¡Todas las tareas operativas requeridas quedan cubiertas al 100%!")
