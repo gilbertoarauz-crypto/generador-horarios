@@ -45,12 +45,23 @@ TURNOS_DEFAULT_POR_CARGO = {
     }
 }
 
-PATRONES_ANALISTAS = [
-    ["06:00-15:00", "06:00-15:00", "06:00-15:00", "L", "03:00-11:00", "03:00-11:00", "08:00-17:00"],
-    ["08:00-17:00", "08:00-17:00", "08:00-17:00", "08:00-17:00", "08:00-17:00", "11:00-19:00", "L"],
-    ["11:00-19:00", "11:00-19:00", "11:00-19:00", "11:00-19:00", "11:00-19:00", "L", "03:00-11:00"],
-    ["03:00-11:00", "03:00-11:00", "03:00-11:00", "03:00-11:00", "L", "19:00-27:00", "19:00-27:00"],
-    ["19:00-27:00", "19:00-27:00", "19:00-27:00", "19:00-27:00", "19:00-27:00", "L", "11:00-19:00"]
+# ==========================================
+# PATRONES DE ROTACIÓN DE 14 DÍAS (2 SEMANAS)
+# ==========================================
+PATRONES_ANALISTAS_5 = [
+    ["06:00-15:00", "06:00-15:00", "06:00-15:00", "L", "03:00-11:00", "03:00-11:00", "08:00-17:00", "06:00-15:00", "06:00-15:00", "L", "03:00-11:00", "03:00-11:00", "03:00-11:00", "06:00-15:00"],
+    ["08:00-17:00", "08:00-17:00", "08:00-17:00", "08:00-17:00", "08:00-17:00", "11:00-19:00", "L", "08:00-17:00", "08:00-17:00", "06:00-15:00", "06:00-15:00", "06:00-15:00", "L", "03:00-11:00"],
+    ["11:00-19:00", "11:00-19:00", "11:00-19:00", "11:00-19:00", "11:00-19:00", "L", "03:00-11:00", "03:00-11:00", "03:00-11:00", "03:00-11:00", "03:00-11:00", "L", "19:00-27:00", "19:00-27:00"],
+    ["03:00-11:00", "03:00-11:00", "03:00-11:00", "03:00-11:00", "L", "19:00-27:00", "19:00-27:00", "19:00-27:00", "19:00-27:00", "19:00-27:00", "19:00-27:00", "19:00-27:00", "L", "11:00-19:00"],
+    ["19:00-27:00", "19:00-27:00", "19:00-27:00", "19:00-27:00", "19:00-27:00", "L", "11:00-19:00", "11:00-19:00", "11:00-19:00", "11:00-19:00", "11:00-19:00", "11:00-19:00", "11:00-19:00", "L"]
+]
+
+PATRONES_ANALISTAS_4 = [
+    ["06:00-15:00", "06:00-15:00", "06:00-15:00", "L", "03:00-11:00", "03:00-11:00", "06:00-15:00", "06:00-15:00", "06:00-15:00", "06:00-15:00", "L", "03:00-11:00", "03:00-11:00", "03:00-11:00"],
+    ["vacaciones", "vacaciones", "vacaciones", "vacaciones", "vacaciones", "vacaciones", "vacaciones", "vacaciones", "vacaciones", "vacaciones", "vacaciones", "vacaciones", "vacaciones", "vacaciones"],
+    ["11:00-19:00", "11:00-19:00", "11:00-19:00", "11:00-19:00", "11:00-19:00", "L", "03:00-11:00", "03:00-11:00", "03:00-11:00", "03:00-11:00", "03:00-11:00", "L", "19:00-27:00", "19:00-27:00"],
+    ["03:00-11:00", "03:00-11:00", "03:00-11:00", "03:00-11:00", "L", "19:00-27:00", "19:00-27:00", "19:00-27:00", "19:00-27:00", "19:00-27:00", "19:00-27:00", "19:00-27:00", "L", "11:00-19:00"],
+    ["19:00-27:00", "19:00-27:00", "19:00-27:00", "19:00-27:00", "19:00-27:00", "L", "11:00-19:00", "11:00-19:00", "11:00-19:00", "11:00-19:00", "11:00-19:00", "11:00-19:00", "11:00-19:00", "L"]
 ]
 
 # ==========================================
@@ -182,7 +193,7 @@ if df_empleados is not None:
         matriz_demanda[cargo]["DOMINGO"] = list(req_dom)
 
 # ==========================================
-# 3. GENERACIÓN DE MALLA BASADA EN PATRÓN DE ROTACIÓN
+# 3. GENERACIÓN DE MALLA BASADA EN MATRIZ DE 14 DÍAS
 # ==========================================
 def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda, libres_base, festivos_list, df_prev=None):
     dias_totales = semanas_count * 7
@@ -195,7 +206,12 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
         fechas_dt.append(f_actual)
         columnas_fechas.append(f"{dias_semana_es[f_actual.weekday()]}\n{f_actual.strftime('%d-%b')}")
 
-    # PARSEAR HISTORIAL PARA DETECTAR PATRÓN PREVIO DE ANALISTAS
+    analistas = [emp for _, emp in df_personal.iterrows() if "ANALISTA" in str(emp["CARGO"]).upper()]
+    total_analistas = len(analistas)
+
+    # Seleccionar la matriz de patrones de 14 días según la cantidad de analistas
+    patrones_activos = PATRONES_ANALISTAS_5 if total_analistas >= 5 else PATRONES_ANALISTAS_4
+
     info_patron_analistas = {}
     if df_prev is not None and "CODIGO" in df_prev.columns:
         cols_dias_prev = [c for c in df_prev.columns if c not in ["CODIGO", "NOMBRE", "CARGO", "ESTADO"]]
@@ -204,10 +220,9 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                 c_cod = str(fila["CODIGO"]).strip()
                 val_ult_dom = str(fila[cols_dias_prev[-1]]).strip()
                 
-                # Identificar qué patrón traía según su último turno del domingo
                 idx_patron = 0
-                for idx_p, p in enumerate(PATRONES_ANALISTAS):
-                    if p[6] == val_ult_dom:
+                for idx_p, p in enumerate(patrones_activos):
+                    if p[13] == val_ult_dom or p[6] == val_ult_dom:
                         idx_patron = idx_p
                         break
                 info_patron_analistas[c_cod] = idx_patron
@@ -228,20 +243,17 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
 
         es_analista = "ANALISTA" in cargo_emp.upper()
 
-        # Determinar índice de patrón inicial para analistas
         if es_analista:
             if cod in info_patron_analistas:
-                # Siguiente patrón en secuencia rotativa
-                p_idx_base = (info_patron_analistas[cod] + 1) % len(PATRONES_ANALISTAS)
+                p_idx_base = (info_patron_analistas[cod] + 1) % len(patrones_activos)
             else:
-                p_idx_base = idx_patron_counter % len(PATRONES_ANALISTAS)
+                p_idx_base = idx_patron_counter % len(patrones_activos)
                 idx_patron_counter += 1
 
         for idx_dia, col_nombre in enumerate(columnas_fechas):
             fecha_col = fechas_dt[idx_dia]
             fecha_actual_date = fecha_col.date()
-            s_idx = idx_dia // 7
-            dia_sem_idx = idx_dia % 7  # 0=Lunes, 6=Domingo
+            dia_matriz_14 = idx_dia % 14  # Índice continuo dentro del ciclo de 14 días
 
             # 1. Aplicar Incidencias
             f_ini = programacion_matriz[cod]["INCIDENCIA_INI"]
@@ -251,12 +263,10 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     programacion_matriz[cod][col_nombre] = programacion_matriz[cod]["INCIDENCIA_TIPO"]
                     continue
 
-            # 2. Aplicar Matriz Estricta de Rotación para Analistas
+            # 2. Aplicar Matriz Estricta de 14 Días para Analistas
             if es_analista:
-                p_actual_idx = (p_idx_base + s_idx) % len(PATRONES_ANALISTAS)
-                programacion_matriz[cod][col_nombre] = PATRONES_ANALISTAS[p_actual_idx][dia_sem_idx]
+                programacion_matriz[cod][col_nombre] = patrones_activos[p_idx_base][dia_matriz_14]
             else:
-                # Asignación estándar básica para otros cargos
                 programacion_matriz[cod][col_nombre] = "08:00-17:00"
 
     return pd.DataFrame([{k: v for k, v in datos.items() if k not in ["INCIDENCIA_TIPO", "INCIDENCIA_INI", "INCIDENCIA_FIN"]} for datos in programacion_matriz.values()])
