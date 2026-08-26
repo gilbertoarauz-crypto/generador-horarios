@@ -254,7 +254,9 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             "EN_BLOQUE_NOCHE_19": False
         }
 
-    # ASIGNACIÓN BALANCEADA DE DESCANSOS PARA ANALISTAS (MÁXIMO 1 POR DÍA EN TODA LA SEMANA)
+    # CONTROL ESTRICTO DE DESCANSOS PARA ANALISTAS:
+    # Máximo 1 libre por día de Lunes a Viernes
+    # Máximo 2 libres por día los Sábados y Domingos
     conteo_libres_analistas = {i: 0 for i in range(dias_totales)}
 
     for idx_a, emp in enumerate(analistas):
@@ -267,17 +269,21 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             hay_festivo_sem = any(inicio_sem.date() <= f <= fin_sem.date() for f in festivos_list)
             cant_libres = libres_base + (1 if hay_festivo_sem else 0)
 
-            # Rango permitido: Jueves a Domingo (índices 3, 4, 5, 6) si <= 4 analistas, o Viernes a Domingo (4, 5, 6) si >= 5
+            # Rango permitido de días para analistas
             base_dias = [3, 4, 5, 6] if total_analistas <= 4 else [4, 5, 6]
             indices_semana = [s * 7 + i for i in base_dias]
 
-            # Escalonar el día asignado según la posición del analista
-            candidatos_validos = [idx for idx in indices_semana if conteo_libres_analistas[idx] < 1]
+            candidatos_validos = []
+            for idx_d in indices_semana:
+                dia_semana_idx = idx_d % 7  # 0=Lunes, 3=Jueves, 4=Viernes, 5=Sábado, 6=Domingo
+                limite_max = 2 if dia_semana_idx in [5, 6] else 1
+                
+                if conteo_libres_analistas[idx_d] < limite_max:
+                    candidatos_validos.append(idx_d)
 
             if len(candidatos_validos) >= cant_libres:
-                elegidos = candidatos_validos[:cant_libres]
+                elegidos = random.sample(candidatos_validos, cant_libres)
             else:
-                # Si se agotan los cupos ideales, tomar los días con menor cantidad de analistas descansando
                 elegidos = sorted(indices_semana, key=lambda x: conteo_libres_analistas[x])[:cant_libres]
 
             for el in elegidos:
@@ -286,7 +292,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
 
         dias_libres_emp[cod] = libres_indices_emp
 
-    # Asignación estándar de libres para los demás cargos
+    # Descansos para los demás cargos
     for _, emp in df_personal.iterrows():
         cod = str(emp["CODIGO"]).strip()
         cargo_emp = str(emp["CARGO"]).strip()
@@ -330,7 +336,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                         d_emp["EN_BLOQUE_NOCHE_19"] = False
                         continue
 
-                # 2. Regla especial Analistas: Bloque Nocturno 19:00 estricto Sábado a Viernes
+                # 2. Bloque Nocturno 19:00 estricto Sábado a Viernes
                 if es_analista and d_emp["EN_BLOQUE_NOCHE_19"]:
                     if nombre_dia_semana == "SÁBADO":
                         programacion_matriz[cod_emp][col_nombre] = "L"
@@ -347,7 +353,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                         d_emp["ULTIMA_FRANJA"] = "NOCHE"
                         continue
 
-                # 3. Regla especial Analistas: Reingreso en Domingo 11:00 tras su libre del Sábado
+                # 3. Reingreso en Domingo 11:00 tras su libre del Sábado
                 if es_analista and d_emp["VIENE_DE_NOCHE_19"] and nombre_dia_semana == "DOMINGO":
                     turno_11 = next((t for t in turnos_disponibles_dia if t.startswith("11")), "11:00-19:00")
                     if turno_11 in turnos_disponibles_dia:
@@ -358,7 +364,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     d_emp["VIENE_DE_NOCHE_19"] = False
                     continue
 
-                # 4. Día Libre Programado Estándar
+                # 4. Día Libre Programado
                 if idx_dia in dias_libres_emp[cod_emp]:
                     programacion_matriz[cod_emp][col_nombre] = "L"
                     d_emp["TURNO_FIJO_BLOQUE"] = None
