@@ -109,7 +109,7 @@ def parsear_fecha_incidencia(val_fecha, anio_referencia):
     except Exception:
         return None
 
-def generar_dias_libres_exactos(semanas_count, libres_base, festivos_list, fecha_inicio_dt, es_analista=False):
+def generar_dias_libres_exactos(semanas_count, libres_base, festivos_list, fecha_inicio_dt, es_analista=False, total_analistas=0):
     dias_libres_indices = set()
     for s in range(semanas_count):
         inicio_sem = fecha_inicio_dt + timedelta(days=s * 7)
@@ -118,7 +118,12 @@ def generar_dias_libres_exactos(semanas_count, libres_base, festivos_list, fecha
         cant_libres_semana = libres_base + (1 if hay_festivo_sem else 0)
         
         if es_analista:
-            dias_permitidos = [s * 7 + i for i in [3, 4, 5, 6]]
+            # Si hay 5 o más analistas: libres de Viernes a Domingo (índices 4, 5, 6)
+            # Si hay 4 o menos: libres de Jueves a Domingo (índices 3, 4, 5, 6)
+            if total_analistas >= 5:
+                dias_permitidos = [s * 7 + i for i in [4, 5, 6]]
+            else:
+                dias_permitidos = [s * 7 + i for i in [3, 4, 5, 6]]
         else:
             dias_permitidos = list(range(s * 7, (s + 1) * 7))
             
@@ -210,7 +215,7 @@ if df_empleados is not None:
         matriz_demanda[cargo]["DOMINGO"] = list(req_dom)
 
 # ==========================================
-# 3. GENERACIÓN DE MALLA (ASIGNACIÓN AO CUANDO NO HAY TAREA)
+# 3. GENERACIÓN DE MALLA HORARIA
 # ==========================================
 def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda, libres_base, festivos_list):
     dias_totales = semanas_count * 7
@@ -222,6 +227,9 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
         f_actual = fecha_base + timedelta(days=i)
         fechas_dt.append(f_actual)
         columnas_fechas.append(f"{dias_semana_es[f_actual.weekday()]}\n{f_actual.strftime('%d-%b')}")
+
+    # Conteo total de analistas activos
+    total_analistas = sum(1 for _, e in df_personal.iterrows() if "ANALISTA" in str(e["CARGO"]).upper())
 
     programacion_matriz, dias_libres_emp = {}, {}
 
@@ -238,7 +246,9 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             "TURNO_ACTUAL_BLOQUE": None,
             "ULTIMA_FRANJA": None
         }
-        dias_libres_emp[cod] = generar_dias_libres_exactos(semanas_count, libres_base, festivos_list, fecha_base, es_analista=es_analista)
+        dias_libres_emp[cod] = generar_dias_libres_exactos(
+            semanas_count, libres_base, festivos_list, fecha_base, es_analista=es_analista, total_analistas=total_analistas
+        )
 
     for idx_dia, col_nombre in enumerate(columnas_fechas):
         fecha_col = fechas_dt[idx_dia]
@@ -247,6 +257,12 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
 
         for cargo in df_personal["CARGO"].unique():
             turnos_disponibles_dia = list(reglas_demanda.get(cargo, {}).get(nombre_dia_semana, []))
+            
+            # Garantizar prioridad en fines de semana para los turnos 03, 11 y 19
+            if nombre_dia_semana in ["SÁBADO", "DOMINGO"]:
+                turnos_clave = ["03:00-11:00", "11:00-19:00", "19:00-27:00"]
+                turnos_disponibles_dia.sort(key=lambda t: 0 if any(t.startswith(prefix) for prefix in ["03", "11", "19"]) else 1)
+
             empleados_cargo = [cod for cod, d in programacion_matriz.items() if d["CARGO"] == cargo]
             random.shuffle(empleados_cargo)
 
@@ -266,7 +282,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     d_emp["TURNO_ACTUAL_BLOQUE"] = None
                     continue
 
-                # 3. Asignación de tarea
+                # 3. Asignación de tareas respetando cupos y rotación
                 turno_a_asignar = None
 
                 if d_emp["TURNO_ACTUAL_BLOQUE"] is not None:
@@ -292,7 +308,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                         turno_a_asignar = turnos_candidatos[0]
                         turnos_disponibles_dia.remove(turno_a_asignar)
 
-                # Si no hay tarea/turno requerido disponible en la matriz para hoy, se coloca "AO" (A Órdenes)
                 if turno_a_asignar is None:
                     programacion_matriz[cod_emp][col_nombre] = "AO"
                     d_emp["TURNO_ACTUAL_BLOQUE"] = None
