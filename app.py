@@ -45,9 +45,6 @@ TURNOS_DEFAULT_POR_CARGO = {
     }
 }
 
-# ==========================================
-# PATRONES DE ROTACIÓN DE 14 DÍAS (2 SEMANAS)
-# ==========================================
 PATRONES_ANALISTAS_5 = [
     ["06:00-15:00", "06:00-15:00", "06:00-15:00", "L", "03:00-11:00", "03:00-11:00", "08:00-17:00", "06:00-15:00", "06:00-15:00", "L", "03:00-11:00", "03:00-11:00", "03:00-11:00", "06:00-15:00"],
     ["08:00-17:00", "08:00-17:00", "08:00-17:00", "08:00-17:00", "08:00-17:00", "11:00-19:00", "L", "08:00-17:00", "08:00-17:00", "06:00-15:00", "06:00-15:00", "06:00-15:00", "L", "03:00-11:00"],
@@ -193,7 +190,7 @@ if df_empleados is not None:
         matriz_demanda[cargo]["DOMINGO"] = list(req_dom)
 
 # ==========================================
-# 3. GENERACIÓN DE MALLA BASADA EN MATRIZ DE 14 DÍAS
+# 3. GENERACIÓN CON UNICIDAD DE TURNO Y MÁX 1 LIBRE HÁBIL
 # ==========================================
 def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda, libres_base, festivos_list, df_prev=None):
     dias_totales = semanas_count * 7
@@ -209,7 +206,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
     analistas = [emp for _, emp in df_personal.iterrows() if "ANALISTA" in str(emp["CARGO"]).upper()]
     total_analistas = len(analistas)
 
-    # Seleccionar la matriz de patrones de 14 días según la cantidad de analistas
     patrones_activos = PATRONES_ANALISTAS_5 if total_analistas >= 5 else PATRONES_ANALISTAS_4
 
     info_patron_analistas = {}
@@ -219,7 +215,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             for _, fila in df_prev.iterrows():
                 c_cod = str(fila["CODIGO"]).strip()
                 val_ult_dom = str(fila[cols_dias_prev[-1]]).strip()
-                
                 idx_patron = 0
                 for idx_p, p in enumerate(patrones_activos):
                     if p[13] == val_ult_dom or p[6] == val_ult_dom:
@@ -230,6 +225,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
     programacion_matriz = {}
     idx_patron_counter = 0
 
+    # Asignar un patrón único inicial a cada analista
     for _, emp in df_personal.iterrows():
         cod = str(emp["CODIGO"]).strip()
         cargo_emp = str(emp["CARGO"]).strip()
@@ -249,27 +245,55 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             else:
                 p_idx_base = idx_patron_counter % len(patrones_activos)
                 idx_patron_counter += 1
+            programacion_matriz[cod]["PATRON_BASE"] = p_idx_base
 
-        for idx_dia, col_nombre in enumerate(columnas_fechas):
-            fecha_col = fechas_dt[idx_dia]
-            fecha_actual_date = fecha_col.date()
-            dia_matriz_14 = idx_dia % 14  # Índice continuo dentro del ciclo de 14 días
+    # Recorrer día a día validando Unicidad y Máx 1 Libre en Hábiles
+    for idx_dia, col_nombre in enumerate(columnas_fechas):
+        fecha_col = fechas_dt[idx_dia]
+        fecha_actual_date = fecha_col.date()
+        dia_matriz_14 = idx_dia % 14
+        dia_semana_idx = idx_dia % 7  # 0=Lunes, 4=Viernes, 5=Sábado, 6=Domingo
 
-            # 1. Aplicar Incidencias
-            f_ini = programacion_matriz[cod]["INCIDENCIA_INI"]
-            f_fin = programacion_matriz[cod]["INCIDENCIA_FIN"]
-            if programacion_matriz[cod]["INCIDENCIA_TIPO"] and f_ini and f_fin:
-                if f_ini <= fecha_actual_date <= f_fin:
-                    programacion_matriz[cod][col_nombre] = programacion_matriz[cod]["INCIDENCIA_TIPO"]
+        turnos_usados_analistas_hoy = set()
+        libres_analistas_hoy = 0
+
+        for cod, d in programacion_matriz.items():
+            if "ANALISTA" in d["CARGO"].upper():
+                f_ini, f_fin = d["INCIDENCIA_INI"], d["INCIDENCIA_FIN"]
+                if d["INCIDENCIA_TIPO"] and f_ini and f_fin and (f_ini <= fecha_actual_date <= f_fin):
+                    programacion_matriz[cod][col_nombre] = d["INCIDENCIA_TIPO"]
                     continue
 
-            # 2. Aplicar Matriz Estricta de 14 Días para Analistas
-            if es_analista:
-                programacion_matriz[cod][col_nombre] = patrones_activos[p_idx_base][dia_matriz_14]
+                p_base = d["PATRON_BASE"]
+                turno_sugerido = patrones_activos[p_base][dia_matriz_14]
+
+                # Regla 1: Control de Libres de Lunes a Viernes (Máx 1 libre)
+                if turno_sugerido == "L":
+                    if dia_semana_idx <= 4:  # Día hábil
+                        if libres_analistas_hoy >= 1:
+                            # Reemplazar libre por turno activo no repetido
+                            candidatos = [t for t in PATRONES_ANALISTAS_5[p_base] if t not in ["L", "vacaciones"] and t not in turnos_usados_analistas_hoy]
+                            turno_sugerido = candidatos[0] if candidatos else "08:00-17:00"
+                        else:
+                            libres_analistas_hoy += 1
+                
+                # Regla 2: Unicidad Estricta (No repetir turno el mismo día)
+                if turno_sugerido not in ["L", "vacaciones"]:
+                    if turno_sugerido in turnos_usados_analistas_hoy:
+                        # Buscar alternativa dentro del catálogo del día que no se haya asignado
+                        alt_turnos = [t for t in CATALOGO_TURNOS if t not in turnos_usados_analistas_hoy]
+                        turno_sugerido = alt_turnos[0] if alt_turnos else "AO"
+                    
+                    if turno_sugerido != "AO":
+                        turnos_usados_analistas_hoy.add(turno_sugerido)
+
+                programacion_matriz[cod][col_nombre] = turno_sugerido
+
             else:
+                # Asignación por defecto para otros cargos
                 programacion_matriz[cod][col_nombre] = "08:00-17:00"
 
-    return pd.DataFrame([{k: v for k, v in datos.items() if k not in ["INCIDENCIA_TIPO", "INCIDENCIA_INI", "INCIDENCIA_FIN"]} for datos in programacion_matriz.values()])
+    return pd.DataFrame([{k: v for k, v in datos.items() if k not in ["INCIDENCIA_TIPO", "INCIDENCIA_INI", "INCIDENCIA_FIN", "PATRON_BASE"]} for datos in programacion_matriz.values()])
 
 # ==========================================
 # 4. GENERACIÓN DE RESULTADOS Y AUDITORÍA
