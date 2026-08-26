@@ -45,6 +45,14 @@ TURNOS_DEFAULT_POR_CARGO = {
     }
 }
 
+PATRONES_ANALISTAS = [
+    ["06:00-15:00", "06:00-15:00", "06:00-15:00", "L", "03:00-11:00", "03:00-11:00", "08:00-17:00"],
+    ["08:00-17:00", "08:00-17:00", "08:00-17:00", "08:00-17:00", "08:00-17:00", "11:00-19:00", "L"],
+    ["11:00-19:00", "11:00-19:00", "11:00-19:00", "11:00-19:00", "11:00-19:00", "L", "03:00-11:00"],
+    ["03:00-11:00", "03:00-11:00", "03:00-11:00", "03:00-11:00", "L", "19:00-27:00", "19:00-27:00"],
+    ["19:00-27:00", "19:00-27:00", "19:00-27:00", "19:00-27:00", "19:00-27:00", "L", "11:00-19:00"]
+]
+
 # ==========================================
 # CONFIGURACIÓN GENERAL EN SIDEBAR
 # ==========================================
@@ -68,36 +76,8 @@ if tiene_festivo:
 dias_semana_es = ["LUNES", "MARTES", "MIÉRCOLES", "JUEVES", "VIERNES", "SÁBADO", "DOMINGO"]
 
 # ==========================================
-# FUNCIONES AUXILIARES DE TIEMPO Y ROTACIÓN
+# FUNCIONES AUXILIARES
 # ==========================================
-def extraer_horas(texto_turno):
-    coincidencia = re.search(r"(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})", str(texto_turno))
-    if coincidencia:
-        h_ini, m_ini, h_fin, m_fin = map(int, coincidencia.groups())
-        return h_ini, m_ini, h_fin, m_fin
-    return None
-
-def clasificar_franja(texto_turno):
-    parsed = extraer_horas(texto_turno)
-    if not parsed:
-        return "MAÑANA"
-    h_ini = parsed[0]
-    if 0 <= h_ini < 11:
-        return "MAÑANA"
-    elif 11 <= h_ini < 18:
-        return "TARDE"
-    else:
-        return "NOCHE"
-
-def obtener_siguiente_franja_permitida(franja_actual):
-    if franja_actual == "NOCHE":
-        return ["TARDE", "NOCHE"]
-    elif franja_actual == "TARDE":
-        return ["MAÑANA", "TARDE"]
-    elif franja_actual == "MAÑANA":
-        return ["NOCHE", "MAÑANA"]
-    return ["NOCHE", "TARDE", "MAÑANA"]
-
 def parsear_fecha_incidencia(val_fecha, anio_referencia):
     if pd.isna(val_fecha) or str(val_fecha).strip() == "":
         return None
@@ -202,7 +182,7 @@ if df_empleados is not None:
         matriz_demanda[cargo]["DOMINGO"] = list(req_dom)
 
 # ==========================================
-# 3. GENERACIÓN DE MALLA HORARIA EMPALMADA
+# 3. GENERACIÓN DE MALLA BASADA EN PATRÓN DE ROTACIÓN
 # ==========================================
 def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda, libres_base, festivos_list, df_prev=None):
     dias_totales = semanas_count * 7
@@ -215,200 +195,71 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
         fechas_dt.append(f_actual)
         columnas_fechas.append(f"{dias_semana_es[f_actual.weekday()]}\n{f_actual.strftime('%d-%b')}")
 
-    info_historial = {}
+    # PARSEAR HISTORIAL PARA DETECTAR PATRÓN PREVIO DE ANALISTAS
+    info_patron_analistas = {}
     if df_prev is not None and "CODIGO" in df_prev.columns:
         cols_dias_prev = [c for c in df_prev.columns if c not in ["CODIGO", "NOMBRE", "CARGO", "ESTADO"]]
         if cols_dias_prev:
             for _, fila in df_prev.iterrows():
                 c_cod = str(fila["CODIGO"]).strip()
-                val_ult = str(fila[cols_dias_prev[-1]]).strip()
-                es_descanso_o_inc = val_ult.upper() in ["L", "AO", "VACACIONES", "LICENCIA", "INCAPACIDAD", "PERMISO"]
+                val_ult_dom = str(fila[cols_dias_prev[-1]]).strip()
                 
-                info_historial[c_cod] = {
-                    "ultimo_turno": None if es_descanso_o_inc else val_ult,
-                    "ultima_franja": None if es_descanso_o_inc else clasificar_franja(val_ult),
-                    "termino_en_descanso": es_descanso_o_inc
-                }
+                # Identificar qué patrón traía según su último turno del domingo
+                idx_patron = 0
+                for idx_p, p in enumerate(PATRONES_ANALISTAS):
+                    if p[6] == val_ult_dom:
+                        idx_patron = idx_p
+                        break
+                info_patron_analistas[c_cod] = idx_patron
 
-    analistas = [emp for _, emp in df_personal.iterrows() if "ANALISTA" in str(emp["CARGO"]).upper()]
-    total_analistas = len(analistas)
-
-    programacion_matriz, dias_libres_emp = {}, {}
+    programacion_matriz = {}
+    idx_patron_counter = 0
 
     for _, emp in df_personal.iterrows():
         cod = str(emp["CODIGO"]).strip()
         cargo_emp = str(emp["CARGO"]).strip()
-        hist = info_historial.get(cod, {})
-
-        turno_previo_bloque = hist.get("ultimo_turno") if not hist.get("termino_en_descanso", True) else None
-        franja_previa = hist.get("ultima_franja")
 
         programacion_matriz[cod] = {
             "CODIGO": cod, "NOMBRE": emp["NOMBRE"], "CARGO": cargo_emp,
             "INCIDENCIA_TIPO": emp.get("INCIDENCIA_TIPO"),
             "INCIDENCIA_INI": parsear_fecha_incidencia(emp.get("INCIDENCIA_INI"), anio_ref),
             "INCIDENCIA_FIN": parsear_fecha_incidencia(emp.get("INCIDENCIA_FIN"), anio_ref),
-            "TURNO_FIJO_BLOQUE": turno_previo_bloque,
-            "ULTIMA_FRANJA": franja_previa,
-            "VIENE_DE_NOCHE_19": False,
-            "EN_BLOQUE_NOCHE_19": False
         }
 
-    # CONTROL ESTRICTO DE DESCANSOS PARA ANALISTAS:
-    # Máximo 1 libre por día de Lunes a Viernes
-    # Máximo 2 libres por día los Sábados y Domingos
-    conteo_libres_analistas = {i: 0 for i in range(dias_totales)}
+        es_analista = "ANALISTA" in cargo_emp.upper()
 
-    for idx_a, emp in enumerate(analistas):
-        cod = str(emp["CODIGO"]).strip()
-        libres_indices_emp = set()
-
-        for s in range(semanas_count):
-            inicio_sem = fecha_base + timedelta(days=s * 7)
-            fin_sem = inicio_sem + timedelta(days=6)
-            hay_festivo_sem = any(inicio_sem.date() <= f <= fin_sem.date() for f in festivos_list)
-            cant_libres = libres_base + (1 if hay_festivo_sem else 0)
-
-            # Rango permitido de días para analistas
-            base_dias = [3, 4, 5, 6] if total_analistas <= 4 else [4, 5, 6]
-            indices_semana = [s * 7 + i for i in base_dias]
-
-            candidatos_validos = []
-            for idx_d in indices_semana:
-                dia_semana_idx = idx_d % 7  # 0=Lunes, 3=Jueves, 4=Viernes, 5=Sábado, 6=Domingo
-                limite_max = 2 if dia_semana_idx in [5, 6] else 1
-                
-                if conteo_libres_analistas[idx_d] < limite_max:
-                    candidatos_validos.append(idx_d)
-
-            if len(candidatos_validos) >= cant_libres:
-                elegidos = random.sample(candidatos_validos, cant_libres)
+        # Determinar índice de patrón inicial para analistas
+        if es_analista:
+            if cod in info_patron_analistas:
+                # Siguiente patrón en secuencia rotativa
+                p_idx_base = (info_patron_analistas[cod] + 1) % len(PATRONES_ANALISTAS)
             else:
-                elegidos = sorted(indices_semana, key=lambda x: conteo_libres_analistas[x])[:cant_libres]
+                p_idx_base = idx_patron_counter % len(PATRONES_ANALISTAS)
+                idx_patron_counter += 1
 
-            for el in elegidos:
-                libres_indices_emp.add(el)
-                conteo_libres_analistas[el] += 1
+        for idx_dia, col_nombre in enumerate(columnas_fechas):
+            fecha_col = fechas_dt[idx_dia]
+            fecha_actual_date = fecha_col.date()
+            s_idx = idx_dia // 7
+            dia_sem_idx = idx_dia % 7  # 0=Lunes, 6=Domingo
 
-        dias_libres_emp[cod] = libres_indices_emp
-
-    # Descansos para los demás cargos
-    for _, emp in df_personal.iterrows():
-        cod = str(emp["CODIGO"]).strip()
-        cargo_emp = str(emp["CARGO"]).strip()
-        if "ANALISTA" not in cargo_emp.upper():
-            libres_indices_emp = set()
-            for s in range(semanas_count):
-                inicio_sem = fecha_base + timedelta(days=s * 7)
-                fin_sem = inicio_sem + timedelta(days=6)
-                hay_festivo_sem = any(inicio_sem.date() <= f <= fin_sem.date() for f in festivos_list)
-                cant_libres = libres_base + (1 if hay_festivo_sem else 0)
-
-                dias_permitidos = list(range(s * 7, (s + 1) * 7))
-                libres_indices_emp.update(random.sample(dias_permitidos, cant_libres))
-
-            dias_libres_emp[cod] = libres_indices_emp
-
-    for idx_dia, col_nombre in enumerate(columnas_fechas):
-        fecha_col = fechas_dt[idx_dia]
-        fecha_actual_date = fecha_col.date()
-        nombre_dia_semana = dias_semana_es[fecha_col.weekday()]
-
-        for cargo in df_personal["CARGO"].unique():
-            turnos_disponibles_dia = list(reglas_demanda.get(cargo, {}).get(nombre_dia_semana, []))
-            
-            if nombre_dia_semana in ["SÁBADO", "DOMINGO"]:
-                turnos_disponibles_dia.sort(key=lambda t: 0 if any(t.startswith(prefix) for prefix in ["03", "11", "19"]) else 1)
-
-            empleados_cargo = [cod for cod, d in programacion_matriz.items() if d["CARGO"] == cargo]
-            random.shuffle(empleados_cargo)
-
-            for cod_emp in empleados_cargo:
-                d_emp = programacion_matriz[cod_emp]
-                es_analista = "ANALISTA" in cargo.upper()
-
-                # 1. Incidencias
-                if d_emp["INCIDENCIA_TIPO"] and d_emp["INCIDENCIA_INI"] and d_emp["INCIDENCIA_FIN"]:
-                    if d_emp["INCIDENCIA_INI"] <= fecha_actual_date <= d_emp["INCIDENCIA_FIN"]:
-                        programacion_matriz[cod_emp][col_nombre] = d_emp["INCIDENCIA_TIPO"]
-                        d_emp["TURNO_FIJO_BLOQUE"] = None
-                        d_emp["VIENE_DE_NOCHE_19"] = False
-                        d_emp["EN_BLOQUE_NOCHE_19"] = False
-                        continue
-
-                # 2. Bloque Nocturno 19:00 estricto Sábado a Viernes
-                if es_analista and d_emp["EN_BLOQUE_NOCHE_19"]:
-                    if nombre_dia_semana == "SÁBADO":
-                        programacion_matriz[cod_emp][col_nombre] = "L"
-                        d_emp["TURNO_FIJO_BLOQUE"] = None
-                        d_emp["EN_BLOQUE_NOCHE_19"] = False
-                        d_emp["VIENE_DE_NOCHE_19"] = True
-                        continue
-                    else:
-                        turno_19 = next((t for t in turnos_disponibles_dia if t.startswith("19")), "19:00-27:00")
-                        if turno_19 in turnos_disponibles_dia:
-                            turnos_disponibles_dia.remove(turno_19)
-                        programacion_matriz[cod_emp][col_nombre] = turno_19
-                        d_emp["TURNO_FIJO_BLOQUE"] = turno_19
-                        d_emp["ULTIMA_FRANJA"] = "NOCHE"
-                        continue
-
-                # 3. Reingreso en Domingo 11:00 tras su libre del Sábado
-                if es_analista and d_emp["VIENE_DE_NOCHE_19"] and nombre_dia_semana == "DOMINGO":
-                    turno_11 = next((t for t in turnos_disponibles_dia if t.startswith("11")), "11:00-19:00")
-                    if turno_11 in turnos_disponibles_dia:
-                        turnos_disponibles_dia.remove(turno_11)
-                    programacion_matriz[cod_emp][col_nombre] = turno_11
-                    d_emp["TURNO_FIJO_BLOQUE"] = turno_11
-                    d_emp["ULTIMA_FRANJA"] = "TARDE"
-                    d_emp["VIENE_DE_NOCHE_19"] = False
+            # 1. Aplicar Incidencias
+            f_ini = programacion_matriz[cod]["INCIDENCIA_INI"]
+            f_fin = programacion_matriz[cod]["INCIDENCIA_FIN"]
+            if programacion_matriz[cod]["INCIDENCIA_TIPO"] and f_ini and f_fin:
+                if f_ini <= fecha_actual_date <= f_fin:
+                    programacion_matriz[cod][col_nombre] = programacion_matriz[cod]["INCIDENCIA_TIPO"]
                     continue
 
-                # 4. Día Libre Programado
-                if idx_dia in dias_libres_emp[cod_emp]:
-                    programacion_matriz[cod_emp][col_nombre] = "L"
-                    d_emp["TURNO_FIJO_BLOQUE"] = None
-                    d_emp["EN_BLOQUE_NOCHE_19"] = False
-                    continue
+            # 2. Aplicar Matriz Estricta de Rotación para Analistas
+            if es_analista:
+                p_actual_idx = (p_idx_base + s_idx) % len(PATRONES_ANALISTAS)
+                programacion_matriz[cod][col_nombre] = PATRONES_ANALISTAS[p_actual_idx][dia_sem_idx]
+            else:
+                # Asignación estándar básica para otros cargos
+                programacion_matriz[cod][col_nombre] = "08:00-17:00"
 
-                # 5. Asignación de turno estándar
-                turno_a_asignar = None
-
-                if d_emp["TURNO_FIJO_BLOQUE"] is not None:
-                    mismo_turno = d_emp["TURNO_FIJO_BLOQUE"]
-                    if mismo_turno in turnos_disponibles_dia:
-                        turno_a_asignar = mismo_turno
-                        turnos_disponibles_dia.remove(mismo_turno)
-                    else:
-                        franja_buscada = clasificar_franja(mismo_turno)
-                        candidatos_misma_franja = [t for t in turnos_disponibles_dia if clasificar_franja(t) == franja_buscada]
-                        if candidatos_misma_franja:
-                            turno_a_asignar = candidatos_misma_franja[0]
-                            turnos_disponibles_dia.remove(turno_a_asignar)
-
-                if turno_a_asignar is None and turnos_disponibles_dia:
-                    franja_ult = d_emp["ULTIMA_FRANJA"]
-                    franjas_permitidas = obtener_siguiente_franja_permitida(franja_ult) if franja_ult else ["NOCHE", "TARDE", "MAÑANA"]
-
-                    turnos_candidatos = list(turnos_disponibles_dia)
-                    turnos_candidatos.sort(key=lambda t: 0 if clasificar_franja(t) in franjas_permitidas else 1)
-
-                    if turnos_candidatos:
-                        turno_a_asignar = turnos_candidatos[0]
-                        turnos_disponibles_dia.remove(turno_a_asignar)
-
-                if turno_a_asignar is None:
-                    programacion_matriz[cod_emp][col_nombre] = "AO"
-                    d_emp["TURNO_FIJO_BLOQUE"] = None
-                else:
-                    programacion_matriz[cod_emp][col_nombre] = turno_a_asignar
-                    d_emp["TURNO_FIJO_BLOQUE"] = turno_a_asignar
-                    d_emp["ULTIMA_FRANJA"] = clasificar_franja(turno_a_asignar)
-                    
-                    if es_analista and nombre_dia_semana == "SÁBADO" and turno_a_asignar.startswith("19"):
-                        d_emp["EN_BLOQUE_NOCHE_19"] = True
-
-    return pd.DataFrame([{k: v for k, v in datos.items() if k not in ["INCIDENCIA_TIPO", "INCIDENCIA_INI", "INCIDENCIA_FIN", "TURNO_FIJO_BLOQUE", "ULTIMA_FRANJA", "VIENE_DE_NOCHE_19", "EN_BLOQUE_NOCHE_19"]} for datos in programacion_matriz.values()])
+    return pd.DataFrame([{k: v for k, v in datos.items() if k not in ["INCIDENCIA_TIPO", "INCIDENCIA_INI", "INCIDENCIA_FIN"]} for datos in programacion_matriz.values()])
 
 # ==========================================
 # 4. GENERACIÓN DE RESULTADOS Y AUDITORÍA
