@@ -110,7 +110,6 @@ def parsear_fecha_incidencia(val_fecha, anio_referencia):
         return None
 
 def generar_dias_libres_exactos(semanas_count, libres_base, festivos_list, fecha_inicio_dt, es_analista=False):
-    """Garantiza la cantidad EXACTA de libres. Si es analista, restinge los libres a Jueves-Domingo."""
     dias_libres_indices = set()
     for s in range(semanas_count):
         inicio_sem = fecha_inicio_dt + timedelta(days=s * 7)
@@ -119,7 +118,6 @@ def generar_dias_libres_exactos(semanas_count, libres_base, festivos_list, fecha
         cant_libres_semana = libres_base + (1 if hay_festivo_sem else 0)
         
         if es_analista:
-            # Días 3, 4, 5, 6 corresponden a JUEVES, VIERNES, SÁBADO, DOMINGO
             dias_permitidos = [s * 7 + i for i in [3, 4, 5, 6]]
         else:
             dias_permitidos = list(range(s * 7, (s + 1) * 7))
@@ -212,7 +210,7 @@ if df_empleados is not None:
         matriz_demanda[cargo]["DOMINGO"] = list(req_dom)
 
 # ==========================================
-# 3. GENERACIÓN DE MALLA
+# 3. GENERACIÓN DE MALLA (ASIGNACIÓN AO CUANDO NO HAY TAREA)
 # ==========================================
 def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda, libres_base, festivos_list):
     dias_totales = semanas_count * 7
@@ -237,7 +235,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             "INCIDENCIA_TIPO": emp.get("INCIDENCIA_TIPO"),
             "INCIDENCIA_INI": parsear_fecha_incidencia(emp.get("INCIDENCIA_INI"), anio_ref),
             "INCIDENCIA_FIN": parsear_fecha_incidencia(emp.get("INCIDENCIA_FIN"), anio_ref),
-            "TURNO_ACTUAL_BLOQUE": None,  # Mantiene la misma jornada hasta el descanso
+            "TURNO_ACTUAL_BLOQUE": None,
             "ULTIMA_FRANJA": None
         }
         dias_libres_emp[cod] = generar_dias_libres_exactos(semanas_count, libres_base, festivos_list, fecha_base, es_analista=es_analista)
@@ -259,34 +257,31 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                 if d_emp["INCIDENCIA_TIPO"] and d_emp["INCIDENCIA_INI"] and d_emp["INCIDENCIA_FIN"]:
                     if d_emp["INCIDENCIA_INI"] <= fecha_actual_date <= d_emp["INCIDENCIA_FIN"]:
                         programacion_matriz[cod_emp][col_nombre] = d_emp["INCIDENCIA_TIPO"]
-                        d_emp["TURNO_ACTUAL_BLOQUE"] = None  # Reiniciar bloque tras incidencia
+                        d_emp["TURNO_ACTUAL_BLOQUE"] = None
                         continue
 
                 # 2. Día Libre Programado
                 if idx_dia in dias_libres_emp[cod_emp]:
                     programacion_matriz[cod_emp][col_nombre] = "L"
-                    d_emp["TURNO_ACTUAL_BLOQUE"] = None  # Reiniciar bloque tras descanso 'L'
+                    d_emp["TURNO_ACTUAL_BLOQUE"] = None
                     continue
 
-                # 3. Asignación manteniendo estabilidad de turno/jornada
+                # 3. Asignación de tarea
                 turno_a_asignar = None
 
-                # Si ya venía dentro de un bloque activo de trabajo, intentar asignarle SU MISMO TURNO
                 if d_emp["TURNO_ACTUAL_BLOQUE"] is not None:
                     mismo_turno = d_emp["TURNO_ACTUAL_BLOQUE"]
                     if mismo_turno in turnos_disponibles_dia:
                         turno_a_asignar = mismo_turno
                         turnos_disponibles_dia.remove(mismo_turno)
                     else:
-                        # Si ese turno exacto no está libre hoy, busca otro de la MISMA FRANJA
                         franja_buscada = clasificar_franja(mismo_turno)
                         candidatos_misma_franja = [t for t in turnos_disponibles_dia if clasificar_franja(t) == franja_buscada]
                         if candidatos_misma_franja:
                             turno_a_asignar = candidatos_misma_franja[0]
                             turnos_disponibles_dia.remove(turno_a_asignar)
 
-                # Si inicia un nuevo bloque tras un descanso 'L' o incidencia
-                if turno_a_asignar is None:
+                if turno_a_asignar is None and turnos_disponibles_dia:
                     franja_ult = d_emp["ULTIMA_FRANJA"]
                     franjas_permitidas = obtener_siguiente_franja_permitida(franja_ult) if franja_ult else ["NOCHE", "TARDE", "MAÑANA"]
 
@@ -296,14 +291,15 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     if turnos_candidatos:
                         turno_a_asignar = turnos_candidatos[0]
                         turnos_disponibles_dia.remove(turno_a_asignar)
-                    else:
-                        turnos_base = TURNOS_DEFAULT_POR_CARGO.get(cargo, {}).get("habil", ["08:00-17:00"])
-                        turno_a_asignar = turnos_base[0]
 
-                # Guardar el turno fijado para el bloque
-                programacion_matriz[cod_emp][col_nombre] = turno_a_asignar
-                d_emp["TURNO_ACTUAL_BLOQUE"] = turno_a_asignar
-                d_emp["ULTIMA_FRANJA"] = clasificar_franja(turno_a_asignar)
+                # Si no hay tarea/turno requerido disponible en la matriz para hoy, se coloca "AO" (A Órdenes)
+                if turno_a_asignar is None:
+                    programacion_matriz[cod_emp][col_nombre] = "AO"
+                    d_emp["TURNO_ACTUAL_BLOQUE"] = None
+                else:
+                    programacion_matriz[cod_emp][col_nombre] = turno_a_asignar
+                    d_emp["TURNO_ACTUAL_BLOQUE"] = turno_a_asignar
+                    d_emp["ULTIMA_FRANJA"] = clasificar_franja(turno_a_asignar)
 
     return pd.DataFrame([{k: v for k, v in datos.items() if k not in ["INCIDENCIA_TIPO", "INCIDENCIA_INI", "INCIDENCIA_FIN", "TURNO_ACTUAL_BLOQUE", "ULTIMA_FRANJA"]} for datos in programacion_matriz.values()])
 
@@ -341,7 +337,7 @@ if "df_resultado" in st.session_state:
             
             turnos_req = [str(x).strip() for x in sub_mat[col_target_mat].dropna().tolist() if str(x).strip() != ""] if col_target_mat else []
             sub_malla = df_resultado[df_resultado["CARGO"] == cargo]
-            turnos_disp = [str(x).strip() for x in sub_malla[col_f].tolist() if str(x).strip().upper() not in ["L", "VACACIONES", "LICENCIA", "INCAPACIDAD", "PERMISO"]]
+            turnos_disp = [str(x).strip() for x in sub_malla[col_f].tolist() if str(x).strip().upper() not in ["L", "AO", "VACACIONES", "LICENCIA", "INCAPACIDAD", "PERMISO"]]
 
             cant_req = len(turnos_req)
             cant_disp = len(turnos_disp)
