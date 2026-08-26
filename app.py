@@ -250,10 +250,11 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             "INCIDENCIA_FIN": parsear_fecha_incidencia(emp.get("INCIDENCIA_FIN"), anio_ref),
             "TURNO_FIJO_BLOQUE": turno_previo_bloque,
             "ULTIMA_FRANJA": franja_previa,
-            "VIENE_DE_NOCHE_19": False
+            "VIENE_DE_NOCHE_19": False,
+            "EN_BLOQUE_NOCHE_19": False
         }
 
-    # Distribución estricta de descansos para evitar acumulación en fin de semana
+    # Distribución estricta de descansos
     conteo_libres_analistas = {i: 0 for i in range(dias_totales)}
 
     for _, emp in df_personal.iterrows():
@@ -270,8 +271,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
 
             if es_analista:
                 indices_permitidos = [s * 7 + i for i in ([4, 5, 6] if total_analistas >= 5 else [3, 4, 5, 6])]
-                
-                # RESTRICCIÓN: Máximo 1 analista libre POR DÍA en TODO el fin de semana / bloque de libres
                 candidatos = [idx_d for idx_d in indices_permitidos if conteo_libres_analistas[idx_d] < 1]
                 
                 if len(candidatos) < cant_libres:
@@ -311,10 +310,30 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                         programacion_matriz[cod_emp][col_nombre] = d_emp["INCIDENCIA_TIPO"]
                         d_emp["TURNO_FIJO_BLOQUE"] = None
                         d_emp["VIENE_DE_NOCHE_19"] = False
+                        d_emp["EN_BLOQUE_NOCHE_19"] = False
                         continue
 
-                # 2. Reingreso en Domingo 11:00 tras libre posterior al turno 19:00
-                if d_emp["VIENE_DE_NOCHE_19"] and nombre_dia_semana == "DOMINGO":
+                # 2. Regla especial Analistas: Bloque Nocturno 19:00 estricto Sábado a Viernes
+                if es_analista and d_emp["EN_BLOQUE_NOCHE_19"]:
+                    if nombre_dia_semana == "SÁBADO":
+                        # El sábado siguiente al bloque de noche se fuerza obligatoriamente como LIBRE
+                        programacion_matriz[cod_emp][col_nombre] = "L"
+                        d_emp["TURNO_FIJO_BLOQUE"] = None
+                        d_emp["EN_BLOQUE_NOCHE_19"] = False
+                        d_emp["VIENE_DE_NOCHE_19"] = True
+                        continue
+                    else:
+                        # Domingo a Viernes: Mantiene fijo el turno nocturno de las 19:00
+                        turno_19 = next((t for t in turnos_disponibles_dia if t.startswith("19")), "19:00-27:00")
+                        if turno_19 in turnos_disponibles_dia:
+                            turnos_disponibles_dia.remove(turno_19)
+                        programacion_matriz[cod_emp][col_nombre] = turno_19
+                        d_emp["TURNO_FIJO_BLOQUE"] = turno_19
+                        d_emp["ULTIMA_FRANJA"] = "NOCHE"
+                        continue
+
+                # 3. Regla especial Analistas: Reingreso en Domingo 11:00 tras su libre del Sábado
+                if es_analista and d_emp["VIENE_DE_NOCHE_19"] and nombre_dia_semana == "DOMINGO":
                     turno_11 = next((t for t in turnos_disponibles_dia if t.startswith("11")), "11:00-19:00")
                     if turno_11 in turnos_disponibles_dia:
                         turnos_disponibles_dia.remove(turno_11)
@@ -324,18 +343,14 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     d_emp["VIENE_DE_NOCHE_19"] = False
                     continue
 
-                # 3. Día Libre Programado
+                # 4. Día Libre Programado Estándar
                 if idx_dia in dias_libres_emp[cod_emp]:
                     programacion_matriz[cod_emp][col_nombre] = "L"
-                    if es_analista and d_emp["TURNO_FIJO_BLOQUE"] and d_emp["TURNO_FIJO_BLOQUE"].startswith("19"):
-                        d_emp["VIENE_DE_NOCHE_19"] = True
-                    else:
-                        d_emp["VIENE_DE_NOCHE_19"] = False
-                    
                     d_emp["TURNO_FIJO_BLOQUE"] = None
+                    d_emp["EN_BLOQUE_NOCHE_19"] = False
                     continue
 
-                # 4. Asignación de turno estándar
+                # 5. Asignación de turno estándar
                 turno_a_asignar = None
 
                 if d_emp["TURNO_FIJO_BLOQUE"] is not None:
@@ -368,8 +383,12 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     programacion_matriz[cod_emp][col_nombre] = turno_a_asignar
                     d_emp["TURNO_FIJO_BLOQUE"] = turno_a_asignar
                     d_emp["ULTIMA_FRANJA"] = clasificar_franja(turno_a_asignar)
+                    
+                    # Si un analista inicia el turno nocturno de 19:00 en un Sábado, activar bloque de 7 días
+                    if es_analista and nombre_dia_semana == "SÁBADO" and turno_a_asignar.startswith("19"):
+                        d_emp["EN_BLOQUE_NOCHE_19"] = True
 
-    return pd.DataFrame([{k: v for k, v in datos.items() if k not in ["INCIDENCIA_TIPO", "INCIDENCIA_INI", "INCIDENCIA_FIN", "TURNO_FIJO_BLOQUE", "ULTIMA_FRANJA", "VIENE_DE_NOCHE_19"]} for datos in programacion_matriz.values()])
+    return pd.DataFrame([{k: v for k, v in datos.items() if k not in ["INCIDENCIA_TIPO", "INCIDENCIA_INI", "INCIDENCIA_FIN", "TURNO_FIJO_BLOQUE", "ULTIMA_FRANJA", "VIENE_DE_NOCHE_19", "EN_BLOQUE_NOCHE_19"]} for datos in programacion_matriz.values()])
 
 # ==========================================
 # 4. GENERACIÓN DE RESULTADOS Y AUDITORÍA
