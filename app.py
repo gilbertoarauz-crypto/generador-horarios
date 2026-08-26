@@ -215,7 +215,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
         fechas_dt.append(f_actual)
         columnas_fechas.append(f"{dias_semana_es[f_actual.weekday()]}\n{f_actual.strftime('%d-%b')}")
 
-    # PARSEAR SEMANA ANTERIOR
     info_historial = {}
     if df_prev is not None and "CODIGO" in df_prev.columns:
         cols_dias_prev = [c for c in df_prev.columns if c not in ["CODIGO", "NOMBRE", "CARGO", "ESTADO"]]
@@ -251,10 +250,10 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             "INCIDENCIA_FIN": parsear_fecha_incidencia(emp.get("INCIDENCIA_FIN"), anio_ref),
             "TURNO_FIJO_BLOQUE": turno_previo_bloque,
             "ULTIMA_FRANJA": franja_previa,
-            "VIENE_DE_NOCHE_19": False  # Control especial para rotación Sáb-Vie en turno 19:00
+            "VIENE_DE_NOCHE_19": False
         }
 
-    # Asignación controlada de descansos
+    # Distribución estricta de descansos para evitar acumulación en fin de semana
     conteo_libres_analistas = {i: 0 for i in range(dias_totales)}
 
     for _, emp in df_personal.iterrows():
@@ -271,19 +270,14 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
 
             if es_analista:
                 indices_permitidos = [s * 7 + i for i in ([4, 5, 6] if total_analistas >= 5 else [3, 4, 5, 6])]
-                candidatos = []
-                for idx_d in indices_permitidos:
-                    dia_semana_idx = idx_d % 7
-                    if dia_semana_idx in [3, 4]:
-                        if conteo_libres_analistas[idx_d] < 1:
-                            candidatos.append(idx_d)
-                    else:
-                        candidatos.append(idx_d)
+                
+                # RESTRICCIÓN: Máximo 1 analista libre POR DÍA en TODO el fin de semana / bloque de libres
+                candidatos = [idx_d for idx_d in indices_permitidos if conteo_libres_analistas[idx_d] < 1]
                 
                 if len(candidatos) < cant_libres:
-                    candidatos = indices_permitidos
+                    candidatos = sorted(indices_permitidos, key=lambda x: conteo_libres_analistas[x])
 
-                elegidos = random.sample(candidatos, cant_libres)
+                elegidos = random.sample(candidatos[:cant_libres + 1], cant_libres)
                 for el in elegidos:
                     libres_indices_emp.add(el)
                     conteo_libres_analistas[el] += 1
@@ -319,7 +313,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                         d_emp["VIENE_DE_NOCHE_19"] = False
                         continue
 
-                # 2. Regla especial: Reingreso en Domingo 11:00 tras libre posterior al turno 19:00
+                # 2. Reingreso en Domingo 11:00 tras libre posterior al turno 19:00
                 if d_emp["VIENE_DE_NOCHE_19"] and nombre_dia_semana == "DOMINGO":
                     turno_11 = next((t for t in turnos_disponibles_dia if t.startswith("11")), "11:00-19:00")
                     if turno_11 in turnos_disponibles_dia:
@@ -333,7 +327,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                 # 3. Día Libre Programado
                 if idx_dia in dias_libres_emp[cod_emp]:
                     programacion_matriz[cod_emp][col_nombre] = "L"
-                    # Si finalizó el viernes el turno de 19:00 y descansa el sábado, activar bandera para el Domingo 11:00
                     if es_analista and d_emp["TURNO_FIJO_BLOQUE"] and d_emp["TURNO_FIJO_BLOQUE"].startswith("19"):
                         d_emp["VIENE_DE_NOCHE_19"] = True
                     else:
