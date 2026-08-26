@@ -254,37 +254,54 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             "EN_BLOQUE_NOCHE_19": False
         }
 
-    # Distribución estricta de descansos
+    # ASIGNACIÓN BALANCEADA DE DESCANSOS PARA ANALISTAS (MÁXIMO 1 POR DÍA EN TODA LA SEMANA)
     conteo_libres_analistas = {i: 0 for i in range(dias_totales)}
 
-    for _, emp in df_personal.iterrows():
+    for idx_a, emp in enumerate(analistas):
         cod = str(emp["CODIGO"]).strip()
-        cargo_emp = str(emp["CARGO"]).strip()
-        es_analista = "ANALISTA" in cargo_emp.upper()
-
         libres_indices_emp = set()
+
         for s in range(semanas_count):
             inicio_sem = fecha_base + timedelta(days=s * 7)
             fin_sem = inicio_sem + timedelta(days=6)
             hay_festivo_sem = any(inicio_sem.date() <= f <= fin_sem.date() for f in festivos_list)
             cant_libres = libres_base + (1 if hay_festivo_sem else 0)
 
-            if es_analista:
-                indices_permitidos = [s * 7 + i for i in ([4, 5, 6] if total_analistas >= 5 else [3, 4, 5, 6])]
-                candidatos = [idx_d for idx_d in indices_permitidos if conteo_libres_analistas[idx_d] < 1]
-                
-                if len(candidatos) < cant_libres:
-                    candidatos = sorted(indices_permitidos, key=lambda x: conteo_libres_analistas[x])
+            # Rango permitido: Jueves a Domingo (índices 3, 4, 5, 6) si <= 4 analistas, o Viernes a Domingo (4, 5, 6) si >= 5
+            base_dias = [3, 4, 5, 6] if total_analistas <= 4 else [4, 5, 6]
+            indices_semana = [s * 7 + i for i in base_dias]
 
-                elegidos = random.sample(candidatos[:cant_libres + 1], cant_libres)
-                for el in elegidos:
-                    libres_indices_emp.add(el)
-                    conteo_libres_analistas[el] += 1
+            # Escalonar el día asignado según la posición del analista
+            candidatos_validos = [idx for idx in indices_semana if conteo_libres_analistas[idx] < 1]
+
+            if len(candidatos_validos) >= cant_libres:
+                elegidos = candidatos_validos[:cant_libres]
             else:
+                # Si se agotan los cupos ideales, tomar los días con menor cantidad de analistas descansando
+                elegidos = sorted(indices_semana, key=lambda x: conteo_libres_analistas[x])[:cant_libres]
+
+            for el in elegidos:
+                libres_indices_emp.add(el)
+                conteo_libres_analistas[el] += 1
+
+        dias_libres_emp[cod] = libres_indices_emp
+
+    # Asignación estándar de libres para los demás cargos
+    for _, emp in df_personal.iterrows():
+        cod = str(emp["CODIGO"]).strip()
+        cargo_emp = str(emp["CARGO"]).strip()
+        if "ANALISTA" not in cargo_emp.upper():
+            libres_indices_emp = set()
+            for s in range(semanas_count):
+                inicio_sem = fecha_base + timedelta(days=s * 7)
+                fin_sem = inicio_sem + timedelta(days=6)
+                hay_festivo_sem = any(inicio_sem.date() <= f <= fin_sem.date() for f in festivos_list)
+                cant_libres = libres_base + (1 if hay_festivo_sem else 0)
+
                 dias_permitidos = list(range(s * 7, (s + 1) * 7))
                 libres_indices_emp.update(random.sample(dias_permitidos, cant_libres))
 
-        dias_libres_emp[cod] = libres_indices_emp
+            dias_libres_emp[cod] = libres_indices_emp
 
     for idx_dia, col_nombre in enumerate(columnas_fechas):
         fecha_col = fechas_dt[idx_dia]
@@ -316,14 +333,12 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                 # 2. Regla especial Analistas: Bloque Nocturno 19:00 estricto Sábado a Viernes
                 if es_analista and d_emp["EN_BLOQUE_NOCHE_19"]:
                     if nombre_dia_semana == "SÁBADO":
-                        # El sábado siguiente al bloque de noche se fuerza obligatoriamente como LIBRE
                         programacion_matriz[cod_emp][col_nombre] = "L"
                         d_emp["TURNO_FIJO_BLOQUE"] = None
                         d_emp["EN_BLOQUE_NOCHE_19"] = False
                         d_emp["VIENE_DE_NOCHE_19"] = True
                         continue
                     else:
-                        # Domingo a Viernes: Mantiene fijo el turno nocturno de las 19:00
                         turno_19 = next((t for t in turnos_disponibles_dia if t.startswith("19")), "19:00-27:00")
                         if turno_19 in turnos_disponibles_dia:
                             turnos_disponibles_dia.remove(turno_19)
@@ -384,7 +399,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     d_emp["TURNO_FIJO_BLOQUE"] = turno_a_asignar
                     d_emp["ULTIMA_FRANJA"] = clasificar_franja(turno_a_asignar)
                     
-                    # Si un analista inicia el turno nocturno de 19:00 en un Sábado, activar bloque de 7 días
                     if es_analista and nombre_dia_semana == "SÁBADO" and turno_a_asignar.startswith("19"):
                         d_emp["EN_BLOQUE_NOCHE_19"] = True
 
