@@ -82,7 +82,6 @@ def parsear_fecha_incidencia(val_fecha, anio_referencia):
         return None
 
 def generar_dias_libres_exactos(semanas_count, libres_base, festivos_list, fecha_inicio_dt):
-    """Garantiza la cantidad EXACTA de días libres asignados por semana sin exceder."""
     dias_libres_indices = set()
     for s in range(semanas_count):
         inicio_sem = fecha_inicio_dt + timedelta(days=s * 7)
@@ -179,7 +178,7 @@ if df_empleados is not None:
         matriz_demanda[cargo]["DOMINGO"] = list(req_dom)
 
 # ==========================================
-# 3. GENERACIÓN DE MALLA HORARIA CON CONTROL RIGUROSO DE LIBRES
+# 3. GENERACIÓN DE MALLA HORARIA
 # ==========================================
 def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda, libres_base, festivos_list):
     dias_totales = semanas_count * 7
@@ -194,7 +193,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
 
     programacion_matriz, dias_libres_emp = {}, {}
 
-    # Pre-asignar días libres EXACTOS por empleado
     for _, emp in df_personal.iterrows():
         cod = str(emp["CODIGO"]).strip()
         programacion_matriz[cod] = {
@@ -205,40 +203,32 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
         }
         dias_libres_emp[cod] = generar_dias_libres_exactos(semanas_count, libres_base, festivos_list, fecha_base)
 
-    # Recorrido día a día
     for idx_dia, col_nombre in enumerate(columnas_fechas):
         fecha_col = fechas_dt[idx_dia]
         fecha_actual_date = fecha_col.date()
         nombre_dia_semana = dias_semana_es[fecha_col.weekday()]
 
         for cargo in df_personal["CARGO"].unique():
-            # Obtener lista de tareas/turnos a cubrir ese día
             turnos_disponibles_dia = list(reglas_demanda.get(cargo, {}).get(nombre_dia_semana, []))
-            
-            # Obtener empleados del cargo
             empleados_cargo = [cod for cod, d in programacion_matriz.items() if d["CARGO"] == cargo]
             random.shuffle(empleados_cargo)
 
             for cod_emp in empleados_cargo:
                 d_emp = programacion_matriz[cod_emp]
 
-                # 1. Verificar Incidencias (Vacaciones, Licencias, Incapacidades)
                 if d_emp["INCIDENCIA_TIPO"] and d_emp["INCIDENCIA_INI"] and d_emp["INCIDENCIA_FIN"]:
                     if d_emp["INCIDENCIA_INI"] <= fecha_actual_date <= d_emp["INCIDENCIA_FIN"]:
                         programacion_matriz[cod_emp][col_nombre] = d_emp["INCIDENCIA_TIPO"]
                         continue
 
-                # 2. Verificar Libre Programado (Estricto)
                 if idx_dia in dias_libres_emp[cod_emp]:
                     programacion_matriz[cod_emp][col_nombre] = "L"
                     continue
 
-                # 3. Asignar Turno si hay disponible en el catálogo del día
                 if turnos_disponibles_dia:
                     turno_asignado = turnos_disponibles_dia.pop(0)
                     programacion_matriz[cod_emp][col_nombre] = turno_asignado
                 else:
-                    # Si ya no quedan tareas requeridas en la lista, se asigna un turno por defecto sin forzar un "L" extra
                     turnos_base_cargo = TURNOS_DEFAULT_POR_CARGO.get(cargo, {}).get("habil", ["08:00-17:00"])
                     programacion_matriz[cod_emp][col_nombre] = turnos_base_cargo[0]
 
@@ -261,7 +251,7 @@ if "df_resultado" in st.session_state:
     st.markdown("---")
 
     # ==========================================
-    # 5. REPORTE EXCLUSIVO DE TAREAS NO CUBIERTAS
+    # 5. REPORTE DE TAREAS NO CUBIERTAS (CON TURNO ESPECÍFICO)
     # ==========================================
     st.subheader("🚨 Reporte de Tareas NO CUBIERTAS por Faltante de Personal")
 
@@ -286,14 +276,28 @@ if "df_resultado" in st.session_state:
 
             if diferencia < 0:
                 faltantes = abs(diferencia)
+                
+                # Identificar turnos requeridos que no se pudieron cubrir
+                copia_disp = list(turnos_disp)
+                turnos_sin_cubrir = []
+                for tr in turnos_req:
+                    if tr in copia_disp:
+                        copia_disp.remove(tr)
+                    else:
+                        turnos_sin_cubrir.append(tr)
+                
+                # Si por alguna razón la lista de turnos específicos difiere, mostramos los sobrantes requeridos
+                texto_turnos_faltantes = ", ".join(turnos_sin_cubrir) if turnos_sin_cubrir else "Variación en capacidad"
+
                 reporte_incompletos.append({
                     "FECHA": col_f.replace("\n", " "),
                     "CARGO": cargo,
                     "TIPO DÍA": tipo_col_mat.capitalize(),
+                    "TURNO NO CUBIERTO": texto_turnos_faltantes,
                     "TAREAS REQUERIDAS": cant_req,
                     "PERSONAL ASIGNADO": cant_disp,
                     "PERSONAS FALTANTES": faltantes,
-                    "DETALLE DEL FALTANTE": f"Faltan {faltantes} personas para cubrir el total de tareas operativas"
+                    "DETALLE DEL FALTANTE": f"Faltan {faltantes} personas para cubrir el turno: {texto_turnos_faltantes}"
                 })
 
     df_incumplidas = pd.DataFrame(reporte_incompletos)
@@ -305,6 +309,8 @@ if "df_resultado" in st.session_state:
             st.metric("Total de Días/Cargos Incompletos", len(df_incumplidas))
         with m2:
             st.metric("Total de Turnos/Tareas Desatendidas", df_incumplidas["PERSONAS FALTANTES"].sum())
+        
+        # Se muestra la tabla incluyendo la nueva columna "TURNO NO CUBIERTO"
         st.dataframe(df_incumplidas, use_container_width=True)
     else:
         st.success("🎉 ¡Todas las tareas operativas requeridas quedan cubiertas al 100%!")
