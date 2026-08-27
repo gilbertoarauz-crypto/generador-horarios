@@ -87,7 +87,6 @@ dias_semana_es = ["LUNES", "MARTES", "MIÉRCOLES", "JUEVES", "VIERNES", "SÁBADO
 # FUNCIONES AUXILIARES DE TIEMPO Y FORMATO
 # ==========================================
 def obtener_iniciales_cargo(nombre_cargo):
-    """Genera acrónimos estándar del cargo de destino"""
     nombre = str(nombre_cargo).strip().upper()
     if "TÉCNICO" in nombre or "TECNICO" in nombre:
         return "TO"
@@ -303,7 +302,7 @@ if df_empleados is not None:
         matriz_demanda[cargo_clean]["DOMINGO"] = list(req_dom)
 
 # ==========================================
-# 3. GENERACIÓN DE MALLA CON MARCACIÓN DE INICIALES
+# 3. GENERACIÓN DE MALLA CON REINTERCAMBIO DINÁMICO
 # ==========================================
 def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda, libres_base, festivos_list, df_prev=None, mapa_reemplazos=None):
     if mapa_reemplazos is None:
@@ -326,7 +325,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             for _, fila in df_prev.iterrows():
                 c_cod = str(fila["CODIGO"]).strip()
                 val_ult = str(fila[cols_dias_prev[-1]]).strip()
-                # Limpiar sufijos anteriores para empalme correcto de la franja
                 val_ult_limpio = val_ult.split()[0] if " " in val_ult else val_ult
                 es_descanso_o_inc = val_ult_limpio.upper() in ["L", "AO", "VACACIONES", "LICENCIA", "INCAPACIDAD", "PERMISO"]
                 
@@ -430,7 +428,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
         empleados_ordenados = list(programacion_matriz.keys())
         random.shuffle(empleados_ordenados)
 
-        # PASADA 1: Asignación Normal
+        # PASADA 1: Asignación por secuencia preferente
         for cod_emp in empleados_ordenados:
             d_emp = programacion_matriz[cod_emp]
             cargo_orig = d_emp["CARGO_ORIGINAL"]
@@ -546,7 +544,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     d_emp["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = cargo_cubierto_hoy
                     d_emp["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = turno_a_asignar
 
-                    # FORMATO DE VISUALIZACIÓN: Agregar sufijo si cubre un cargo distinto
                     if cargo_cubierto_hoy != cargo_orig:
                         sufijo = obtener_iniciales_cargo(cargo_cubierto_hoy)
                         programacion_matriz[cod_emp][col_nombre] = f"{turno_a_asignar} {sufijo}"
@@ -563,7 +560,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                         else:
                             d_emp["SALIDA_PREVIA_DT"] = fecha_col.replace(hour=h_f, minute=m_f)
 
-        # PASADA 2: Recuperación de Pendientes
+        # PASADA 2: Recuperación de Pendientes y SWAP (Intercambio Dinámico)
         for cod_emp in empleados_ordenados:
             d_emp = programacion_matriz[cod_emp]
             cargo_orig = d_emp["CARGO_ORIGINAL"]
@@ -583,6 +580,8 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     if not turnos_disp_cargo:
                         continue
 
+                    # Intento Directo
+                    asignado_f2 = False
                     for cand_t in list(turnos_disp_cargo):
                         parsed_h = extraer_horas(cand_t)
                         if parsed_h:
@@ -608,7 +607,66 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                                     d_emp["SALIDA_PREVIA_DT"] = (fecha_col + timedelta(days=1)).replace(hour=h_f, minute=m_f)
                                 else:
                                     d_emp["SALIDA_PREVIA_DT"] = fecha_col.replace(hour=h_f, minute=m_f)
+                                asignado_f2 = True
                                 break
+
+                    # Intento SWAP (Intercambio inteligente con un compañero asignado hoy)
+                    if not asignado_f2 and turnos_disp_cargo:
+                        for cod_otro in empleados_ordenados:
+                            if cod_otro == cod_emp:
+                                continue
+                            d_otro = programacion_matriz[cod_otro]
+                            if d_otro["HISTORIAL_CARGOS_DIARIOS"].get(col_nombre) == c_eval:
+                                turno_otro = d_otro["HISTORIAL_TURNOS_LIMPIOS"].get(col_nombre)
+                                if turno_otro in ["L", "AO", "VACACIONES", "LICENCIA", "INCAPACIDAD", "PERMISO"]:
+                                    continue
+
+                                # Verificar si el colaborador en AO puede tomar el turno_otro
+                                parsed_otro = extraer_horas(turno_otro)
+                                if parsed_otro:
+                                    ent_otro_dt = fecha_col.replace(hour=parsed_otro[0], minute=parsed_otro[1])
+                                    if calcular_descanso_suficiente(d_emp["SALIDA_PREVIA_DT"], ent_otro_dt, min_horas=12):
+                                        # Verificar si d_otro puede tomar la tarea pendiente (cand_t)
+                                        for cand_pend in list(turnos_disp_cargo):
+                                            parsed_pend = extraer_horas(cand_pend)
+                                            if parsed_pend:
+                                                ent_pend_dt = fecha_col.replace(hour=parsed_pend[0], minute=parsed_pend[1])
+                                                if calcular_descanso_suficiente(d_otro["SALIDA_PREVIA_DT"], ent_pend_dt, min_horas=12):
+                                                    # EFECTUAR INTERCAMBIO
+                                                    # 1. Asignar al colaborador que estaba en AO
+                                                    programacion_matriz[cod_emp][col_nombre] = f"{turno_otro} {obtener_iniciales_cargo(c_eval)}" if c_eval != cargo_orig else turno_otro
+                                                    d_emp["TURNO_FIJO_BLOQUE"] = turno_otro
+                                                    d_emp["ULTIMA_FRANJA"] = clasificar_franja(turno_otro)
+                                                    d_emp["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = c_eval
+                                                    d_emp["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = turno_otro
+
+                                                    if parsed_otro[2] >= 24:
+                                                        d_emp["SALIDA_PREVIA_DT"] = (fecha_col + timedelta(days=1)).replace(hour=parsed_otro[2] - 24, minute=parsed_otro[3])
+                                                    elif parsed_otro[2] < parsed_otro[0]:
+                                                        d_emp["SALIDA_PREVIA_DT"] = (fecha_col + timedelta(days=1)).replace(hour=parsed_otro[2], minute=parsed_otro[3])
+                                                    else:
+                                                        d_emp["SALIDA_PREVIA_DT"] = fecha_col.replace(hour=parsed_otro[2], minute=parsed_otro[3])
+
+                                                    # 2. Re-asignar al compañero d_otro la tarea pendiente
+                                                    c_otro_orig = d_otro["CARGO_ORIGINAL"]
+                                                    programacion_matriz[cod_otro][col_nombre] = f"{cand_pend} {obtener_iniciales_cargo(c_eval)}" if c_eval != c_otro_orig else cand_pend
+                                                    d_otro["TURNO_FIJO_BLOQUE"] = cand_pend
+                                                    d_otro["ULTIMA_FRANJA"] = clasificar_franja(cand_pend)
+                                                    d_otro["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = c_eval
+                                                    d_otro["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = cand_pend
+
+                                                    if parsed_pend[2] >= 24:
+                                                        d_otro["SALIDA_PREVIA_DT"] = (fecha_col + timedelta(days=1)).replace(hour=parsed_pend[2] - 24, minute=parsed_pend[3])
+                                                    elif parsed_pend[2] < parsed_pend[0]:
+                                                        d_otro["SALIDA_PREVIA_DT"] = (fecha_col + timedelta(days=1)).replace(hour=parsed_pend[2], minute=parsed_pend[3])
+                                                    else:
+                                                        d_otro["SALIDA_PREVIA_DT"] = fecha_col.replace(hour=parsed_pend[2], minute=parsed_pend[3])
+
+                                                    turnos_disp_cargo.remove(cand_pend)
+                                                    asignado_f2 = True
+                                                    break
+                                if asignado_f2:
+                                    break
 
     return pd.DataFrame([{k: v for k, v in datos.items() if k not in ["INCIDENCIA_TIPO", "INCIDENCIA_INI", "INCIDENCIA_FIN", "PATRON_BASE", "TURNO_FIJO_BLOQUE", "ULTIMA_FRANJA", "CARGO_ORIGINAL", "CARGO_SECUNDARIO", "SALIDA_PREVIA_DT", "HISTORIAL_CARGOS_DIARIOS", "HISTORIAL_TURNOS_LIMPIOS"]} for datos in programacion_matriz.values()]), programacion_matriz
 
