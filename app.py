@@ -286,7 +286,7 @@ if df_empleados is not None:
         matriz_demanda[cargo_clean]["DOMINGO"] = list(req_dom)
 
 # ==========================================
-# 3. GENERACIÓN DE MALLA OPTIMIZADA
+# 3. GENERACIÓN DE MALLA SIN TURNOS COMODÍN
 # ==========================================
 def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda, libres_base, festivos_list, df_prev=None, mapa_reemplazos=None):
     if mapa_reemplazos is None:
@@ -415,13 +415,13 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                 if turno_sugerido == "L" and dia_semana_idx <= 4:
                     if libres_analistas_hoy >= 1:
                         candidatos = [t for t in patrones_analistas[p_base] if t not in ["L", "vacaciones"] and t not in turnos_usados_analistas_hoy]
-                        turno_sugerido = candidatos[0] if candidatos else "08:00-17:00"
+                        turno_sugerido = candidatos[0] if candidatos else "AO"
                     else:
                         libres_analistas_hoy += 1
 
                 if turno_sugerido not in ["L", "vacaciones"]:
                     if turno_sugerido in turnos_usados_analistas_hoy:
-                        alt_turnos = [t for t in CATALOGO_TURNOS if t not in turnos_usados_analistas_hoy]
+                        alt_turnos = [t for t in demandas_dia_actual.get(cargo_orig, []) if t not in turnos_usados_analistas_hoy]
                         turno_sugerido = alt_turnos[0] if alt_turnos else "AO"
                     if turno_sugerido != "AO":
                         turnos_usados_analistas_hoy.add(turno_sugerido)
@@ -441,6 +441,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                 turno_a_asignar = None
                 cargo_cubierto_hoy = cargo_orig
 
+                # Prioridad 1: Cargo Origen | Prioridad 2: Cargo Secundario
                 cargos_a_evaluar = [cargo_orig, cargo_sec] if cargo_sec else [cargo_orig]
 
                 for c_eval in cargos_a_evaluar:
@@ -451,6 +452,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     if not turnos_disp_cargo:
                         continue
 
+                    # Verificar si se puede mantener el turno fijado del bloque
                     if d_emp["TURNO_FIJO_BLOQUE"] in turnos_disp_cargo:
                         cand_t = d_emp["TURNO_FIJO_BLOQUE"]
                         parsed_h = extraer_horas(cand_t)
@@ -464,6 +466,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                                 cargo_cubierto_hoy = c_eval
                                 break
 
+                    # Asignar cualquier turno pendiente de la matriz que respete 12 horas
                     franja_ult = d_emp["ULTIMA_FRANJA"]
                     franjas_permitidas = obtener_siguiente_franja_permitida(franja_ult) if franja_ult else ["NOCHE", "TARDE", "MAÑANA"]
 
@@ -484,6 +487,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     if turno_a_asignar:
                         break
 
+                # SIN TURNO COMODÍN: Si no hay tarea requerida en la matriz, queda a órdenes ("AO")
                 if turno_a_asignar is None:
                     programacion_matriz[cod_emp][col_nombre] = "AO"
                     d_emp["TURNO_FIJO_BLOQUE"] = None
@@ -568,7 +572,7 @@ if "df_resultado" in st.session_state:
         st.success("✅ Todo el personal trabajó al 100% en tareas correspondientes a su cargo original.")
 
     # ==========================================
-    # 6. RESUMEN EN ROJO DE TAREAS NO ASIGNADAS POR SEMANA
+    # 6. RESUMEN EN ROJO DE TAREAS NO ASIGNADAS POR SEMANA (EXCLUSIVO MATRIZ)
     # ==========================================
     st.markdown("---")
     st.subheader("🚨 Resumen Semanal de Tareas Desatendidas / Faltantes")
@@ -588,6 +592,7 @@ if "df_resultado" in st.session_state:
                 tipo_col_mat = "SABADO" if dia_nombre_ext in ["SÁBADO", "SABADO"] else ("DOMINGO" if dia_nombre_ext == "DOMINGO" else "HABIL")
                 col_target_mat = next((c for c in sub_mat.columns if tipo_col_mat in c), None)
 
+                # Obtener únicamente las tareas explicitadas en la matriz cargada
                 turnos_req = [str(x).strip() for x in sub_mat[col_target_mat].dropna().tolist() if str(x).strip() != ""] if col_target_mat else []
 
                 turnos_cubiertos = []
@@ -628,7 +633,6 @@ if "df_resultado" in st.session_state:
                 return "background-color: #e6ffed; color: #0d5a22;"
 
             st.markdown(f"##### 📌 Semana {s + 1}")
-            # CORRECCIÓN DE LA OBSOLECENCIA DE PANDAS (Uso de .map en vez de .applymap)
             st.dataframe(tabla_pivot.style.map(resaltar_faltantes_rojo), use_container_width=True)
 
     # ==========================================
