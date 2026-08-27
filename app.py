@@ -302,7 +302,7 @@ if df_empleados is not None:
         matriz_demanda[cargo_clean]["DOMINGO"] = list(req_dom)
 
 # ==========================================
-# 3. GENERACIÓN DE MALLA OPTIMIZADA (BALANCEO L-D)
+# 3. GENERACIÓN DE MALLA OPTIMIZADA CON POLIVALENCIA DE TÉCNICOS
 # ==========================================
 def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda, libres_base, festivos_list, df_prev=None, mapa_reemplazos=None):
     if mapa_reemplazos is None:
@@ -372,7 +372,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
 
     conteo_libres_tecnicos = {i: 0 for i in range(dias_totales)}
 
-    # PROGRAMACIÓN BALANCEADA DE DESCANSOS (LUNES A DOMINGO)
     for _, emp in df_personal.iterrows():
         cod = str(emp["CODIGO"]).strip()
         cargo_emp = programacion_matriz[cod]["CARGO_ORIGINAL"]
@@ -388,9 +387,9 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                 if cod in lideres:
                     idx_lider = lideres.index(cod)
                     if idx_lider % 2 == 0:
-                        libres_indices_emp.add(s * 7 + 4) # Viernes
+                        libres_indices_emp.add(s * 7 + 4)
                     else:
-                        libres_indices_emp.add(s * 7 + 5) # Sábado
+                        libres_indices_emp.add(s * 7 + 5)
 
                 elif cod in tecnicos:
                     indices_semana = [s * 7 + i for i in range(7)]
@@ -406,7 +405,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                         conteo_libres_tecnicos[el] += 1
 
                 else:
-                    # AUXILIARES DE OPERACIONES / ALISTAMIENTO: Asignación libre LUNES A DOMINGO
                     dias_permitidos = list(range(s * 7, (s + 1) * 7))
                     libres_indices_emp.update(random.sample(dias_permitidos, cant_libres))
 
@@ -489,10 +487,11 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     if not turnos_disp_cargo:
                         continue
 
-                    if "TÉCNICO" in c_eval or "TECNICO" in c_eval:
-                        turnos_disp_cargo.sort(
-                            key=lambda t: 0 if any(str(t).startswith(p) for p in ["03", "11", "19"]) else 1
-                        )
+                    # REGLA DE PRIORIDAD EN TÉCNICOS:
+                    # Si el colaborador asignado es TÉCNICO DE PLANTA, forzar turnos prioritarios (03, 11, 19).
+                    # Si es un POLIVALENTE cubriendo Técnico, toma preferentemente los turnos DIVERSOS a (03, 11, 19).
+                    es_tecnico_planta = ("TÉCNICO" in cargo_orig or "TECNICO" in cargo_orig)
+                    es_cubriendo_tecnico = ("TÉCNICO" in c_eval or "TECNICO" in c_eval)
 
                     if d_emp["TURNO_FIJO_BLOQUE"] in turnos_disp_cargo:
                         cand_t = d_emp["TURNO_FIJO_BLOQUE"]
@@ -511,12 +510,20 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     franjas_permitidas = obtener_siguiente_franja_permitida(franja_ult) if franja_ult else ["NOCHE", "TARDE", "MAÑANA"]
 
                     cand_list = list(turnos_disp_cargo)
-                    
-                    if "TÉCNICO" in c_eval or "TECNICO" in c_eval:
-                        cand_list.sort(
-                            key=lambda t: (0 if any(str(t).startswith(p) for p in ["03", "11", "19"]) else 1,
-                                           0 if clasificar_franja(t) in franjas_permitidas else 1)
-                        )
+
+                    if es_cubriendo_tecnico:
+                        if es_tecnico_planta:
+                            # Prioridad 1: Turnos esenciales (03, 11, 19) para Técnicos de Planta
+                            cand_list.sort(
+                                key=lambda t: (0 if any(str(t).startswith(p) for p in ["03", "11", "19"]) else 1,
+                                               0 if clasificar_franja(t) in franjas_permitidas else 1)
+                            )
+                        else:
+                            # Prioridad 1: Turnos secundarios/distintos a (03, 11, 19) para Auxiliares/Polivalentes
+                            cand_list.sort(
+                                key=lambda t: (1 if any(str(t).startswith(p) for p in ["03", "11", "19"]) else 0,
+                                               0 if clasificar_franja(t) in franjas_permitidas else 1)
+                            )
                     else:
                         cand_list.sort(key=lambda t: 0 if clasificar_franja(t) in franjas_permitidas else 1)
 
@@ -562,7 +569,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                         else:
                             d_emp["SALIDA_PREVIA_DT"] = fecha_col.replace(hour=h_f, minute=m_f)
 
-        # PASADA 2: Cero AO Artificiales + Intercambio Inteligente (SWAP)
+        # PASADA 2: Recuperación de Pendientes y SWAP
         for cod_emp in empleados_ordenados:
             d_emp = programacion_matriz[cod_emp]
             cargo_orig = d_emp["CARGO_ORIGINAL"]
@@ -582,7 +589,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     if not turnos_disp_cargo:
                         continue
 
-                    # Intento Directo de Asignación de Pendientes
                     asignado_f2 = False
                     for cand_t in list(turnos_disp_cargo):
                         parsed_h = extraer_horas(cand_t)
@@ -612,7 +618,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                                 asignado_f2 = True
                                 break
 
-                    # Intento SWAP para resolver choque de 12h
                     if not asignado_f2 and turnos_disp_cargo:
                         for cod_otro in empleados_ordenados:
                             if cod_otro == cod_emp:
