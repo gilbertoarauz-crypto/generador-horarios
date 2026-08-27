@@ -468,6 +468,12 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     if not turnos_disp_cargo:
                         continue
 
+                    # PRIORIZACIÓN DE TURNOS CRÍTICOS (03:00, 11:00, 19:00) PARA TÉCNICOS DE OPERACIONES
+                    if "TÉCNICO" in c_eval or "TECNICO" in c_eval:
+                        turnos_disp_cargo.sort(
+                            key=lambda t: 0 if any(str(t).startswith(p) for p in ["03", "11", "19"]) else 1
+                        )
+
                     if d_emp["TURNO_FIJO_BLOQUE"] in turnos_disp_cargo:
                         cand_t = d_emp["TURNO_FIJO_BLOQUE"]
                         parsed_h = extraer_horas(cand_t)
@@ -485,7 +491,15 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     franjas_permitidas = obtener_siguiente_franja_permitida(franja_ult) if franja_ult else ["NOCHE", "TARDE", "MAÑANA"]
 
                     cand_list = list(turnos_disp_cargo)
-                    cand_list.sort(key=lambda t: 0 if clasificar_franja(t) in franjas_permitidas else 1)
+                    
+                    # Para Técnicos, forzar primero la selección de 03, 11 y 19
+                    if "TÉCNICO" in c_eval or "TECNICO" in c_eval:
+                        cand_list.sort(
+                            key=lambda t: (0 if any(str(t).startswith(p) for p in ["03", "11", "19"]) else 1,
+                                           0 if clasificar_franja(t) in franjas_permitidas else 1)
+                        )
+                    else:
+                        cand_list.sort(key=lambda t: 0 if clasificar_franja(t) in franjas_permitidas else 1)
 
                     for cand_t in cand_list:
                         parsed_h = extraer_horas(cand_t)
@@ -592,7 +606,6 @@ if "df_resultado" in st.session_state:
 
     for s in range(semanas):
         cols_semana = cols_fechas_malla[s * 7 : (s + 1) * 7]
-        # Crear lista limpia con los nombres de las columnas en orden cronológico LUNES-DOMINGO
         cols_semana_limpias = [c.replace("\n", " ") for c in cols_semana]
         
         datos_resumen_semana = []
@@ -641,7 +654,6 @@ if "df_resultado" in st.session_state:
                 fill_value=0
             )
 
-            # Reordenar explícitamente las columnas para forzar la secuencia estricta LUNES a DOMINGO
             cols_existentes_ordenadas = [c for c in cols_semana_limpias if c in tabla_pivot.columns]
             tabla_pivot = tabla_pivot.reindex(columns=cols_existentes_ordenadas)
 
