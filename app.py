@@ -302,7 +302,7 @@ if df_empleados is not None:
         matriz_demanda[cargo_clean]["DOMINGO"] = list(req_dom)
 
 # ==========================================
-# 3. GENERACIÓN DE MALLA CON REINTERCAMBIO DINÁMICO
+# 3. GENERACIÓN DE MALLA OPTIMIZADA (BALANCEO L-D)
 # ==========================================
 def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda, libres_base, festivos_list, df_prev=None, mapa_reemplazos=None):
     if mapa_reemplazos is None:
@@ -372,6 +372,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
 
     conteo_libres_tecnicos = {i: 0 for i in range(dias_totales)}
 
+    # PROGRAMACIÓN BALANCEADA DE DESCANSOS (LUNES A DOMINGO)
     for _, emp in df_personal.iterrows():
         cod = str(emp["CODIGO"]).strip()
         cargo_emp = programacion_matriz[cod]["CARGO_ORIGINAL"]
@@ -387,9 +388,9 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                 if cod in lideres:
                     idx_lider = lideres.index(cod)
                     if idx_lider % 2 == 0:
-                        libres_indices_emp.add(s * 7 + 4)
+                        libres_indices_emp.add(s * 7 + 4) # Viernes
                     else:
-                        libres_indices_emp.add(s * 7 + 5)
+                        libres_indices_emp.add(s * 7 + 5) # Sábado
 
                 elif cod in tecnicos:
                     indices_semana = [s * 7 + i for i in range(7)]
@@ -405,6 +406,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                         conteo_libres_tecnicos[el] += 1
 
                 else:
+                    # AUXILIARES DE OPERACIONES / ALISTAMIENTO: Asignación libre LUNES A DOMINGO
                     dias_permitidos = list(range(s * 7, (s + 1) * 7))
                     libres_indices_emp.update(random.sample(dias_permitidos, cant_libres))
 
@@ -428,7 +430,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
         empleados_ordenados = list(programacion_matriz.keys())
         random.shuffle(empleados_ordenados)
 
-        # PASADA 1: Asignación por secuencia preferente
+        # PASADA 1: Asignación Preferente
         for cod_emp in empleados_ordenados:
             d_emp = programacion_matriz[cod_emp]
             cargo_orig = d_emp["CARGO_ORIGINAL"]
@@ -560,7 +562,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                         else:
                             d_emp["SALIDA_PREVIA_DT"] = fecha_col.replace(hour=h_f, minute=m_f)
 
-        # PASADA 2: Recuperación de Pendientes y SWAP (Intercambio Dinámico)
+        # PASADA 2: Cero AO Artificiales + Intercambio Inteligente (SWAP)
         for cod_emp in empleados_ordenados:
             d_emp = programacion_matriz[cod_emp]
             cargo_orig = d_emp["CARGO_ORIGINAL"]
@@ -580,7 +582,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     if not turnos_disp_cargo:
                         continue
 
-                    # Intento Directo
+                    # Intento Directo de Asignación de Pendientes
                     asignado_f2 = False
                     for cand_t in list(turnos_disp_cargo):
                         parsed_h = extraer_horas(cand_t)
@@ -610,7 +612,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                                 asignado_f2 = True
                                 break
 
-                    # Intento SWAP (Intercambio inteligente con un compañero asignado hoy)
+                    # Intento SWAP para resolver choque de 12h
                     if not asignado_f2 and turnos_disp_cargo:
                         for cod_otro in empleados_ordenados:
                             if cod_otro == cod_emp:
@@ -621,19 +623,15 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                                 if turno_otro in ["L", "AO", "VACACIONES", "LICENCIA", "INCAPACIDAD", "PERMISO"]:
                                     continue
 
-                                # Verificar si el colaborador en AO puede tomar el turno_otro
                                 parsed_otro = extraer_horas(turno_otro)
                                 if parsed_otro:
                                     ent_otro_dt = fecha_col.replace(hour=parsed_otro[0], minute=parsed_otro[1])
                                     if calcular_descanso_suficiente(d_emp["SALIDA_PREVIA_DT"], ent_otro_dt, min_horas=12):
-                                        # Verificar si d_otro puede tomar la tarea pendiente (cand_t)
                                         for cand_pend in list(turnos_disp_cargo):
                                             parsed_pend = extraer_horas(cand_pend)
                                             if parsed_pend:
                                                 ent_pend_dt = fecha_col.replace(hour=parsed_pend[0], minute=parsed_pend[1])
                                                 if calcular_descanso_suficiente(d_otro["SALIDA_PREVIA_DT"], ent_pend_dt, min_horas=12):
-                                                    # EFECTUAR INTERCAMBIO
-                                                    # 1. Asignar al colaborador que estaba en AO
                                                     programacion_matriz[cod_emp][col_nombre] = f"{turno_otro} {obtener_iniciales_cargo(c_eval)}" if c_eval != cargo_orig else turno_otro
                                                     d_emp["TURNO_FIJO_BLOQUE"] = turno_otro
                                                     d_emp["ULTIMA_FRANJA"] = clasificar_franja(turno_otro)
@@ -647,7 +645,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                                                     else:
                                                         d_emp["SALIDA_PREVIA_DT"] = fecha_col.replace(hour=parsed_otro[2], minute=parsed_otro[3])
 
-                                                    # 2. Re-asignar al compañero d_otro la tarea pendiente
                                                     c_otro_orig = d_otro["CARGO_ORIGINAL"]
                                                     programacion_matriz[cod_otro][col_nombre] = f"{cand_pend} {obtener_iniciales_cargo(c_eval)}" if c_eval != c_otro_orig else cand_pend
                                                     d_otro["TURNO_FIJO_BLOQUE"] = cand_pend
