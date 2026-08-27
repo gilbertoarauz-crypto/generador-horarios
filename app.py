@@ -84,8 +84,25 @@ if tiene_festivo:
 dias_semana_es = ["LUNES", "MARTES", "MIÉRCOLES", "JUEVES", "VIERNES", "SÁBADO", "DOMINGO"]
 
 # ==========================================
-# FUNCIONES AUXILIARES DE TIEMPO Y ROTACIÓN
+# FUNCIONES AUXILIARES DE TIEMPO Y FORMATO
 # ==========================================
+def obtener_iniciales_cargo(nombre_cargo):
+    """Genera acrónimos estándar del cargo de destino"""
+    nombre = str(nombre_cargo).strip().upper()
+    if "TÉCNICO" in nombre or "TECNICO" in nombre:
+        return "TO"
+    elif "ANALISTA" in nombre:
+        return "AO"
+    elif "AUXILIAR DE OPERACIONES" in nombre:
+        return "AO"
+    elif "LÍDER" in nombre or "LIDER" in nombre:
+        return "OL"
+    elif "ALISTAMIENTO" in nombre:
+        return "AA"
+    else:
+        palabras = [p for p in nombre.split() if p not in ["DE", "DEL", "LA", "EL"]]
+        return "".join([p[0] for p in palabras])
+
 def extraer_horas(texto_turno):
     coincidencia = re.search(r"(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})", str(texto_turno))
     if coincidencia:
@@ -286,7 +303,7 @@ if df_empleados is not None:
         matriz_demanda[cargo_clean]["DOMINGO"] = list(req_dom)
 
 # ==========================================
-# 3. GENERACIÓN DE MALLA OPTIMIZADA CON SEGUNDA PASADA
+# 3. GENERACIÓN DE MALLA CON MARCACIÓN DE INICIALES
 # ==========================================
 def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda, libres_base, festivos_list, df_prev=None, mapa_reemplazos=None):
     if mapa_reemplazos is None:
@@ -309,11 +326,13 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             for _, fila in df_prev.iterrows():
                 c_cod = str(fila["CODIGO"]).strip()
                 val_ult = str(fila[cols_dias_prev[-1]]).strip()
-                es_descanso_o_inc = val_ult.upper() in ["L", "AO", "VACACIONES", "LICENCIA", "INCAPACIDAD", "PERMISO"]
+                # Limpiar sufijos anteriores para empalme correcto de la franja
+                val_ult_limpio = val_ult.split()[0] if " " in val_ult else val_ult
+                es_descanso_o_inc = val_ult_limpio.upper() in ["L", "AO", "VACACIONES", "LICENCIA", "INCAPACIDAD", "PERMISO"]
                 
                 info_historial[c_cod] = {
-                    "ultimo_turno": None if es_descanso_o_inc else val_ult,
-                    "ultima_franja": None if es_descanso_o_inc else clasificar_franja(val_ult),
+                    "ultimo_turno": None if es_descanso_o_inc else val_ult_limpio,
+                    "ultima_franja": None if es_descanso_o_inc else clasificar_franja(val_ult_limpio),
                     "termino_en_descanso": es_descanso_o_inc
                 }
 
@@ -341,7 +360,8 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             "TURNO_FIJO_BLOQUE": hist.get("ultimo_turno") if not hist.get("termino_en_descanso", True) else None,
             "ULTIMA_FRANJA": hist.get("ultima_franja"),
             "SALIDA_PREVIA_DT": None,
-            "HISTORIAL_CARGOS_DIARIOS": {}
+            "HISTORIAL_CARGOS_DIARIOS": {},
+            "HISTORIAL_TURNOS_LIMPIOS": {}
         }
 
         if "ANALISTA" in cargo_original:
@@ -410,7 +430,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
         empleados_ordenados = list(programacion_matriz.keys())
         random.shuffle(empleados_ordenados)
 
-        # PASADA 1: Asignación Estándar y Continuidad de Bloques
+        # PASADA 1: Asignación Normal
         for cod_emp in empleados_ordenados:
             d_emp = programacion_matriz[cod_emp]
             cargo_orig = d_emp["CARGO_ORIGINAL"]
@@ -422,6 +442,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     d_emp["TURNO_FIJO_BLOQUE"] = None
                     d_emp["SALIDA_PREVIA_DT"] = None
                     d_emp["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = cargo_orig
+                    d_emp["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = d_emp["INCIDENCIA_TIPO"]
                     continue
 
             if "ANALISTA" in cargo_orig:
@@ -444,6 +465,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
 
                 programacion_matriz[cod_emp][col_nombre] = turno_sugerido
                 d_emp["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = cargo_orig
+                d_emp["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = turno_sugerido
 
             else:
                 if idx_dia in dias_libres_emp.get(cod_emp, set()):
@@ -451,6 +473,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     d_emp["TURNO_FIJO_BLOQUE"] = None
                     d_emp["SALIDA_PREVIA_DT"] = None
                     d_emp["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = cargo_orig
+                    d_emp["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = "L"
                     continue
 
                 turno_a_asignar = None
@@ -516,11 +539,19 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     d_emp["TURNO_FIJO_BLOQUE"] = None
                     d_emp["SALIDA_PREVIA_DT"] = None
                     d_emp["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = cargo_orig
+                    d_emp["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = "AO"
                 else:
-                    programacion_matriz[cod_emp][col_nombre] = turno_a_asignar
                     d_emp["TURNO_FIJO_BLOQUE"] = turno_a_asignar
                     d_emp["ULTIMA_FRANJA"] = clasificar_franja(turno_a_asignar)
                     d_emp["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = cargo_cubierto_hoy
+                    d_emp["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = turno_a_asignar
+
+                    # FORMATO DE VISUALIZACIÓN: Agregar sufijo si cubre un cargo distinto
+                    if cargo_cubierto_hoy != cargo_orig:
+                        sufijo = obtener_iniciales_cargo(cargo_cubierto_hoy)
+                        programacion_matriz[cod_emp][col_nombre] = f"{turno_a_asignar} {sufijo}"
+                    else:
+                        programacion_matriz[cod_emp][col_nombre] = turno_a_asignar
 
                     parsed_h = extraer_horas(turno_a_asignar)
                     if parsed_h:
@@ -532,7 +563,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                         else:
                             d_emp["SALIDA_PREVIA_DT"] = fecha_col.replace(hour=h_f, minute=m_f)
 
-        # PASADA 2: Recuperación Estricta de Faltantes (Elimina AÓrdenes artificiales)
+        # PASADA 2: Recuperación de Pendientes
         for cod_emp in empleados_ordenados:
             d_emp = programacion_matriz[cod_emp]
             cargo_orig = d_emp["CARGO_ORIGINAL"]
@@ -559,11 +590,17 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                             entrada_dt = fecha_col.replace(hour=h_i, minute=m_i)
 
                             if calcular_descanso_suficiente(d_emp["SALIDA_PREVIA_DT"], entrada_dt, min_horas=12):
-                                programacion_matriz[cod_emp][col_nombre] = cand_t
                                 d_emp["TURNO_FIJO_BLOQUE"] = cand_t
                                 d_emp["ULTIMA_FRANJA"] = clasificar_franja(cand_t)
                                 d_emp["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = c_eval
+                                d_emp["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = cand_t
                                 turnos_disp_cargo.remove(cand_t)
+
+                                if c_eval != cargo_orig:
+                                    sufijo = obtener_iniciales_cargo(c_eval)
+                                    programacion_matriz[cod_emp][col_nombre] = f"{cand_t} {sufijo}"
+                                else:
+                                    programacion_matriz[cod_emp][col_nombre] = cand_t
 
                                 if h_f >= 24:
                                     d_emp["SALIDA_PREVIA_DT"] = (fecha_col + timedelta(days=1)).replace(hour=h_f - 24, minute=m_f)
@@ -573,7 +610,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                                     d_emp["SALIDA_PREVIA_DT"] = fecha_col.replace(hour=h_f, minute=m_f)
                                 break
 
-    return pd.DataFrame([{k: v for k, v in datos.items() if k not in ["INCIDENCIA_TIPO", "INCIDENCIA_INI", "INCIDENCIA_FIN", "PATRON_BASE", "TURNO_FIJO_BLOQUE", "ULTIMA_FRANJA", "CARGO_ORIGINAL", "CARGO_SECUNDARIO", "SALIDA_PREVIA_DT", "HISTORIAL_CARGOS_DIARIOS"]} for datos in programacion_matriz.values()]), programacion_matriz
+    return pd.DataFrame([{k: v for k, v in datos.items() if k not in ["INCIDENCIA_TIPO", "INCIDENCIA_INI", "INCIDENCIA_FIN", "PATRON_BASE", "TURNO_FIJO_BLOQUE", "ULTIMA_FRANJA", "CARGO_ORIGINAL", "CARGO_SECUNDARIO", "SALIDA_PREVIA_DT", "HISTORIAL_CARGOS_DIARIOS", "HISTORIAL_TURNOS_LIMPIOS"]} for datos in programacion_matriz.values()]), programacion_matriz
 
 # ==========================================
 # 4. GENERACIÓN DE RESULTADOS Y AUDITORÍA
@@ -606,6 +643,7 @@ if "df_resultado" in st.session_state:
         cargo_orig = d_emp["CARGO_ORIGINAL"]
         cargo_sec = d_emp["CARGO_SECUNDARIO"]
         historial_cargos = d_emp.get("HISTORIAL_CARGOS_DIARIOS", {})
+        historial_turnos_limpios = d_emp.get("HISTORIAL_TURNOS_LIMPIOS", {})
 
         if cargo_sec:
             for s in range(semanas):
@@ -614,7 +652,7 @@ if "df_resultado" in st.session_state:
                 dias_cubiertos = []
                 for col in cols_semana:
                     if historial_cargos.get(col) == cargo_sec:
-                        val_t = d_emp.get(col, "")
+                        val_t = historial_turnos_limpios.get(col, "")
                         if val_t not in ["L", "AO", "VACACIONES", "LICENCIA", "INCAPACIDAD", "PERMISO"]:
                             dias_cubiertos.append(f"{col.split()[0]}: {val_t}")
 
@@ -662,7 +700,7 @@ if "df_resultado" in st.session_state:
                 turnos_cubiertos = []
                 for cod_e, d_e in dict_matriz.items():
                     if d_e.get("HISTORIAL_CARGOS_DIARIOS", {}).get(col_f) == cargo_clean:
-                        val_t = d_e.get(col_f, "")
+                        val_t = d_e.get("HISTORIAL_TURNOS_LIMPIOS", {}).get(col_f, "")
                         if val_t not in ["L", "AO", "VACACIONES", "LICENCIA", "INCAPACIDAD", "PERMISO"]:
                             turnos_cubiertos.append(val_t)
 
@@ -725,7 +763,7 @@ if "df_resultado" in st.session_state:
             turnos_disp = []
             for cod_e, d_e in dict_matriz.items():
                 if d_e.get("HISTORIAL_CARGOS_DIARIOS", {}).get(col_f) == cargo_clean:
-                    val_t = d_e.get(col_f, "")
+                    val_t = d_e.get("HISTORIAL_TURNOS_LIMPIOS", {}).get(col_f, "")
                     if val_t not in ["L", "AO", "VACACIONES", "LICENCIA", "INCAPACIDAD", "PERMISO"]:
                         turnos_disp.append(val_t)
 
