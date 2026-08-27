@@ -155,7 +155,7 @@ if uploaded_tareas_file is not None:
         st.error(f"Error en archivo de tareas: {e}")
 else:
     filas_default = []
-    for c, t_dict in TURNOS_DEFAULTPOR_CARGO.items():
+    for c, t_dict in TURNOS_DEFAULT_POR_CARGO.items():
         max_len = max(len(t_dict["habil"]), len(t_dict["sabado"]), len(t_dict["domingo"]))
         for i in range(max_len):
             filas_default.append({
@@ -298,7 +298,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
         cod = str(emp["CODIGO"]).strip()
         cargo_original = str(emp["CARGO"]).strip().upper()
         
-        # Aplicar cambio de cargo si está mapeado en reemplazos
         cargo_operativo = mapa_reemplazos.get(cod, cargo_original)
         hist = info_historial.get(cod, {})
 
@@ -318,7 +317,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             idx_patron_analistas_counter += 1
             programacion_matriz[cod]["PATRON_BASE"] = p_idx_base
 
-    # REGLA OPERADORES LÍDERES: Un líder descansa Viernes y el otro Sábado
     lideres = [cod for cod, d in programacion_matriz.items() if "LÍDER" in d["CARGO"] or "LIDER" in d["CARGO"]]
     
     for _, emp in df_personal.iterrows():
@@ -333,20 +331,18 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                 hay_festivo_sem = any(inicio_sem.date() <= f <= fin_sem.date() for f in festivos_list)
                 cant_libres = libres_base + (1 if hay_festivo_sem else 0)
 
-                # Si es Operador Líder: Forzar Viernes (índice 4) para uno y Sábado (índice 5) para el otro
                 if cod in lideres:
                     idx_lider = lideres.index(cod)
                     if idx_lider % 2 == 0:
-                        libres_indices_emp.add(s * 7 + 4)  # Viernes
+                        libres_indices_emp.add(s * 7 + 4)
                     else:
-                        libres_indices_emp.add(s * 7 + 5)  # Sábado
+                        libres_indices_emp.add(s * 7 + 5)
                 else:
                     dias_permitidos = list(range(s * 7, (s + 1) * 7))
                     libres_indices_emp.update(random.sample(dias_permitidos, cant_libres))
 
             dias_libres_emp[cod] = libres_indices_emp
 
-    # PROCESAMIENTO DÍA A DÍA
     for idx_dia, col_nombre in enumerate(columnas_fechas):
         fecha_col = fechas_dt[idx_dia]
         fecha_actual_date = fecha_col.date()
@@ -370,14 +366,12 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             for cod_emp in empleados_cargo:
                 d_emp = programacion_matriz[cod_emp]
 
-                # 1. Incidencias
                 if d_emp["INCIDENCIA_TIPO"] and d_emp["INCIDENCIA_INI"] and d_emp["INCIDENCIA_FIN"]:
                     if d_emp["INCIDENCIA_INI"] <= fecha_actual_date <= d_emp["INCIDENCIA_FIN"]:
                         programacion_matriz[cod_emp][col_nombre] = d_emp["INCIDENCIA_TIPO"]
                         d_emp["TURNO_FIJO_BLOQUE"] = None
                         continue
 
-                # 2. ANALISTAS
                 if is_analista:
                     p_base = d_emp["PATRON_BASE"]
                     turno_sugerido = patrones_analistas[p_base][dia_matriz_14]
@@ -398,7 +392,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
 
                     programacion_matriz[cod_emp][col_nombre] = turno_sugerido
 
-                # 3. OTROS CARGOS (Auxiliares, Técnicos, Líderes)
                 else:
                     if idx_dia in dias_libres_emp.get(cod_emp, set()):
                         programacion_matriz[cod_emp][col_nombre] = "L"
