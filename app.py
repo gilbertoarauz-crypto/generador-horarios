@@ -441,7 +441,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                 turno_a_asignar = None
                 cargo_cubierto_hoy = cargo_orig
 
-                # PRIORIDAD A SU CARGO ORIGEN PRIMERO, LUEGO A SECUNDARIO
                 cargos_a_evaluar = [cargo_orig, cargo_sec] if cargo_sec else [cargo_orig]
 
                 for c_eval in cargos_a_evaluar:
@@ -584,7 +583,6 @@ if "df_resultado" in st.session_state:
             cargo_clean = str(cargo).strip().upper()
             sub_mat = df_tareas_req[df_tareas_req["CARGO"] == cargo_clean] if "CARGO" in df_tareas_req.columns else pd.DataFrame()
 
-            # Obtener lista completa de tareas requeridas para el cargo en esta semana
             for col_f in cols_semana:
                 dia_nombre_ext = col_f.split("\n")[0].upper()
                 tipo_col_mat = "SABADO" if dia_nombre_ext in ["SÁBADO", "SABADO"] else ("DOMINGO" if dia_nombre_ext == "DOMINGO" else "HABIL")
@@ -592,7 +590,6 @@ if "df_resultado" in st.session_state:
 
                 turnos_req = [str(x).strip() for x in sub_mat[col_target_mat].dropna().tolist() if str(x).strip() != ""] if col_target_mat else []
 
-                # Tareas efectivamente cubiertas en este día para este cargo
                 turnos_cubiertos = []
                 for cod_e, d_e in dict_matriz.items():
                     if d_e.get("HISTORIAL_CARGOS_DIARIOS", {}).get(col_f) == cargo_clean:
@@ -600,7 +597,6 @@ if "df_resultado" in st.session_state:
                         if val_t not in ["L", "AO", "VACACIONES", "LICENCIA", "INCAPACIDAD", "PERMISO"]:
                             turnos_cubiertos.append(val_t)
 
-                # Calcular diferencia por cada turno específico
                 for tr in set(turnos_req):
                     cant_req_t = turnos_req.count(tr)
                     cant_cub_t = turnos_cubiertos.count(tr)
@@ -618,7 +614,6 @@ if "df_resultado" in st.session_state:
         df_sem_res = pd.DataFrame(datos_resumen_semana)
 
         if not df_sem_res.empty:
-            # Pivotar la tabla para mostrar los días como columnas y turnos en filas por cargo
             tabla_pivot = df_sem_res.pivot_table(
                 index=["CARGO", "TURNO"],
                 columns="DÍA",
@@ -633,7 +628,8 @@ if "df_resultado" in st.session_state:
                 return "background-color: #e6ffed; color: #0d5a22;"
 
             st.markdown(f"##### 📌 Semana {s + 1}")
-            st.dataframe(tabla_pivot.style.applymap(resaltar_faltantes_rojo), use_container_width=True)
+            # CORRECCIÓN DE LA OBSOLECENCIA DE PANDAS (Uso de .map en vez de .applymap)
+            st.dataframe(tabla_pivot.style.map(resaltar_faltantes_rojo), use_container_width=True)
 
     # ==========================================
     # 7. REPORTE DETALLADO DE TAREAS NO CUBIERTAS
