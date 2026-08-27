@@ -286,7 +286,7 @@ if df_empleados is not None:
         matriz_demanda[cargo_clean]["DOMINGO"] = list(req_dom)
 
 # ==========================================
-# 3. GENERACIÓN DE MALLA SIN TURNOS COMODÍN
+# 3. GENERACIÓN DE MALLA OPTIMIZADA
 # ==========================================
 def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda, libres_base, festivos_list, df_prev=None, mapa_reemplazos=None):
     if mapa_reemplazos is None:
@@ -350,6 +350,12 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             programacion_matriz[cod]["PATRON_BASE"] = p_idx_base
 
     lideres = [cod for cod, d in programacion_matriz.items() if "LÍDER" in d["CARGO_ORIGINAL"] or "LIDER" in d["CARGO_ORIGINAL"]]
+    tecnicos = [cod for cod, d in programacion_matriz.items() if "TÉCNICO" in d["CARGO_ORIGINAL"] or "TECNICO" in d["CARGO_ORIGINAL"]]
+
+    # ==========================================
+    # ASIGNACIÓN CONTROLADA DE DÍAS LIBRES
+    # ==========================================
+    conteo_libres_tecnicos = {i: 0 for i in range(dias_totales)}
 
     for _, emp in df_personal.iterrows():
         cod = str(emp["CODIGO"]).strip()
@@ -363,12 +369,29 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                 hay_festivo_sem = any(inicio_sem.date() <= f <= fin_sem.date() for f in festivos_list)
                 cant_libres = libres_base + (1 if hay_festivo_sem else 0)
 
+                # 1. OPERADORES LÍDERES: Un líder descansa Viernes (4) y el otro Sábado (5)
                 if cod in lideres:
                     idx_lider = lideres.index(cod)
                     if idx_lider % 2 == 0:
                         libres_indices_emp.add(s * 7 + 4)
                     else:
                         libres_indices_emp.add(s * 7 + 5)
+
+                # 2. TÉCNICOS DE OPERACIONES: Máximo 1 técnico libre por día (Lunes a Domingo)
+                elif cod in tecnicos:
+                    indices_semana = [s * 7 + i for i in range(7)]
+                    candidatos_validos = [idx_d for idx_d in indices_semana if conteo_libres_tecnicos[idx_d] < 1]
+
+                    if len(candidatos_validos) >= cant_libres:
+                        elegidos = random.sample(candidatos_validos, cant_libres)
+                    else:
+                        elegidos = sorted(indices_semana, key=lambda x: conteo_libres_tecnicos[x])[:cant_libres]
+
+                    for el in elegidos:
+                        libres_indices_emp.add(el)
+                        conteo_libres_tecnicos[el] += 1
+
+                # 3. OTROS CARGOS (Auxiliares, etc.): Libres cualquier día de la semana (Lunes a Domingo)
                 else:
                     dias_permitidos = list(range(s * 7, (s + 1) * 7))
                     libres_indices_emp.update(random.sample(dias_permitidos, cant_libres))
@@ -441,7 +464,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                 turno_a_asignar = None
                 cargo_cubierto_hoy = cargo_orig
 
-                # Prioridad 1: Cargo Origen | Prioridad 2: Cargo Secundario
                 cargos_a_evaluar = [cargo_orig, cargo_sec] if cargo_sec else [cargo_orig]
 
                 for c_eval in cargos_a_evaluar:
@@ -452,7 +474,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     if not turnos_disp_cargo:
                         continue
 
-                    # Verificar si se puede mantener el turno fijado del bloque
                     if d_emp["TURNO_FIJO_BLOQUE"] in turnos_disp_cargo:
                         cand_t = d_emp["TURNO_FIJO_BLOQUE"]
                         parsed_h = extraer_horas(cand_t)
@@ -466,7 +487,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                                 cargo_cubierto_hoy = c_eval
                                 break
 
-                    # Asignar cualquier turno pendiente de la matriz que respete 12 horas
                     franja_ult = d_emp["ULTIMA_FRANJA"]
                     franjas_permitidas = obtener_siguiente_franja_permitida(franja_ult) if franja_ult else ["NOCHE", "TARDE", "MAÑANA"]
 
@@ -487,7 +507,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     if turno_a_asignar:
                         break
 
-                # SIN TURNO COMODÍN: Si no hay tarea requerida en la matriz, queda a órdenes ("AO")
                 if turno_a_asignar is None:
                     programacion_matriz[cod_emp][col_nombre] = "AO"
                     d_emp["TURNO_FIJO_BLOQUE"] = None
@@ -592,7 +611,6 @@ if "df_resultado" in st.session_state:
                 tipo_col_mat = "SABADO" if dia_nombre_ext in ["SÁBADO", "SABADO"] else ("DOMINGO" if dia_nombre_ext == "DOMINGO" else "HABIL")
                 col_target_mat = next((c for c in sub_mat.columns if tipo_col_mat in c), None)
 
-                # Obtener únicamente las tareas explicitadas en la matriz cargada
                 turnos_req = [str(x).strip() for x in sub_mat[col_target_mat].dropna().tolist() if str(x).strip() != ""] if col_target_mat else []
 
                 turnos_cubiertos = []
