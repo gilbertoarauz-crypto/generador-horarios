@@ -352,9 +352,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
     lideres = [cod for cod, d in programacion_matriz.items() if "LÍDER" in d["CARGO_ORIGINAL"] or "LIDER" in d["CARGO_ORIGINAL"]]
     tecnicos = [cod for cod, d in programacion_matriz.items() if "TÉCNICO" in d["CARGO_ORIGINAL"] or "TECNICO" in d["CARGO_ORIGINAL"]]
 
-    # ==========================================
-    # ASIGNACIÓN CONTROLADA DE DÍAS LIBRES
-    # ==========================================
     conteo_libres_tecnicos = {i: 0 for i in range(dias_totales)}
 
     for _, emp in df_personal.iterrows():
@@ -369,7 +366,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                 hay_festivo_sem = any(inicio_sem.date() <= f <= fin_sem.date() for f in festivos_list)
                 cant_libres = libres_base + (1 if hay_festivo_sem else 0)
 
-                # 1. OPERADORES LÍDERES: Un líder descansa Viernes (4) y el otro Sábado (5)
                 if cod in lideres:
                     idx_lider = lideres.index(cod)
                     if idx_lider % 2 == 0:
@@ -377,7 +373,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     else:
                         libres_indices_emp.add(s * 7 + 5)
 
-                # 2. TÉCNICOS DE OPERACIONES: Máximo 1 técnico libre por día (Lunes a Domingo)
                 elif cod in tecnicos:
                     indices_semana = [s * 7 + i for i in range(7)]
                     candidatos_validos = [idx_d for idx_d in indices_semana if conteo_libres_tecnicos[idx_d] < 1]
@@ -391,7 +386,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                         libres_indices_emp.add(el)
                         conteo_libres_tecnicos[el] += 1
 
-                # 3. OTROS CARGOS (Auxiliares, etc.): Libres cualquier día de la semana (Lunes a Domingo)
                 else:
                     dias_permitidos = list(range(s * 7, (s + 1) * 7))
                     libres_indices_emp.update(random.sample(dias_permitidos, cant_libres))
@@ -591,15 +585,17 @@ if "df_resultado" in st.session_state:
         st.success("✅ Todo el personal trabajó al 100% en tareas correspondientes a su cargo original.")
 
     # ==========================================
-    # 6. RESUMEN EN ROJO DE TAREAS NO ASIGNADAS POR SEMANA (EXCLUSIVO MATRIZ)
+    # 6. RESUMEN EN ROJO Y EN ORDEN CRONOLÓGICO (LUNES A DOMINGO)
     # ==========================================
     st.markdown("---")
     st.subheader("🚨 Resumen Semanal de Tareas Desatendidas / Faltantes")
 
     for s in range(semanas):
         cols_semana = cols_fechas_malla[s * 7 : (s + 1) * 7]
+        # Crear lista limpia con los nombres de las columnas en orden cronológico LUNES-DOMINGO
+        cols_semana_limpias = [c.replace("\n", " ") for c in cols_semana]
+        
         datos_resumen_semana = []
-
         cargos_evaluar = df_empleados["CARGO"].unique().tolist()
 
         for cargo in cargos_evaluar:
@@ -644,6 +640,10 @@ if "df_resultado" in st.session_state:
                 aggfunc="sum",
                 fill_value=0
             )
+
+            # Reordenar explícitamente las columnas para forzar la secuencia estricta LUNES a DOMINGO
+            cols_existentes_ordenadas = [c for c in cols_semana_limpias if c in tabla_pivot.columns]
+            tabla_pivot = tabla_pivot.reindex(columns=cols_existentes_ordenadas)
 
             def resaltar_faltantes_rojo(val):
                 if isinstance(val, (int, float)) and val > 0:
