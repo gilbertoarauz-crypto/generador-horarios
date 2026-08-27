@@ -203,26 +203,53 @@ if uploaded_prev_file is not None:
         st.warning(f"No se pudo leer la semana anterior: {e}")
 
 # ==========================================
-# CONFIGURACIÓN DE COBERTURAS INTER-CARGO
+# SECCIÓN MULTI-SELECCIÓN DE REEMPLAZOS
 # ==========================================
 reemplazos_config = {}
+
 if df_empleados is not None:
     st.sidebar.markdown("---")
     st.sidebar.header("🔄 Cobertura Inter-Cargo / Reemplazos")
-    activa_reemplazo = st.sidebar.checkbox("¿Asignar un colaborador a un cargo/turno diferente?", value=False)
+    activa_reemplazo = st.sidebar.checkbox("¿Asignar colaboradores a otro cargo?", value=False)
     
     if activa_reemplazo:
+        if "lista_reemplazos" not in st.session_state:
+            st.session_state.lista_reemplazos = []
+
         lista_empleados_nombres = df_empleados["NOMBRE"].tolist()
         cargos_disponibles = list(set(df_empleados["CARGO"].tolist() + list(TURNOS_DEFAULT_POR_CARGO.keys())))
-        
-        emp_sel = st.sidebar.selectbox("Seleccionar Colaborador:", lista_empleados_nombres)
-        cargo_destino_sel = st.sidebar.selectbox("Cargo a cubrir:", cargos_disponibles)
-        
-        if emp_sel and cargo_destino_sel:
-            row_emp = df_empleados[df_empleados["NOMBRE"] == emp_sel].iloc[0]
-            cod_sel = str(row_emp["CODIGO"]).strip()
-            reemplazos_config[cod_sel] = cargo_destino_sel
-            st.sidebar.info(f"💡 {emp_sel} ({row_emp['CARGO']}) cubrirá tareas de {cargo_destino_sel}")
+
+        cargos_disponibles.sort()
+
+        emps_sel = st.sidebar.multiselect("1. Seleccionar Colaborador(es):", lista_empleados_nombres)
+        cargo_destino_sel = st.sidebar.selectbox("2. Cargo a cubrir:", cargos_disponibles)
+
+        if st.sidebar.button("➕ Agregar Reemplazo(s)"):
+            for emp_nombre in emps_sel:
+                row_emp = df_empleados[df_empleados["NOMBRE"] == emp_nombre].iloc[0]
+                cod = str(row_emp["CODIGO"]).strip()
+                c_orig = row_emp["CARGO"]
+
+                # Evitar duplicados en lista
+                if not any(item["CODIGO"] == cod for item in st.session_state.lista_reemplazos):
+                    st.session_state.lista_reemplazos.append({
+                        "CODIGO": cod,
+                        "NOMBRE": emp_nombre,
+                        "CARGO ORIGEN": c_orig,
+                        "CARGO A CUBRIR": cargo_destino_sel
+                    })
+
+        if st.session_state.lista_reemplazos:
+            st.sidebar.subheader("📋 Reemplazos Programados")
+            df_temp_reemplazos = pd.DataFrame(st.session_state.lista_reemplazos)
+            st.sidebar.dataframe(df_temp_reemplazos[["NOMBRE", "CARGO A CUBRIR"]], use_container_width=True)
+
+            if st.sidebar.button("🗑️ Limpiar Reemplazos"):
+                st.session_state.lista_reemplazos = []
+
+            # Mapear para la función generadora
+            for item in st.session_state.lista_reemplazos:
+                reemplazos_config[item["CODIGO"]] = item["CARGO A CUBRIR"]
 
 # ==========================================
 # 2. CONSTRUCCIÓN DE REGLAS DE DEMANDA
@@ -550,3 +577,5 @@ if "df_resultado" in st.session_state:
         st.dataframe(df_incumplidas, use_container_width=True)
     else:
         st.success("🎉 ¡Todas las tareas operativas requeridas quedan cubiertas al 100%!")
+
+
