@@ -871,7 +871,7 @@ if "df_resultado" in st.session_state:
 
     buffer_excel = io.BytesIO()
 
-    with pd.ExcelWriter(buffer_excel, engine="xlsxwriter") as writer:
+    with pd.ExcelWriter(buffer_excel) as writer:
         df_resultado.to_excel(writer, sheet_name="Malla Horaria", index=False)
         
         if not df_coberturas.empty:
@@ -879,9 +879,6 @@ if "df_resultado" in st.session_state:
             
         if not df_incumplidas.empty:
             df_incumplidas.to_excel(writer, sheet_name="Detalle Tareas Faltantes", index=False)
-
-        for worksheet in writer.sheets.values():
-            worksheet.freeze_panes(1, 3)
 
     buffer_excel.seek(0)
 
