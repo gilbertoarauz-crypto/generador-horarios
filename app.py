@@ -417,7 +417,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     for el in libres_elegidos:
                         carga_diaria[el] += 2
 
-    # PROCESAMIENTO DÍA A DÍA
+    # PROCESAMIENTO DÍA A DÍA CON OPTIMIZACIÓN DE POLIVALENCIA CRÍTICA
     for idx_dia, col_nombre in enumerate(columnas_fechas):
         fecha_col = fechas_dt[idx_dia]
         fecha_actual_date = fecha_col.date()
@@ -429,30 +429,20 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
         turnos_usados_analistas_hoy = set()
         libres_analistas_hoy = 0
 
-        empleados_ordenados = sorted(
-            programacion_matriz.keys(),
-            key=lambda c: 0 if ("TÉCNICO" in programacion_matriz[c]["CARGO_ORIGINAL"] or "TECNICO" in programacion_matriz[c]["CARGO_ORIGINAL"]) else 1
-        )
-
-        # PASADA 1: Asignación Preferente
-        for cod_emp in empleados_ordenados:
-            d_emp = programacion_matriz[cod_emp]
-            cargo_orig = d_emp["CARGO_ORIGINAL"]
-            cargo_sec = d_emp["CARGO_SECUNDARIO"]
-
-            # Gestión de Incidencias
-            if d_emp["INCIDENCIA_TIPO"] and d_emp["INCIDENCIA_INI"] and d_emp["INCIDENCIA_FIN"]:
-                if d_emp["INCIDENCIA_INI"] <= fecha_actual_date <= d_emp["INCIDENCIA_FIN"]:
-                    programacion_matriz[cod_emp][col_nombre] = d_emp["INCIDENCIA_TIPO"]
-                    d_emp["TURNO_FIJO_BLOQUE"] = None
-                    d_emp["SALIDA_PREVIA_DT"] = None
-                    d_emp["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = cargo_orig
-                    d_emp["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = d_emp["INCIDENCIA_TIPO"]
+        disponibles_hoy = []
+        for cod_e, d_e in programacion_matriz.items():
+            cargo_orig = d_e["CARGO_ORIGINAL"]
+            if d_e["INCIDENCIA_TIPO"] and d_e["INCIDENCIA_INI"] and d_e["INCIDENCIA_FIN"]:
+                if d_e["INCIDENCIA_INI"] <= fecha_actual_date <= d_e["INCIDENCIA_FIN"]:
+                    programacion_matriz[cod_e][col_nombre] = d_e["INCIDENCIA_TIPO"]
+                    d_e["TURNO_FIJO_BLOQUE"] = None
+                    d_e["SALIDA_PREVIA_DT"] = None
+                    d_e["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = cargo_orig
+                    d_e["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = d_e["INCIDENCIA_TIPO"]
                     continue
 
-            # Gestión de Analistas (Matriz Rotativa Fija)
             if "ANALISTA" in cargo_orig:
-                p_base = d_emp["PATRON_BASE"]
+                p_base = d_e["PATRON_BASE"]
                 turno_sugerido = patrones_analistas[p_base][dia_matriz_14]
 
                 if turno_sugerido == "L" and dia_semana_idx <= 4:
@@ -469,126 +459,95 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     if turno_sugerido != "AO":
                         turnos_usados_analistas_hoy.add(turno_sugerido)
 
-                programacion_matriz[cod_emp][col_nombre] = turno_sugerido
-                d_emp["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = cargo_orig
-                d_emp["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = turno_sugerido
-
-            # Gestión de Otros Cargos Operativos
+                programacion_matriz[cod_e][col_nombre] = turno_sugerido
+                d_e["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = cargo_orig
+                d_e["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = turno_sugerido
             else:
-                if idx_dia in dias_libres_emp.get(cod_emp, set()):
-                    programacion_matriz[cod_emp][col_nombre] = "L"
-                    d_emp["TURNO_FIJO_BLOQUE"] = None
-                    d_emp["SALIDA_PREVIA_DT"] = None
-                    d_emp["ULTIMA_FRANJA"] = None
-                    d_emp["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = cargo_orig
-                    d_emp["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = "L"
-                    continue
-
-                turno_a_asignar = None
-                cargo_cubierto_hoy = cargo_orig
-                cargos_a_evaluar = [cargo_orig] + ([cargo_sec] if cargo_sec else [])
-
-                for c_eval in cargos_a_evaluar:
-                    turnos_disp_cargo = demandas_dia_actual.get(c_eval, [])
-                    if not turnos_disp_cargo:
-                        continue
-
-                    es_tecnico_planta = ("TÉCNICO" in cargo_orig or "TECNICO" in cargo_orig)
-                    es_cubriendo_tecnico = ("TÉCNICO" in c_eval or "TECNICO" in c_eval)
-
-                    cand_list = list(turnos_disp_cargo)
-                    if es_cubriendo_tecnico and dia_semana_idx <= 5:
-                        if es_tecnico_planta:
-                            cand_list.sort(key=lambda t: (0 if any(str(t).startswith(p) for p in ["03:00", "11:00", "19:00"]) else 1))
-                        else:
-                            cand_list.sort(key=lambda t: (0 if turnos_disp_cargo.count(t) > 1 else 1))
-
-                    # 1. Verificar Mantenimiento de Bloque
-                    cand_bloque = d_emp.get("TURNO_FIJO_BLOQUE")
-                    if cand_bloque and cand_bloque in cand_list:
-                        dt_ent, _ = calcular_datetimes_turno(fecha_col, cand_bloque)
-                        if calcular_descanso_suficiente(d_emp["SALIDA_PREVIA_DT"], dt_ent, min_horas=12):
-                            turno_a_asignar = cand_bloque
-                            turnos_disp_cargo.remove(cand_bloque)
-                            cargo_cubierto_hoy = c_eval
-                            break
-
-                    # 2. Selección del Mejor Turno Disponible
-                    franja_ult = d_emp["ULTIMA_FRANJA"]
-                    franjas_permitidas = obtener_siguiente_franja_permitida(franja_ult) if franja_ult else ["NOCHE", "TARDE", "MAÑANA"]
-                    
-                    if not (es_cubriendo_tecnico and dia_semana_idx <= 5):
-                        cand_list.sort(key=lambda t: 0 if clasificar_franja(t) in franjas_permitidas else 1)
-
-                    for cand_t in cand_list:
-                        dt_ent, _ = calcular_datetimes_turno(fecha_col, cand_t)
-                        if calcular_descanso_suficiente(d_emp["SALIDA_PREVIA_DT"], dt_ent, min_horas=12):
-                            turno_a_asignar = cand_t
-                            turnos_disp_cargo.remove(cand_t)
-                            cargo_cubierto_hoy = c_eval
-                            break
-                    
-                    if turno_a_asignar:
-                        break
-
-                # Asignación final y actualización de estado
-                if turno_a_asignar is None:
-                    programacion_matriz[cod_emp][col_nombre] = "AO"
-                    d_emp["TURNO_FIJO_BLOQUE"] = None
-                    d_emp["SALIDA_PREVIA_DT"] = None
-                    d_emp["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = cargo_orig
-                    d_emp["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = "AO"
+                if idx_dia in dias_libres_emp.get(cod_e, set()):
+                    programacion_matriz[cod_e][col_nombre] = "L"
+                    d_e["TURNO_FIJO_BLOQUE"] = None
+                    d_e["SALIDA_PREVIA_DT"] = None
+                    d_e["ULTIMA_FRANJA"] = None
+                    d_e["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = cargo_orig
+                    d_e["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = "L"
                 else:
-                    d_emp["TURNO_FIJO_BLOQUE"] = turno_a_asignar
-                    d_emp["ULTIMA_FRANJA"] = clasificar_franja(turno_a_asignar)
-                    d_emp["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = cargo_cubierto_hoy
-                    d_emp["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = turno_a_asignar
+                    disponibles_hoy.append(cod_e)
 
-                    programacion_matriz[cod_emp][col_nombre] = (
-                        f"{turno_a_asignar} {obtener_iniciales_cargo(cargo_cubierto_hoy)}" 
-                        if cargo_cubierto_hoy != cargo_orig else turno_a_asignar
-                    )
+        disponibles_hoy.sort(key=lambda c: (
+            0 if ("TÉCNICO" in programacion_matriz[c]["CARGO_ORIGINAL"] or "TECNICO" in programacion_matriz[c]["CARGO_ORIGINAL"]) else
+            (1 if programacion_matriz[c]["CARGO_SECUNDARIO"] else 2)
+        ))
 
-                    _, dt_salida = calcular_datetimes_turno(fecha_col, turno_a_asignar)
-                    d_emp["SALIDA_PREVIA_DT"] = dt_salida
-
-        # PASADA 2: Recuperación de Puestos "AO"
-        for cod_emp in empleados_ordenados:
+        for cod_emp in disponibles_hoy:
             d_emp = programacion_matriz[cod_emp]
             cargo_orig = d_emp["CARGO_ORIGINAL"]
             cargo_sec = d_emp["CARGO_SECUNDARIO"]
 
-            if "ANALISTA" in cargo_orig or programacion_matriz[cod_emp][col_nombre] != "AO":
-                continue
+            cargos_a_evaluar = []
+            req_orig = len(demandas_dia_actual.get(cargo_orig, []))
+            req_sec = len(demandas_dia_actual.get(cargo_sec, [])) if cargo_sec else 0
 
-            cargos_a_evaluar = [cargo_orig] + ([cargo_sec] if cargo_sec else [])
+            if cargo_sec and req_sec > 0 and req_orig == 0:
+                cargos_a_evaluar = [cargo_sec, cargo_orig]
+            elif cargo_sec and req_sec > req_orig:
+                cargos_a_evaluar = [cargo_sec, cargo_orig]
+            else:
+                cargos_a_evaluar = [cargo_orig] + ([cargo_sec] if cargo_sec else [])
+
+            turno_a_asignar = None
+            cargo_cubierto_hoy = cargo_orig
+
             for c_eval in cargos_a_evaluar:
                 turnos_disp_cargo = demandas_dia_actual.get(c_eval, [])
                 if not turnos_disp_cargo:
                     continue
 
-                asignado_f2 = False
-                for cand_t in list(turnos_disp_cargo):
-                    dt_ent, dt_salida = calcular_datetimes_turno(fecha_col, cand_t)
-                    if calcular_descanso_suficiente(d_emp["SALIDA_PREVIA_DT"], dt_ent, min_horas=12):
-                        d_emp["TURNO_FIJO_BLOQUE"] = cand_t
-                        d_emp["ULTIMA_FRANJA"] = clasificar_franja(cand_t)
-                        d_emp["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = c_eval
-                        d_emp["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = cand_t
-                        d_emp["SALIDA_PREVIA_DT"] = dt_salida
-                        turnos_disp_cargo.remove(cand_t)
+                cand_list = list(turnos_disp_cargo)
 
-                        programacion_matriz[cod_emp][col_nombre] = (
-                            f"{cand_t} {obtener_iniciales_cargo(c_eval)}" 
-                            if c_eval != cargo_orig else cand_t
-                        )
-                        asignado_f2 = True
+                cand_bloque = d_emp.get("TURNO_FIJO_BLOQUE")
+                if cand_bloque and cand_bloque in cand_list:
+                    dt_ent, _ = calcular_datetimes_turno(fecha_col, cand_bloque)
+                    if calcular_descanso_suficiente(d_emp["SALIDA_PREVIA_DT"], dt_ent, min_horas=12):
+                        turno_a_asignar = cand_bloque
+                        turnos_disp_cargo.remove(cand_bloque)
+                        cargo_cubierto_hoy = c_eval
                         break
 
-                if asignado_f2:
+                franja_ult = d_emp["ULTIMA_FRANJA"]
+                franjas_permitidas = obtener_siguiente_franja_permitida(franja_ult) if franja_ult else ["NOCHE", "TARDE", "MAÑANA"]
+                cand_list.sort(key=lambda t: 0 if clasificar_franja(t) in franjas_permitidas else 1)
+
+                for cand_t in cand_list:
+                    dt_ent, _ = calcular_datetimes_turno(fecha_col, cand_t)
+                    if calcular_descanso_suficiente(d_emp["SALIDA_PREVIA_DT"], dt_ent, min_horas=12):
+                        turno_a_asignar = cand_t
+                        turnos_disp_cargo.remove(cand_t)
+                        cargo_cubierto_hoy = c_eval
+                        break
+
+                if turno_a_asignar:
                     break
 
-    # Construcción de DataFrame Limpio
+            if turno_a_asignar is None:
+                programacion_matriz[cod_emp][col_nombre] = "AO"
+                d_emp["TURNO_FIJO_BLOQUE"] = None
+                d_emp["SALIDA_PREVIA_DT"] = None
+                d_emp["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = cargo_orig
+                d_emp["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = "AO"
+            else:
+                d_emp["TURNO_FIJO_BLOQUE"] = turno_a_asignar
+                d_emp["ULTIMA_FRANJA"] = clasificar_franja(turno_a_asignar)
+                d_emp["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = cargo_cubierto_hoy
+                d_emp["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = turno_a_asignar
+
+                programacion_matriz[cod_emp][col_nombre] = (
+                    f"{turno_a_asignar} {obtener_iniciales_cargo(cargo_cubierto_hoy)}" 
+                    if cargo_cubierto_hoy != cargo_orig else turno_a_asignar
+                )
+
+                _, dt_salida = calcular_datetimes_turno(fecha_col, turno_a_asignar)
+                d_emp["SALIDA_PREVIA_DT"] = dt_salida
+
     columnas_excluir = {
         "INCIDENCIA_TIPO", "INCIDENCIA_INI", "INCIDENCIA_FIN", "PATRON_BASE", 
         "TURNO_FIJO_BLOQUE", "ULTIMA_FRANJA", "CARGO_ORIGINAL", "CARGO_SECUNDARIO", 
