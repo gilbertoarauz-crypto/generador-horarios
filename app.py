@@ -215,9 +215,11 @@ if uploaded_prev_file is not None:
         st.warning(f"No se pudo leer la semana anterior: {e}")
 
 # ==========================================
-# REEMPLAZOS INTER-CARGO
+# REEMPLAZOS INTER-CARGO Y SOBRE TIEMPO
 # ==========================================
 reemplazos_config = {}
+sobretiempo_config = {}
+
 if df_empleados is not None:
     st.sidebar.markdown("---")
     st.sidebar.header("🔄 Cobertura Inter-Cargo / Reemplazos")
@@ -230,7 +232,7 @@ if df_empleados is not None:
         lista_empleados_nombres = df_empleados["NOMBRE"].tolist()
         cargos_disponibles = sorted(list(set(df_empleados["CARGO"].tolist() + list(TURNOS_DEFAULT_POR_CARGO.keys()))))
 
-        emps_sel = st.sidebar.multiselect("1. Seleccionar Colaborador(es):", lista_empleados_nombres)
+        emps_sel = st.sidebar.multiselect("1. Seleccionar Colaborador(es):", lista_empleados_nombres, key="sel_remplazo")
         cargo_destino_sel = st.sidebar.selectbox("2. Cargo secundario a cubrir:", cargos_disponibles)
 
         if st.sidebar.button("➕ Agregar Polivalencia"):
@@ -257,6 +259,47 @@ if df_empleados is not None:
 
             for item in st.session_state.lista_reemplazos:
                 reemplazos_config[item["CODIGO"]] = item["CARGO A CUBRIR"]
+
+    # SECCIÓN NUEVA: SOBRE TIEMPO (HORAS EXTRAS)
+    st.sidebar.markdown("---")
+    st.sidebar.header("⏰ Configuración de Sobre Tiempo (Horas Extras)")
+    activa_sobretiempo = st.sidebar.checkbox("¿Habilitar sobre tiempo para colaboradores?", value=False)
+
+    if activa_sobretiempo:
+        if "lista_sobretiempo" not in st.session_state:
+            st.session_state.lista_sobretiempo = []
+
+        lista_empleados_nombres_st = df_empleados["NOMBRE"].tolist()
+        
+        emps_st_sel = st.sidebar.multiselect("1. Seleccionar Colaborador(es):", lista_empleados_nombres_st, key="sel_st")
+        max_horas_st = st.sidebar.number_input("2. Máximo de Horas Extras por Día:", min_value=1, max_value=8, value=2, step=1)
+
+        if st.sidebar.button("➕ Habilitar Sobre Tiempo"):
+            for emp_nombre in emps_st_sel:
+                row_emp = df_empleados[df_empleados["NOMBRE"] == emp_nombre].iloc[0]
+                cod = str(row_emp["CODIGO"]).strip()
+
+                idx_existente = next((i for i, item in enumerate(st.session_state.lista_sobretiempo) if item["CODIGO"] == cod), None)
+                if idx_existente is not None:
+                    st.session_state.lista_sobretiempo[idx_existente]["MAX_HORAS_EXTRA"] = max_horas_st
+                else:
+                    st.session_state.lista_sobretiempo.append({
+                        "CODIGO": cod,
+                        "NOMBRE": emp_nombre,
+                        "CARGO": row_emp["CARGO"],
+                        "MAX_HORAS_EXTRA": max_horas_st
+                    })
+
+        if st.session_state.lista_sobretiempo:
+            st.sidebar.subheader("📋 Sobre Tiempo Habilitado")
+            df_temp_st = pd.DataFrame(st.session_state.lista_sobretiempo)
+            st.sidebar.dataframe(df_temp_st[["NOMBRE", "MAX_HORAS_EXTRA"]], use_container_width=True)
+
+            if st.sidebar.button("🗑️ Limpiar Sobre Tiempo"):
+                st.session_state.lista_sobretiempo = []
+
+            for item in st.session_state.lista_sobretiempo:
+                sobretiempo_config[item["CODIGO"]] = item["MAX_HORAS_EXTRA"]
 
 # ==========================================
 # CONSTRUCCIÓN DE DEMANDA Y GENERACIÓN
@@ -288,9 +331,11 @@ if df_empleados is not None:
         matriz_demanda[cargo_clean]["SÁBADO"] = list(req_sab)
         matriz_demanda[cargo_clean]["DOMINGO"] = list(req_dom)
 
-def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda, libres_base, festivos_list, df_prev=None, mapa_reemplazos=None):
+def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda, libres_base, festivos_list, df_prev=None, mapa_reemplazos=None, mapa_sobretiempo=None):
     if mapa_reemplazos is None:
         mapa_reemplazos = {}
+    if mapa_sobretiempo is None:
+        mapa_sobretiempo = {}
 
     dias_totales = semanas_count * 7
     fecha_base = datetime.combine(fecha_base_date, time.min)
@@ -328,12 +373,14 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
         cod = str(emp["CODIGO"]).strip()
         cargo_original = str(emp["CARGO"]).strip().upper()
         cargo_secundario = mapa_reemplazos.get(cod, None)
+        max_st = mapa_sobretiempo.get(cod, 0)
         hist = info_historial.get(cod, {})
 
         programacion_matriz[cod] = {
             "CODIGO": cod, "NOMBRE": emp["NOMBRE"],
             "CARGO_ORIGINAL": cargo_original,
             "CARGO_SECUNDARIO": cargo_secundario,
+            "MAX_HORAS_EXTRA_DIA": max_st,
             "CARGO": cargo_original,
             "INCIDENCIA_TIPO": emp.get("INCIDENCIA_TIPO"),
             "INCIDENCIA_INI": parsear_fecha_incidencia(emp.get("INCIDENCIA_INI"), anio_ref),
@@ -554,7 +601,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
     columnas_excluir = {
         "INCIDENCIA_TIPO", "INCIDENCIA_INI", "INCIDENCIA_FIN", "PATRON_BASE", 
         "TURNO_FIJO_BLOQUE", "TURNO_PREVIO_DESCANSO", "FRANJA_PREVIA_DESCANSO", "VIENE_DE_DESCANSO", 
-        "ULTIMA_FRANJA", "CARGO_ORIGINAL", "CARGO_SECUNDARIO", "SALIDA_PREVIA_DT", 
+        "ULTIMA_FRANJA", "CARGO_ORIGINAL", "CARGO_SECUNDARIO", "MAX_HORAS_EXTRA_DIA", "SALIDA_PREVIA_DT", 
         "HISTORIAL_CARGOS_DIARIOS", "HISTORIAL_TURNOS_LIMPIOS"
     }
     df_resultado = pd.DataFrame([
@@ -570,7 +617,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
 if df_empleados is not None:
     if st.button("⚡ Generar Horarios y Auditar Tareas"):
         df_res, dict_matriz = generar_malla_matriz(
-            df_empleados, semanas, fecha_inicio_date, matriz_demanda, libres_por_semana_base, fechas_festivas_sel, df_semana_anterior, reemplazos_config
+            df_empleados, semanas, fecha_inicio_date, matriz_demanda, libres_por_semana_base, fechas_festivas_sel, df_semana_anterior, reemplazos_config, sobretiempo_config
         )
         st.session_state.df_resultado = df_res
         st.session_state.dict_matriz = dict_matriz
@@ -619,7 +666,28 @@ if "df_resultado" in st.session_state:
         st.info("ℹ️ A continuación se detalla el personal que realizó coberturas en un cargo secundario:")
         st.dataframe(df_coberturas, use_container_width=True)
 
-    # RESUMEN DE FALTANTES (SECCIÓN CORREGIDA PARA EVITAR ATTRIBUTEERROR)
+    # REPORTE DE SOBRE TIEMPO
+    st.markdown("---")
+    st.subheader("⏰ Reporte de Personal Habilitado para Sobre Tiempo")
+    
+    reporte_st = []
+    for cod_emp, d_emp in dict_matriz.items():
+        max_st_dia = d_emp.get("MAX_HORAS_EXTRA_DIA", 0)
+        if max_st_dia > 0:
+            reporte_st.append({
+                "CÓDIGO": cod_emp,
+                "NOMBRE": d_emp["NOMBRE"],
+                "CARGO": d_emp["CARGO_ORIGINAL"],
+                "MÁXIMO HORAS EXTRA POR DÍA": f"{max_st_dia} hrs/día"
+            })
+            
+    df_reporte_st = pd.DataFrame(reporte_st)
+    if not df_reporte_st.empty:
+        st.dataframe(df_reporte_st, use_container_width=True)
+    else:
+        st.caption("No se asignó personal para sobre tiempo en esta corrida.")
+
+    # RESUMEN DE FALTANTES
     st.markdown("---")
     st.subheader("🚨 Resumen Semanal de Tareas Desatendidas / Faltantes")
 
@@ -681,7 +749,6 @@ if "df_resultado" in st.session_state:
 
             st.markdown(f"##### 📌 Semana {s + 1}")
             
-            # Compatibilidad garantizada entre versiones de Pandas (.map vs .applymap)
             styler = tabla_pivot.style
             if hasattr(styler, "map"):
                 styler = styler.map(resaltar_faltantes_rojo)
@@ -701,6 +768,8 @@ if "df_resultado" in st.session_state:
         df_resultado.to_excel(writer, sheet_name="Malla Horaria", index=False)
         if not df_coberturas.empty:
             df_coberturas.to_excel(writer, sheet_name="Reemplazos Inter-Cargo", index=False)
+        if not df_reporte_st.empty:
+            df_reporte_st.to_excel(writer, sheet_name="Sobre Tiempo", index=False)
 
     buffer_excel.seek(0)
 
