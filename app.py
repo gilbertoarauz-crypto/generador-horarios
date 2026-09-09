@@ -8,7 +8,7 @@ st.set_page_config(page_title="Generador de Horarios Pro", layout="wide")
 st.title("📅 Generador de Horarios & Control de Tareas Operativas")
 
 # ==========================================
-# CONSTANTES Y CATALOGOS
+# CONSTANTES Y CATÁLOGOS
 # ==========================================
 CATALOGO_TURNOS = [
     "03:00-11:00", "06:00-15:00", "07:00-16:00", "08:00-15:00 CAP",
@@ -87,7 +87,6 @@ if tiene_festivo:
 # FUNCIONES ROBUSTAS DE TIEMPO Y PARSEO
 # ==========================================
 def extraer_horas(texto_turno: str):
-    """Devuelve tupla segura de enteros (hi, mi, hf, mf) o None."""
     if not texto_turno or str(texto_turno).strip().upper() in NO_WORKING_TERMS:
         return None
     match = re.search(r"(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})", str(texto_turno))
@@ -620,7 +619,7 @@ if "df_resultado" in st.session_state:
         st.info("ℹ️ A continuación se detalla el personal que realizó coberturas en un cargo secundario:")
         st.dataframe(df_coberturas, use_container_width=True)
 
-    # RESUMEN DE FALTANTES
+    # RESUMEN DE FALTANTES (SECCIÓN CORREGIDA PARA EVITAR ATTRIBUTEERROR)
     st.markdown("---")
     st.subheader("🚨 Resumen Semanal de Tareas Desatendidas / Faltantes")
 
@@ -681,7 +680,15 @@ if "df_resultado" in st.session_state:
                 return "background-color: #e6ffed; color: #0d5a22;"
 
             st.markdown(f"##### 📌 Semana {s + 1}")
-            st.dataframe(tabla_pivot.style.applymap(resaltar_faltantes_rojo), use_container_width=True)
+            
+            # Compatibilidad garantizada entre versiones de Pandas (.map vs .applymap)
+            styler = tabla_pivot.style
+            if hasattr(styler, "map"):
+                styler = styler.map(resaltar_faltantes_rojo)
+            else:
+                styler = styler.applymap(resaltar_faltantes_rojo)
+
+            st.dataframe(styler, use_container_width=True)
 
     # EXPORTACIÓN
     st.markdown("---")
