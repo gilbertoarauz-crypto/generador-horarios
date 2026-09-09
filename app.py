@@ -260,7 +260,7 @@ if df_empleados is not None:
             for item in st.session_state.lista_reemplazos:
                 reemplazos_config[item["CODIGO"]] = item["CARGO A CUBRIR"]
 
-    # SECCIÓN NUEVA: SOBRE TIEMPO (HORAS EXTRAS)
+    # SECCIÓN SOBRE TIEMPO
     st.sidebar.markdown("---")
     st.sidebar.header("⏰ Configuración de Sobre Tiempo (Horas Extras)")
     activa_sobretiempo = st.sidebar.checkbox("¿Habilitar sobre tiempo para colaboradores?", value=False)
@@ -272,7 +272,7 @@ if df_empleados is not None:
         lista_empleados_nombres_st = df_empleados["NOMBRE"].tolist()
         
         emps_st_sel = st.sidebar.multiselect("1. Seleccionar Colaborador(es):", lista_empleados_nombres_st, key="sel_st")
-        max_horas_st = st.sidebar.number_input("2. Máximo de Horas Extras por Día:", min_value=1, max_value=8, value=2, step=1)
+        max_horas_st = st.sidebar.number_input("2. Máximo de Horas Extras por Día:", min_value=1, max_value=8, value=4, step=1)
 
         if st.sidebar.button("➕ Habilitar Sobre Tiempo"):
             for emp_nombre in emps_st_sel:
@@ -392,7 +392,8 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             "ULTIMA_FRANJA": hist.get("ultima_franja"),
             "SALIDA_PREVIA_DT": None,
             "HISTORIAL_CARGOS_DIARIOS": {},
-            "HISTORIAL_TURNOS_LIMPIOS": {}
+            "HISTORIAL_TURNOS_LIMPIOS": {},
+            "HISTORIAL_SOBRETIEMPO": {}  # Registro detallado de sobretiempo diario
         }
 
         if "ANALISTA" in cargo_original:
@@ -598,11 +599,64 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             else:
                 programacion_matriz[cod_emp][col_nombre] = "AO"
 
+        # ----------------------------------------------------
+        # ETAPA 6: ASIGNACIÓN ACTIVA DE SOBRE TIEMPO PARA CUBRIR FALTANTES
+        # ----------------------------------------------------
+        for cargo_k, v_turnos_pendientes in demandas_dia_actual.items():
+            if not v_turnos_pendientes:
+                continue
+
+            # Buscar candidatos habilitados para sobretiempo en este cargo que trabajen hoy
+            candidatos_st = [
+                c for c in disponibles_hoy 
+                if programacion_matriz[c]["MAX_HORAS_EXTRA_DIA"] > 0
+                and programacion_matriz[c]["HISTORIAL_CARGOS_DIARIOS"].get(col_nombre) == cargo_k
+                and programacion_matriz[c]["HISTORIAL_TURNOS_LIMPIOS"].get(col_nombre) not in NO_WORKING_TERMS
+            ]
+
+            for turno_falta in list(v_turnos_pendientes):
+                dt_ent_f, dt_sal_f = calcular_datetimes_turno(fecha_col, turno_falta)
+                if not dt_ent_f:
+                    continue
+
+                for cod_st in candidatos_st:
+                    d_st = programacion_matriz[cod_st]
+                    turno_actual_st = d_st["HISTORIAL_TURNOS_LIMPIOS"].get(col_nombre)
+                    dt_ent_act, dt_sal_act = calcular_datetimes_turno(fecha_col, turno_actual_st)
+
+                    if not dt_ent_act:
+                        continue
+
+                    # Verificar colindancia (Si el turno faltante empieza al salir del turno actual o termina al entrar)
+                    horas_st_max = d_st["MAX_HORAS_EXTRA_DIA"]
+                    mismo_dia = dt_sal_act == dt_ent_f or dt_ent_act == dt_sal_f
+
+                    if mismo_dia:
+                        # Calcular horas requeridas del sobretiempo (mínimo entre la duración y el máximo del emp)
+                        duracion_turno_falta = (dt_sal_f - dt_ent_f).total_seconds() / 3600.0
+                        horas_st_asignadas = min(duracion_turno_falta, float(horas_st_max))
+
+                        # Registrar el sobretiempo
+                        d_st["HISTORIAL_SOBRETIEMPO"][col_nombre] = {
+                            "TURNO_BASE": turno_actual_st,
+                            "TURNO_CUBIERTO_ST": turno_falta,
+                            "HORAS_EXTRA": horas_st_asignadas
+                        }
+
+                        # Reflejar en la matriz visual
+                        val_actual_vis = programacion_matriz[cod_st][col_nombre]
+                        programacion_matriz[cod_st][col_nombre] = f"{val_actual_vis} (+{int(horas_st_asignadas)}h ST)"
+
+                        # Marcar el turno desatendido como cubierto parcialmente/totalmente
+                        v_turnos_pendientes.remove(turno_falta)
+                        d_st["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = f"{turno_actual_st} / ST {turno_falta}"
+                        break
+
     columnas_excluir = {
         "INCIDENCIA_TIPO", "INCIDENCIA_INI", "INCIDENCIA_FIN", "PATRON_BASE", 
         "TURNO_FIJO_BLOQUE", "TURNO_PREVIO_DESCANSO", "FRANJA_PREVIA_DESCANSO", "VIENE_DE_DESCANSO", 
         "ULTIMA_FRANJA", "CARGO_ORIGINAL", "CARGO_SECUNDARIO", "MAX_HORAS_EXTRA_DIA", "SALIDA_PREVIA_DT", 
-        "HISTORIAL_CARGOS_DIARIOS", "HISTORIAL_TURNOS_LIMPIOS"
+        "HISTORIAL_CARGOS_DIARIOS", "HISTORIAL_TURNOS_LIMPIOS", "HISTORIAL_SOBRETIEMPO"
     }
     df_resultado = pd.DataFrame([
         {k: v for k, v in datos.items() if k not in columnas_excluir} 
@@ -666,26 +720,30 @@ if "df_resultado" in st.session_state:
         st.info("ℹ️ A continuación se detalla el personal que realizó coberturas en un cargo secundario:")
         st.dataframe(df_coberturas, use_container_width=True)
 
-    # REPORTE DE SOBRE TIEMPO
+    # REPORTE DETALLADO DE SOBRE TIEMPO ASIGNADO
     st.markdown("---")
-    st.subheader("⏰ Reporte de Personal Habilitado para Sobre Tiempo")
+    st.subheader("⏰ Reporte Detallado de Sobre Tiempo Asignado por Día y Tarea")
     
-    reporte_st = []
+    reporte_st_detallado = []
     for cod_emp, d_emp in dict_matriz.items():
-        max_st_dia = d_emp.get("MAX_HORAS_EXTRA_DIA", 0)
-        if max_st_dia > 0:
-            reporte_st.append({
+        historial_st = d_emp.get("HISTORIAL_SOBRETIEMPO", {})
+        for col_f, datos_st in historial_st.items():
+            reporte_st_detallado.append({
+                "DÍA": col_f.replace("\n", " "),
                 "CÓDIGO": cod_emp,
                 "NOMBRE": d_emp["NOMBRE"],
                 "CARGO": d_emp["CARGO_ORIGINAL"],
-                "MÁXIMO HORAS EXTRA POR DÍA": f"{max_st_dia} hrs/día"
+                "TURNO ORDINARIO": datos_st["TURNO_BASE"],
+                "TAREA / TURNO CUBIERTO EN ST": datos_st["TURNO_CUBIERTO_ST"],
+                "HORAS EXTRA": f"{int(datos_st['HORAS_EXTRA'])} hrs"
             })
             
-    df_reporte_st = pd.DataFrame(reporte_st)
+    df_reporte_st = pd.DataFrame(reporte_st_detallado)
     if not df_reporte_st.empty:
+        st.success("✅ Se asignó sobre tiempo para cubrir los siguientes turnos desatendidos:")
         st.dataframe(df_reporte_st, use_container_width=True)
     else:
-        st.caption("No se asignó personal para sobre tiempo en esta corrida.")
+        st.info("ℹ️ No fue necesario asignar sobre tiempo adicional o no había personal disponible para cubrir las faltas restantes.")
 
     # RESUMEN DE FALTANTES
     st.markdown("---")
@@ -709,12 +767,14 @@ if "df_resultado" in st.session_state:
 
                 turnos_req = [str(x).strip() for x in sub_mat[col_target_mat].dropna().tolist() if str(x).strip() != ""] if col_target_mat else []
 
-                turnos_cubiertos = [
-                    d_e.get("HISTORIAL_TURNOS_LIMPIOS", {}).get(col_f, "")
-                    for cod_e, d_e in dict_matriz.items()
-                    if d_e.get("HISTORIAL_CARGOS_DIARIOS", {}).get(col_f) == cargo_clean
-                    and d_e.get("HISTORIAL_TURNOS_LIMPIOS", {}).get(col_f, "") not in NO_WORKING_TERMS
-                ]
+                turnos_cubiertos = []
+                for cod_e, d_e in dict_matriz.items():
+                    if d_e.get("HISTORIAL_CARGOS_DIARIOS", {}).get(col_f) == cargo_clean:
+                        val_limpio = d_e.get("HISTORIAL_TURNOS_LIMPIOS", {}).get(col_f, "")
+                        if val_limpio not in NO_WORKING_TERMS:
+                            # Contar tanto el turno base como la tarea cubierta por ST
+                            for sub_t in val_limpio.split(" / ST "):
+                                turnos_cubiertos.append(sub_t)
 
                 for tr in set(turnos_req):
                     cant_req_t = turnos_req.count(tr)
@@ -769,7 +829,7 @@ if "df_resultado" in st.session_state:
         if not df_coberturas.empty:
             df_coberturas.to_excel(writer, sheet_name="Reemplazos Inter-Cargo", index=False)
         if not df_reporte_st.empty:
-            df_reporte_st.to_excel(writer, sheet_name="Sobre Tiempo", index=False)
+            df_reporte_st.to_excel(writer, sheet_name="Sobre Tiempo Asignado", index=False)
 
     buffer_excel.seek(0)
 
