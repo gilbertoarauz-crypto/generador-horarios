@@ -393,7 +393,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             "SALIDA_PREVIA_DT": None,
             "HISTORIAL_CARGOS_DIARIOS": {},
             "HISTORIAL_TURNOS_LIMPIOS": {},
-            "HISTORIAL_SOBRETIEMPO": {}  # Registro detallado de sobretiempo diario
+            "HISTORIAL_SOBRETIEMPO": {}
         }
 
         if "ANALISTA" in cargo_original:
@@ -480,14 +480,45 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             else:
                 disponibles_hoy.append(cod_e)
 
-        # ETAPA 2: ANALISTAS
+        # ----------------------------------------------------
+        # ETAPA 2: ANALISTAS DE OPERACIONES (GARANTÍA 03, 11, 19)
+        # ----------------------------------------------------
         analistas_hoy = [c for c in disponibles_hoy if "ANALISTA" in programacion_matriz[c]["CARGO_ORIGINAL"]]
+        req_analistas = demandas_dia_actual.get("ANALISTA DE OPERACIONES", [])
+        turnos_esenciales_an = ["03:00-11:00", "11:00-19:00", "19:00-27:00"]
+        
+        # 2.1 Cobertura prioritaria para garantizar turnos críticos 03, 11 y 19
+        for t_target in turnos_esenciales_an:
+            analistas_sin_asignar = [c for c in analistas_hoy if programacion_matriz[c].get(col_nombre) is None]
+            
+            # Verificar si ya existe alguien haciendo el turno
+            turno_ya_cubierto = any(
+                programacion_matriz[c].get("HISTORIAL_TURNOS_LIMPIOS", {}).get(col_nombre) == t_target 
+                for c in analistas_hoy
+            )
+            
+            if not turno_ya_cubierto and analistas_sin_asignar:
+                for cod_an in analistas_sin_asignar:
+                    d_an = programacion_matriz[cod_an]
+                    dt_ent, dt_salida = calcular_datetimes_turno(fecha_col, t_target)
+                    if calcular_descanso_suficiente(d_an["SALIDA_PREVIA_DT"], dt_ent, min_horas=12):
+                        programacion_matriz[cod_an][col_nombre] = t_target
+                        d_an.update({"TURNO_FIJO_BLOQUE": t_target, "ULTIMA_FRANJA": clasificar_franja(t_target), "SALIDA_PREVIA_DT": dt_salida})
+                        d_an["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = "ANALISTA DE OPERACIONES"
+                        d_an["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = t_target
+                        if t_target in req_analistas:
+                            req_analistas.remove(t_target)
+                        break
+
+        # 2.2 Asignación habitual o polivalente para analistas restantes
         for cod_an in analistas_hoy:
+            if programacion_matriz[cod_an].get(col_nombre) is not None:
+                continue
+
             d_an = programacion_matriz[cod_an]
             turno_sugerido = patrones_analistas[d_an["PATRON_BASE"]][dia_matriz_14]
-            req_analistas = demandas_dia_actual.get("ANALISTA DE OPERACIONES", [])
             turnos_cubiertos_an = [programacion_matriz[c].get("HISTORIAL_TURNOS_LIMPIOS", {}).get(col_nombre) for c in analistas_hoy]
-            obligatorios_cubiertos = all(any(tc and tc.startswith(pref) for tc in turnos_cubiertos_an) for pref in ["03:00", "11:00", "19:00"])
+            obligatorios_cubiertos = all(any(tc and tc.startswith(pref) for tc in turnos_cubiertos_an if tc) for pref in ["03:00", "11:00", "19:00"])
 
             if d_an["CARGO_SECUNDARIO"] == "TÉCNICO DE OPERACIONES" and (dia_semana_idx == 6 or obligatorios_cubiertos):
                 turnos_disp_tec = demandas_dia_actual.get("TÉCNICO DE OPERACIONES", [])
@@ -599,14 +630,11 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             else:
                 programacion_matriz[cod_emp][col_nombre] = "AO"
 
-        # ----------------------------------------------------
-        # ETAPA 6: ASIGNACIÓN ACTIVA DE SOBRE TIEMPO PARA CUBRIR FALTANTES
-        # ----------------------------------------------------
+        # ETAPA 6: SOBRE TIEMPO PARA CUBRIR FALTANTES
         for cargo_k, v_turnos_pendientes in demandas_dia_actual.items():
             if not v_turnos_pendientes:
                 continue
 
-            # Buscar candidatos habilitados para sobretiempo en este cargo que trabajen hoy
             candidatos_st = [
                 c for c in disponibles_hoy 
                 if programacion_matriz[c]["MAX_HORAS_EXTRA_DIA"] > 0
@@ -627,27 +655,22 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     if not dt_ent_act:
                         continue
 
-                    # Verificar colindancia (Si el turno faltante empieza al salir del turno actual o termina al entrar)
                     horas_st_max = d_st["MAX_HORAS_EXTRA_DIA"]
                     mismo_dia = dt_sal_act == dt_ent_f or dt_ent_act == dt_sal_f
 
                     if mismo_dia:
-                        # Calcular horas requeridas del sobretiempo (mínimo entre la duración y el máximo del emp)
                         duracion_turno_falta = (dt_sal_f - dt_ent_f).total_seconds() / 3600.0
                         horas_st_asignadas = min(duracion_turno_falta, float(horas_st_max))
 
-                        # Registrar el sobretiempo
                         d_st["HISTORIAL_SOBRETIEMPO"][col_nombre] = {
                             "TURNO_BASE": turno_actual_st,
                             "TURNO_CUBIERTO_ST": turno_falta,
                             "HORAS_EXTRA": horas_st_asignadas
                         }
 
-                        # Reflejar en la matriz visual
                         val_actual_vis = programacion_matriz[cod_st][col_nombre]
                         programacion_matriz[cod_st][col_nombre] = f"{val_actual_vis} (+{int(horas_st_asignadas)}h ST)"
 
-                        # Marcar el turno desatendido como cubierto parcialmente/totalmente
                         v_turnos_pendientes.remove(turno_falta)
                         d_st["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = f"{turno_actual_st} / ST {turno_falta}"
                         break
@@ -772,7 +795,6 @@ if "df_resultado" in st.session_state:
                     if d_e.get("HISTORIAL_CARGOS_DIARIOS", {}).get(col_f) == cargo_clean:
                         val_limpio = d_e.get("HISTORIAL_TURNOS_LIMPIOS", {}).get(col_f, "")
                         if val_limpio not in NO_WORKING_TERMS:
-                            # Contar tanto el turno base como la tarea cubierta por ST
                             for sub_t in val_limpio.split(" / ST "):
                                 turnos_cubiertos.append(sub_t)
 
