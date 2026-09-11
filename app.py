@@ -480,18 +480,13 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             else:
                 disponibles_hoy.append(cod_e)
 
-        # ----------------------------------------------------
         # ETAPA 2: ANALISTAS DE OPERACIONES (GARANTÍA 03, 11, 19)
-        # ----------------------------------------------------
         analistas_hoy = [c for c in disponibles_hoy if "ANALISTA" in programacion_matriz[c]["CARGO_ORIGINAL"]]
         req_analistas = demandas_dia_actual.get("ANALISTA DE OPERACIONES", [])
         turnos_esenciales_an = ["03:00-11:00", "11:00-19:00", "19:00-27:00"]
         
-        # 2.1 Cobertura prioritaria para garantizar turnos críticos 03, 11 y 19
         for t_target in turnos_esenciales_an:
             analistas_sin_asignar = [c for c in analistas_hoy if programacion_matriz[c].get(col_nombre) is None]
-            
-            # Verificar si ya existe alguien haciendo el turno
             turno_ya_cubierto = any(
                 programacion_matriz[c].get("HISTORIAL_TURNOS_LIMPIOS", {}).get(col_nombre) == t_target 
                 for c in analistas_hoy
@@ -510,7 +505,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                             req_analistas.remove(t_target)
                         break
 
-        # 2.2 Asignación habitual o polivalente para analistas restantes
         for cod_an in analistas_hoy:
             if programacion_matriz[cod_an].get(col_nombre) is not None:
                 continue
@@ -580,11 +574,51 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                 else:
                     programacion_matriz[cod_tec][col_nombre] = "AO"
 
-        # ETAPA 4: REEMPLAZOS INTER-CARGO
-        resto_empleados = [c for c in disponibles_hoy if "ANALISTA" not in programacion_matriz[c]["CARGO_ORIGINAL"] and c not in tecnicos_planta_hoy]
-        intercargo_a_tecnico = [c for c in resto_empleados if programacion_matriz[c]["CARGO_SECUNDARIO"] == "TÉCNICO DE OPERACIONES"]
+        # ----------------------------------------------------
+        # ETAPA 4 Y 5 REESTRUCTURADAS: COBERTURA COMPLETA DE AUXILIARES ANTES DE MOVER A TÉCNICO
+        # ----------------------------------------------------
+        resto_empleados = [
+            c for c in disponibles_hoy 
+            if "ANALISTA" not in programacion_matriz[c]["CARGO_ORIGINAL"] and c not in tecnicos_planta_hoy
+        ]
+        
+        auxiliares_hoy = [c for c in resto_empleados if "AUXILIAR DE OPERACIONES" in programacion_matriz[c]["CARGO_ORIGINAL"]]
+        demanda_auxiliares = demandas_dia_actual.get("AUXILIAR DE OPERACIONES", [])
 
-        for cod_ic in list(intercargo_a_tecnico):
+        # 5.1 Los Auxiliares cubren PRIMERO todas las tareas de su propio cargo
+        for cod_aux in auxiliares_hoy:
+            if programacion_matriz[cod_aux].get(col_nombre) is not None:
+                continue
+
+            d_aux = programacion_matriz[cod_aux]
+            if demanda_auxiliares:
+                franja_ref = d_aux["FRANJA_PREVIA_DESCANSO"] if d_aux.get("VIENE_DE_DESCANSO") else d_aux["ULTIMA_FRANJA"]
+                franjas_permitidas = obtener_siguiente_franja_permitida(franja_ref) if franja_ref else ["MAÑANA", "TARDE", "NOCHE"]
+                cand_list = [t for t in demanda_auxiliares if clasificar_franja(t) in franjas_permitidas]
+
+                turno_a_asignar = None
+                for cand_t in cand_list:
+                    dt_ent, dt_salida = calcular_datetimes_turno(fecha_col, cand_t)
+                    if calcular_descanso_suficiente(d_aux["SALIDA_PREVIA_DT"], dt_ent, min_horas=12):
+                        turno_a_asignar = cand_t
+                        demanda_auxiliares.remove(cand_t)
+                        break
+
+                if turno_a_asignar:
+                    programacion_matriz[cod_aux][col_nombre] = turno_a_asignar
+                    _, dt_salida = calcular_datetimes_turno(fecha_col, turno_a_asignar)
+                    d_aux.update({"TURNO_FIJO_BLOQUE": turno_a_asignar, "ULTIMA_FRANJA": clasificar_franja(turno_a_asignar), "VIENE_DE_DESCANSO": False, "SALIDA_PREVIA_DT": dt_salida})
+                    d_aux["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = "AUXILIAR DE OPERACIONES"
+                    d_aux["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = turno_a_asignar
+
+        # 5.2 Auxiliares que quedaron "A orden" (sin turno asignado en su cargo) cubren vacantes de TÉCNICO DE OPERACIONES
+        auxiliares_a_orden = [
+            c for c in auxiliares_hoy 
+            if programacion_matriz[c].get(col_nombre) is None 
+            and programacion_matriz[c]["CARGO_SECUNDARIO"] == "TÉCNICO DE OPERACIONES"
+        ]
+
+        for cod_ic in auxiliares_a_orden:
             d_ic = programacion_matriz[cod_ic]
             if turnos_tec_disp:
                 turnos_tec_disp.sort(key=lambda t: 0 if t in ["03:00-11:00", "11:00-19:00"] else 1)
@@ -597,8 +631,9 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     d_ic["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = cand_t
                     turnos_tec_disp.remove(cand_t)
 
-        # ETAPA 5: RESTO DE AUXILIARES
-        for cod_emp in resto_empleados:
+        # 5.3 Asignar el resto del personal de otras áreas/cargos no procesados
+        otros_empleados = [c for c in resto_empleados if c not in auxiliares_hoy]
+        for cod_emp in otros_empleados:
             if programacion_matriz[cod_emp].get(col_nombre) is not None:
                 continue
 
@@ -629,6 +664,11 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     programacion_matriz[cod_emp][col_nombre] = "AO"
             else:
                 programacion_matriz[cod_emp][col_nombre] = "AO"
+
+        # Marcar a orden "AO" los auxiliares sobrantes sin tarea
+        for cod_aux in auxiliares_hoy:
+            if programacion_matriz[cod_aux].get(col_nombre) is None:
+                programacion_matriz[cod_aux][col_nombre] = "AO"
 
         # ETAPA 6: SOBRE TIEMPO PARA CUBRIR FALTANTES
         for cargo_k, v_turnos_pendientes in demandas_dia_actual.items():
