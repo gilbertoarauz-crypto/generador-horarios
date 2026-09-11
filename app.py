@@ -331,6 +331,48 @@ if df_empleados is not None:
         matriz_demanda[cargo_clean]["SÁBADO"] = list(req_sab)
         matriz_demanda[cargo_clean]["DOMINGO"] = list(req_dom)
 
+# ==========================================
+# FUNCION DE PRE-AUDITORÍA Y BALANCE
+# ==========================================
+def calcular_balance_capacidad(df_personal, semanas_count, fecha_base_date, demandas_matriz, libres_base):
+    dias_totales = semanas_count * 7
+    fecha_base = datetime.combine(fecha_base_date, time.min)
+    cols_dias = []
+    
+    for i in range(dias_totales):
+        f = fecha_base + timedelta(days=i)
+        cols_dias.append(f"{DIAS_SEMANA_ES[f.weekday()]}\n{f.strftime('%d-%b')}")
+
+    resumen_balance = []
+    cargos = df_personal["CARGO"].unique()
+
+    for cargo in cargos:
+        cargo_clean = str(cargo).strip().upper()
+        # Contar total de empleados titulares
+        tot_emp = len(df_personal[df_personal["CARGO"] == cargo_clean])
+        # Estimar personal efectivo diario (descontando proporciones de días libres)
+        efectivo_estimado = max(0, tot_emp - int(tot_emp * (libres_base / 7.0)))
+
+        for idx_d, col_d in enumerate(cols_dias):
+            f_act = fecha_base + timedelta(days=idx_d)
+            nom_dia = DIAS_SEMANA_ES[f_act.weekday()]
+            
+            # Demanda
+            req_turnos = demandas_matriz.get(cargo_clean, {}).get(nom_dia, [])
+            cant_req = len(req_turnos)
+
+            diferencia = efectivo_estimado - cant_req
+
+            resumen_balance.append({
+                "CARGO": cargo_clean,
+                "DÍA": col_d.replace("\n", " "),
+                "TAREAS REQUERIDAS": cant_req,
+                "PERSONAL DISPONIBLE": efectivo_estimado,
+                "BALANCE (DÉFICIT / SUPERÁVIT)": diferencia
+            })
+
+    return pd.DataFrame(resumen_balance)
+
 def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_demanda, libres_base, festivos_list, df_prev=None, mapa_reemplazos=None, mapa_sobretiempo=None):
     if mapa_reemplazos is None:
         mapa_reemplazos = {}
@@ -620,7 +662,6 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                 d_aux = programacion_matriz[cod_aux]
                 for cand_t in list(demanda_auxiliares):
                     dt_ent, dt_salida = calcular_datetimes_turno(fecha_col, cand_t)
-                    # Exige descanso legal de 12 horas pero permite cambiar de franja para rescatar la tarea faltante
                     if calcular_descanso_suficiente(d_aux["SALIDA_PREVIA_DT"], dt_ent, min_horas=12):
                         programacion_matriz[cod_aux][col_nombre] = cand_t
                         d_aux.update({"TURNO_FIJO_BLOQUE": cand_t, "ULTIMA_FRANJA": clasificar_franja(cand_t), "VIENE_DE_DESCANSO": False, "SALIDA_PREVIA_DT": dt_salida})
@@ -747,21 +788,70 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
     return df_resultado, programacion_matriz
 
 # ==========================================
-# 4. VISUALIZACIÓN Y REPORTES
+# 4. INTERFAZ DE AUDITORÍA PREVIA Y GENERACIÓN
 # ==========================================
 if df_empleados is not None:
-    if st.button("⚡ Generar Horarios y Auditar Tareas"):
-        df_res, dict_matriz = generar_malla_matriz(
-            df_empleados, semanas, fecha_inicio_date, matriz_demanda, libres_por_semana_base, fechas_festivas_sel, df_semana_anterior, reemplazos_config, sobretiempo_config
-        )
-        st.session_state.df_resultado = df_res
-        st.session_state.dict_matriz = dict_matriz
+    col_b1, col_b2 = st.columns([1, 2])
+    
+    with col_b1:
+        if st.button("🔍 1. Evaluar Capacidad y Previsión", use_container_width=True):
+            df_balance = calcular_balance_capacidad(
+                df_empleados, semanas, fecha_inicio_date, matriz_demanda, libres_por_semana_base
+            )
+            st.session_state.df_balance = df_balance
 
+if "df_balance" in st.session_state:
+    st.markdown("---")
+    st.subheader("📊 2. Vistazo de Prefactibilidad (Demandas vs Disponibilidad)")
+
+    df_bal = st.session_state.df_balance
+
+    # Pívot interactivo de balances
+    pivot_balance = df_bal.pivot_table(
+        index="CARGO",
+        columns="DÍA",
+        values="BALANCE (DÉFICIT / SUPERÁVIT)",
+        aggfunc="first"
+    )
+
+    def colorear_balance(val):
+        if val < 0:
+            return "background-color: #ff4b4b; color: white; font-weight: bold;"
+        elif val == 0:
+            return "background-color: #e6ffed; color: #0d5a22;"
+        return "background-color: #d0f0fd; color: #0c4a6e;"
+
+    styler_bal = pivot_balance.style
+    if hasattr(styler_bal, "map"):
+        styler_bal = styler_bal.map(colorear_balance)
+    else:
+        styler_bal = styler_bal.applymap(colorear_balance)
+
+    st.dataframe(styler_bal, use_container_width=True)
+
+    hay_deficit = (pivot_balance < 0).any().any()
+    
+    if hay_deficit:
+        st.warning("⚠️ **Aviso de Déficit Detectado:** La cantidad de personal en algunos cargos es insuficiente para cubrir la totalidad de tareas solicitadas. Puedes ir a la barra lateral para ajustar descansos, polivalencia o sobretiempo, o bien pulsar abajo para continuar.")
+
+    col_c1, col_c2 = st.columns([2, 1])
+    with col_c1:
+        if st.button("🚀 2. Confirmar y Generar Malla Horaria Definitiva", type="primary", use_container_width=True):
+            df_res, dict_matriz = generar_malla_matriz(
+                df_empleados, semanas, fecha_inicio_date, matriz_demanda, libres_por_semana_base, fechas_festivas_sel, df_semana_anterior, reemplazos_config, sobretiempo_config
+            )
+            st.session_state.df_resultado = df_res
+            st.session_state.dict_matriz = dict_matriz
+
+# ==========================================
+# 5. VISUALIZACIÓN DE RESULTADOS GENERADOS
+# ==========================================
 if "df_resultado" in st.session_state:
     df_resultado = st.session_state.df_resultado
     dict_matriz = st.session_state.dict_matriz
 
-    st.subheader("2. Malla Horaria Generada")
+    st.markdown("---")
+    st.subheader("3. Malla Horaria Generada")
     st.dataframe(df_resultado, use_container_width=True)
 
     # REPORTE COBERTURA
