@@ -575,7 +575,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     programacion_matriz[cod_tec][col_nombre] = "AO"
 
         # ----------------------------------------------------
-        # ETAPA 4 Y 5 REESTRUCTURADAS: COBERTURA COMPLETA DE AUXILIARES ANTES DE MOVER A TÉCNICO
+        # ETAPA 5 RESTRUCTURADA Y OPTIMIZADA: AUXILIARES
         # ----------------------------------------------------
         resto_empleados = [
             c for c in disponibles_hoy 
@@ -585,7 +585,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
         auxiliares_hoy = [c for c in resto_empleados if "AUXILIAR DE OPERACIONES" in programacion_matriz[c]["CARGO_ORIGINAL"]]
         demanda_auxiliares = demandas_dia_actual.get("AUXILIAR DE OPERACIONES", [])
 
-        # 5.1 Los Auxiliares cubren PRIMERO todas las tareas de su propio cargo
+        # 5.1 PRIMERA PASADA: Asignación por rotación de franja ideal
         for cod_aux in auxiliares_hoy:
             if programacion_matriz[cod_aux].get(col_nombre) is not None:
                 continue
@@ -611,7 +611,25 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     d_aux["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = "AUXILIAR DE OPERACIONES"
                     d_aux["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = turno_a_asignar
 
-        # 5.2 Auxiliares que quedaron "A orden" (sin turno asignado en su cargo) cubren vacantes de TÉCNICO DE OPERACIONES
+        # 5.2 SEGUNDA PASADA (RESCATE): Si aún hay demanda de Auxiliares, flexibilizar la regla de franja
+        if demanda_auxiliares:
+            auxiliares_sin_turno = [c for c in auxiliares_hoy if programacion_matriz[c].get(col_nombre) is None]
+            for cod_aux in auxiliares_sin_turno:
+                if not demanda_auxiliares:
+                    break
+                d_aux = programacion_matriz[cod_aux]
+                for cand_t in list(demanda_auxiliares):
+                    dt_ent, dt_salida = calcular_datetimes_turno(fecha_col, cand_t)
+                    # Solo se exige el descanso legal (12 hrs), omitiendo la restricción estricta de franja
+                    if calcular_descanso_suficiente(d_aux["SALIDA_PREVIA_DT"], dt_ent, min_horas=12):
+                        programacion_matriz[cod_aux][col_nombre] = cand_t
+                        d_aux.update({"TURNO_FIJO_BLOQUE": cand_t, "ULTIMA_FRANJA": clasificar_franja(cand_t), "VIENE_DE_DESCANSO": False, "SALIDA_PREVIA_DT": dt_salida})
+                        d_aux["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = "AUXILIAR DE OPERACIONES"
+                        d_aux["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = cand_t
+                        demanda_auxiliares.remove(cand_t)
+                        break
+
+        # 5.3 TERCERA PASADA: Auxiliares que realmente queden "A orden" cubren puesto de TÉCNICO DE OPERACIONES
         auxiliares_a_orden = [
             c for c in auxiliares_hoy 
             if programacion_matriz[c].get(col_nombre) is None 
@@ -631,7 +649,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
                     d_ic["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = cand_t
                     turnos_tec_disp.remove(cand_t)
 
-        # 5.3 Asignar el resto del personal de otras áreas/cargos no procesados
+        # 5.4 Asignación de resto de cargos y personal
         otros_empleados = [c for c in resto_empleados if c not in auxiliares_hoy]
         for cod_emp in otros_empleados:
             if programacion_matriz[cod_emp].get(col_nombre) is not None:
@@ -665,7 +683,7 @@ def generar_malla_matriz(df_personal, semanas_count, fecha_base_date, reglas_dem
             else:
                 programacion_matriz[cod_emp][col_nombre] = "AO"
 
-        # Marcar a orden "AO" los auxiliares sobrantes sin tarea
+        # Asignar "AO" unicamente a los Auxiliares sobrantes tras agotar todas las pasadas
         for cod_aux in auxiliares_hoy:
             if programacion_matriz[cod_aux].get(col_nombre) is None:
                 programacion_matriz[cod_aux][col_nombre] = "AO"
