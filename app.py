@@ -348,16 +348,13 @@ def calcular_balance_capacidad(df_personal, semanas_count, fecha_base_date, dema
 
     for cargo in cargos:
         cargo_clean = str(cargo).strip().upper()
-        # Contar total de empleados titulares
         tot_emp = len(df_personal[df_personal["CARGO"] == cargo_clean])
-        # Estimar personal efectivo diario (descontando proporciones de días libres)
         efectivo_estimado = max(0, tot_emp - int(tot_emp * (libres_base / 7.0)))
 
         for idx_d, col_d in enumerate(cols_dias):
             f_act = fecha_base + timedelta(days=idx_d)
             nom_dia = DIAS_SEMANA_ES[f_act.weekday()]
             
-            # Demanda
             req_turnos = demandas_matriz.get(cargo_clean, {}).get(nom_dia, [])
             cant_req = len(req_turnos)
 
@@ -366,6 +363,7 @@ def calcular_balance_capacidad(df_personal, semanas_count, fecha_base_date, dema
             resumen_balance.append({
                 "CARGO": cargo_clean,
                 "DÍA": col_d.replace("\n", " "),
+                "FECHA_ORDEN": f_act,  # Usado para ordenar cronológicamente
                 "TAREAS REQUERIDAS": cant_req,
                 "PERSONAL DISPONIBLE": efectivo_estimado,
                 "BALANCE (DÉFICIT / SUPERÁVIT)": diferencia
@@ -813,6 +811,13 @@ if "df_balance" in st.session_state:
         values="BALANCE (DÉFICIT / SUPERÁVIT)",
         aggfunc="first"
     )
+
+    # ORDENAR COLUMNAS CRONOLÓGICAMENTE DE MENOR A MAYOR FECHA
+    cols_dias_ordenadas = sorted(
+        pivot_balance.columns.tolist(),
+        key=lambda x: df_bal[df_bal["DÍA"] == x]["FECHA_ORDEN"].iloc[0]
+    )
+    pivot_balance = pivot_balance.reindex(columns=cols_dias_ordenadas)
 
     def colorear_balance(val):
         if val < 0:
