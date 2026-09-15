@@ -907,7 +907,7 @@ def generar_malla_matriz(
         or "TECNICO" in d["CARGO_ORIGINAL"]
     ]
 
-    # ASIGNACIÓN DE DÍAS LIBRES
+    # ASIGNACIÓN DE DÍAS LIBRES UNIVERSAL (INCLUYE ANALISTAS)
     for s in range(semanas_count):
         indices_semana = [s * 7 + i for i in range(7)]
         carga_diaria = {idx: 0 for idx in indices_semana}
@@ -922,40 +922,39 @@ def generar_malla_matriz(
             cod = str(emp["CODIGO"]).strip()
             cargo_emp = programacion_matriz[cod]["CARGO_ORIGINAL"]
 
-            if "ANALISTA" not in cargo_emp:
-                dias_libres_emp.setdefault(cod, set())
-                inicio_sem = fecha_base + timedelta(days=s * 7)
-                fin_sem = inicio_sem + timedelta(days=6)
-                hay_festivo_sem = any(
-                    inicio_sem.date() <= f <= fin_sem.date()
-                    for f in festivos_list
-                )
-                cant_libres = libres_base + (1 if hay_festivo_sem else 0)
+            dias_libres_emp.setdefault(cod, set())
+            inicio_sem = fecha_base + timedelta(days=s * 7)
+            fin_sem = inicio_sem + timedelta(days=6)
+            hay_festivo_sem = any(
+                inicio_sem.date() <= f <= fin_sem.date()
+                for f in festivos_list
+            )
+            cant_libres = libres_base + (1 if hay_festivo_sem else 0)
 
-                if cod in lideres:
-                    idx_lider = lideres.index(cod)
-                    dias_libres_emp[cod].add(
-                        s * 7 + (4 if idx_lider % 2 == 0 else 5)
-                    )
-                elif cod in tecnicos:
-                    idx_sabado, idx_domingo = s * 7 + 5, s * 7 + 6
-                    idx_tecnico = tecnicos.index(cod)
-                    if idx_tecnico % 2 == 0:
-                        dias_libres_emp[cod].add(idx_sabado)
-                        if cant_libres > 1:
-                            dias_libres_emp[cod].add(idx_domingo)
-                    else:
+            if cod in lideres:
+                idx_lider = lideres.index(cod)
+                dias_libres_emp[cod].add(
+                    s * 7 + (4 if idx_lider % 2 == 0 else 5)
+                )
+            elif cod in tecnicos:
+                idx_sabado, idx_domingo = s * 7 + 5, s * 7 + 6
+                idx_tecnico = tecnicos.index(cod)
+                if idx_tecnico % 2 == 0:
+                    dias_libres_emp[cod].add(idx_sabado)
+                    if cant_libres > 1:
                         dias_libres_emp[cod].add(idx_domingo)
-                        if cant_libres > 1:
-                            dias_libres_emp[cod].add(idx_sabado)
                 else:
-                    dias_ordenados_por_carga = sorted(
-                        indices_semana, key=lambda idx: carga_diaria[idx]
-                    )
-                    libres_elegidos = dias_ordenados_por_carga[:cant_libres]
-                    dias_libres_emp[cod].update(libres_elegidos)
-                    for el in libres_elegidos:
-                        carga_diaria[el] += 2
+                    dias_libres_emp[cod].add(idx_domingo)
+                    if cant_libres > 1:
+                        dias_libres_emp[cod].add(idx_sabado)
+            else:
+                dias_ordenados_por_carga = sorted(
+                    indices_semana, key=lambda idx: carga_diaria[idx]
+                )
+                libres_elegidos = dias_ordenados_por_carga[:cant_libres]
+                dias_libres_emp[cod].update(libres_elegidos)
+                for el in libres_elegidos:
+                    carga_diaria[el] += 2
 
     # GENERACIÓN DÍA A DÍA
     for idx_dia, col_nombre in enumerate(columnas_fechas):
@@ -969,7 +968,7 @@ def generar_malla_matriz(
             for c_k, v_dict in reglas_demanda.items()
         }
 
-        # ETAPA 1: LIBRES E INCIDENCIAS
+        # ETAPA 1: LIBRES E INCIDENCIAS (CORREGIDO PARA ANALISTAS)
         disponibles_hoy = []
         for cod_e, d_e in programacion_matriz.items():
             cargo_orig = d_e["CARGO_ORIGINAL"]
@@ -999,10 +998,7 @@ def generar_malla_matriz(
                     ]
                     continue
 
-            if (
-                idx_dia in dias_libres_emp.get(cod_e, set())
-                and "ANALISTA" not in cargo_orig
-            ):
+            if idx_dia in dias_libres_emp.get(cod_e, set()):
                 programacion_matriz[cod_e][col_nombre] = "L"
                 if d_e.get("TURNO_FIJO_BLOQUE"):
                     d_e["TURNO_PREVIO_DESCANSO"] = d_e["TURNO_FIJO_BLOQUE"]
@@ -1167,7 +1163,7 @@ def generar_malla_matriz(
                 else:
                     programacion_matriz[cod_tec][col_nombre] = "AO"
 
-        # ETAPA 4: COBERTURA INTER-CARGO CON PRIORIDAD EN CARGO SECUNDARIO FALTANTE
+        # ETAPA 4: COBERTURA INTER-CARGO CON PRIORIDAD DE DÉFICIT
         resto_empleados = [
             c
             for c in disponibles_hoy
