@@ -1,4 +1,3 @@
-
 from datetime import datetime, time, timedelta
 import io
 import re
@@ -393,6 +392,30 @@ def parsear_fecha_incidencia(val_fecha, anio_referencia: int):
         return None
 
 
+def encontrar_posicion_secuencia_analista(historial_turnos_ultimos, matriz_patrones):
+    """Identifica en qué día (0 a 13) de qué patrón (0 a 4) se encuentra el analista según sus últimos turnos trabajados"""
+    if not historial_turnos_ultimos:
+        return None, 0
+
+    len_hist = len(historial_turnos_ultimos)
+    for idx_patron, patron in enumerate(matriz_patrones):
+        for pos_fin in range(14):
+            coincide = True
+            for i in range(min(len_hist, 14)):
+                pos_eval = (pos_fin - i) % 14
+                turno_hist = historial_turnos_ultimos[-(i + 1)].strip().upper()
+                turno_patron = patron[pos_eval].strip().upper()
+
+                if turno_hist != turno_patron:
+                    coincide = False
+                    break
+            if coincide:
+                # Retorna el índice del patrón y el SIGUIENTE día en la secuencia
+                return idx_patron, (pos_fin + 1) % 14
+
+    return None, 0
+
+
 # ==========================================
 # 1. CARGA DE ARCHIVOS
 # ==========================================
@@ -726,9 +749,7 @@ if df_empleados is not None:
         )
 
         if not req_habil and not req_sab and not req_dom:
-            defaults = TURNOS_DEFAULTPOR_CARGO = TURNOS_DEFAULT_POR_CARGO.get(
-                cargo_clean, {}
-            )
+            defaults = TURNOS_DEFAULT_POR_CARGO.get(cargo_clean, {})
             req_habil = defaults.get("habil", [])
             req_sab = defaults.get("sabado", [])
             req_dom = defaults.get("domingo", [])
@@ -820,8 +841,8 @@ def generar_malla_matriz(
 
     info_historial = {}
     dias_trabajados_previos = {}
+    historial_analistas_malla_prev = {}
 
-    # LECTURA DE LA SEMANA ANTERIOR Y CONTEO DE DÍAS TRABAJADOS CONTINUOS
     if df_prev is not None and "CODIGO" in df_prev.columns:
         cols_dias_prev = [
             c
@@ -837,7 +858,12 @@ def generar_malla_matriz(
                 )
                 es_descanso_o_inc = val_ult_limpio.upper() in NO_WORKING_TERMS
 
-                # Contar días seguidos trabajados hasta el último día de la malla anterior
+                # Captura la secuencia de turnos de la malla anterior para analistas
+                secuencia_prev = [
+                    str(fila[col_p]).strip().split()[0] for col_p in cols_dias_prev
+                ]
+                historial_analistas_malla_prev[c_cod] = secuencia_prev
+
                 conteo_cont = 0
                 for col_prev in reversed(cols_dias_prev):
                     v_p = str(fila[col_prev]).strip().split()[0].upper()
@@ -858,15 +884,23 @@ def generar_malla_matriz(
                     "termino_en_descanso": es_descanso_o_inc,
                 }
 
-    analistas = [
-        emp
-        for _, emp in df_personal.iterrows()
-        if "ANALISTA" in str(emp["CARGO"]).upper()
-    ]
+    # EVALUACIÓN DINÁMICA DE VACACIONES DE ANALISTAS
+    hay_analista_vacaciones = False
+    for _, emp in df_personal.iterrows():
+        if "ANALISTA" in str(emp["CARGO"]).upper():
+            inc_t = str(emp.get("INCIDENCIA_TIPO", "")).upper()
+            f_ini = parsear_fecha_incidencia(emp.get("INCIDENCIA_INI"), anio_ref)
+            f_fin = parsear_fecha_incidencia(emp.get("INCIDENCIA_FIN"), anio_ref)
+            f_inicio_malla = fecha_base_date.date()
+            f_fin_malla = (fecha_base_date + timedelta(days=dias_totales - 1)).date()
+
+            if "VACACIONES" in inc_t and f_ini and f_fin:
+                if not (f_fin < f_inicio_malla or f_ini > f_fin_malla):
+                    hay_analista_vacaciones = True
+                    break
+
     patrones_analistas = (
-        PATRONES_ANALISTAS_5
-        if len(analistas) >= 5
-        else PATRONES_ANALISTAS_4
+        PATRONES_ANALISTAS_4 if hay_analista_vacaciones else PATRONES_ANALISTAS_5
     )
 
     programacion_matriz = {}
@@ -902,16 +936,28 @@ def generar_malla_matriz(
             "ULTIMA_FRANJA": hist.get("ultima_franja"),
             "SALIDA_PREVIA_DT": None,
             "DIAS_SEGUIDOS_TRABAJADOS": dias_trabajados_previos.get(cod, 0),
+            "POSICION_SECUENCIA_ANALISTA": 0,
             "HISTORIAL_CARGOS_DIARIOS": {},
             "HISTORIAL_TURNOS_LIMPIOS": {},
             "HISTORIAL_SOBRETIEMPO": {},
         }
 
+        # ASIGNACIÓN DE CONTINUIDAD SECUENCIAL PARA ANALISTAS
         if "ANALISTA" in cargo_original:
-            programacion_matriz[cod]["PATRON_BASE"] = (
-                idx_patron_analistas_counter % len(patrones_analistas)
+            sec_previa = historial_analistas_malla_prev.get(cod, [])
+            idx_patron, pos_siguiente = encontrar_posicion_secuencia_analista(
+                sec_previa, patrones_analistas
             )
-            idx_patron_analistas_counter += 1
+
+            if idx_patron is not None:
+                programacion_matriz[cod]["PATRON_BASE"] = idx_patron
+                programacion_matriz[cod]["POSICION_SECUENCIA_ANALISTA"] = pos_siguiente
+            else:
+                programacion_matriz[cod]["PATRON_BASE"] = (
+                    idx_patron_analistas_counter % len(patrones_analistas)
+                )
+                programacion_matriz[cod]["POSICION_SECUENCIA_ANALISTA"] = 0
+                idx_patron_analistas_counter += 1
 
     tecnicos_planta_cods = [
         cod
@@ -919,12 +965,11 @@ def generar_malla_matriz(
         if "TÉCNICO" in d["CARGO_ORIGINAL"] or "TECNICO" in d["CARGO_ORIGINAL"]
     ]
 
-    # GENERACIÓN DÍA A DÍA CON CONTROL DE MÁXIMO 10 DÍAS DE TRABAJO Y 24H TRAS DESCANSO
+    # GENERACIÓN DÍA A DÍA
     for idx_dia, col_nombre in enumerate(columnas_fechas):
         fecha_col = fechas_dt[idx_dia]
         fecha_actual_date = fecha_col.date()
         nombre_dia_semana = DIAS_SEMANA_ES[fecha_col.weekday()]
-        dia_matriz_14 = idx_dia % 14
 
         demandas_dia_actual = {
             c_k: list(v_dict.get(nombre_dia_semana, []))
@@ -937,7 +982,6 @@ def generar_malla_matriz(
             cargo_orig = d_e["CARGO_ORIGINAL"]
             es_analista = "ANALISTA" in cargo_orig
 
-            # Incidencias programadas
             if (
                 d_e["INCIDENCIA_TIPO"]
                 and d_e["INCIDENCIA_INI"]
@@ -964,7 +1008,6 @@ def generar_malla_matriz(
                     ]
                     continue
 
-            # REGLA OBLIGATORIA: Todo puesto (EXCEPTO ANALISTAS) descansa al llegar a 10 días continuos
             if not es_analista and d_e["DIAS_SEGUIDOS_TRABAJADOS"] >= 10:
                 programacion_matriz[cod_e][col_nombre] = "L"
                 d_e.update(
@@ -980,7 +1023,7 @@ def generar_malla_matriz(
             else:
                 disponibles_hoy.append(cod_e)
 
-        # ETAPA 2: ANALISTAS DE OPERACIONES (MANTIENEN SUS PATRONES)
+        # ETAPA 2: ANALISTAS DE OPERACIONES (ROTA SECUENCIALMENTE DÍA A DÍA)
         analistas_hoy = [
             c
             for c in disponibles_hoy
@@ -989,66 +1032,23 @@ def generar_malla_matriz(
         req_analistas = demandas_dia_actual.get(
             "ANALISTA DE OPERACIONES", []
         )
-        turnos_esenciales_an = ["03:00-11:00", "11:00-19:00", "19:00-27:00"]
-
-        for t_target in turnos_esenciales_an:
-            analistas_sin_asignar = [
-                c
-                for c in analistas_hoy
-                if programacion_matriz[c].get(col_nombre) is None
-            ]
-            turno_ya_cubierto = any(
-                programacion_matriz[c]
-                .get("HISTORIAL_TURNOS_LIMPIOS", {})
-                .get(col_nombre)
-                == t_target
-                for c in analistas_hoy
-            )
-
-            if not turno_ya_cubierto and analistas_sin_asignar:
-                for cod_an in analistas_sin_asignar:
-                    d_an = programacion_matriz[cod_an]
-                    dt_ent, dt_salida = calcular_datetimes_turno(
-                        fecha_col, t_target
-                    )
-                    min_desc = 24.0 if d_an.get("VIENE_DE_DESCANSO") else 12.0
-                    if calcular_descanso_suficiente(
-                        d_an["SALIDA_PREVIA_DT"], dt_ent, min_horas=min_desc
-                    ):
-                        programacion_matriz[cod_an][col_nombre] = t_target
-                        d_an.update(
-                            {
-                                "TURNO_FIJO_BLOQUE": t_target,
-                                "ULTIMA_FRANJA": clasificar_franja(
-                                    t_target
-                                ),
-                                "SALIDA_PREVIA_DT": dt_salida,
-                                "VIENE_DE_DESCANSO": False,
-                            }
-                        )
-                        d_an["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = (
-                            "ANALISTA DE OPERACIONES"
-                        )
-                        d_an["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = (
-                            t_target
-                        )
-                        if t_target in req_analistas:
-                            req_analistas.remove(t_target)
-                        break
 
         for cod_an in analistas_hoy:
-            if programacion_matriz[cod_an].get(col_nombre) is not None:
-                continue
-
             d_an = programacion_matriz[cod_an]
-            turno_sugerido = patrones_analistas[d_an["PATRON_BASE"]][
-                dia_matriz_14
-            ]
+            idx_pat = d_an["PATRON_BASE"]
+            pos_actual = d_an["POSICION_SECUENCIA_ANALISTA"]
+
+            turno_sugerido = patrones_analistas[idx_pat][pos_actual]
+
             programacion_matriz[cod_an][col_nombre] = turno_sugerido
             d_an["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = (
                 "ANALISTA DE OPERACIONES"
             )
             d_an["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = turno_sugerido
+
+            # Avanzar la secuencia para el siguiente día (módul 14)
+            d_an["POSICION_SECUENCIA_ANALISTA"] = (pos_actual + 1) % 14
+
             if turno_sugerido not in NO_WORKING_TERMS:
                 d_an["ULTIMA_FRANJA"] = clasificar_franja(turno_sugerido)
                 _, dt_salida = calcular_datetimes_turno(
@@ -1141,7 +1141,7 @@ def generar_malla_matriz(
                 else:
                     programacion_matriz[cod_tec][col_nombre] = "AO"
 
-        # ETAPA 4: COBERTURA INTER-CARGO CON PRIORIDAD Y RESPETO DE DESCANSO
+        # ETAPA 4: COBERTURA INTER-CARGO
         resto_empleados = [
             c
             for c in disponibles_hoy
@@ -1375,6 +1375,7 @@ def generar_malla_matriz(
         "MAX_HORAS_EXTRA_DIA",
         "SALIDA_PREVIA_DT",
         "DIAS_SEGUIDOS_TRABAJADOS",
+        "POSICION_SECUENCIA_ANALISTA",
         "HISTORIAL_CARGOS_DIARIOS",
         "HISTORIAL_TURNOS_LIMPIOS",
         "HISTORIAL_SOBRETIEMPO",
