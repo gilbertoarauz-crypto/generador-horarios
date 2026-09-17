@@ -392,8 +392,9 @@ def parsear_fecha_incidencia(val_fecha, anio_referencia: int):
         return None
 
 
-def encontrar_posicion_secuencia_analista(historial_turnos_ultimos, matriz_patrones):
-    """Identifica en qué día (0 a 13) de qué patrón (0 a 4) se encuentra el analista según sus últimos turnos trabajados"""
+def encontrar_posicion_secuencia_analista(
+    historial_turnos_ultimos, matriz_patrones
+):
     if not historial_turnos_ultimos:
         return None, 0
 
@@ -410,7 +411,6 @@ def encontrar_posicion_secuencia_analista(historial_turnos_ultimos, matriz_patro
                     coincide = False
                     break
             if coincide:
-                # Retorna el índice del patrón y el SIGUIENTE día en la secuencia
                 return idx_patron, (pos_fin + 1) % 14
 
     return None, 0
@@ -858,7 +858,6 @@ def generar_malla_matriz(
                 )
                 es_descanso_o_inc = val_ult_limpio.upper() in NO_WORKING_TERMS
 
-                # Captura la secuencia de turnos de la malla anterior para analistas
                 secuencia_prev = [
                     str(fila[col_p]).strip().split()[0] for col_p in cols_dias_prev
                 ]
@@ -884,15 +883,16 @@ def generar_malla_matriz(
                     "termino_en_descanso": es_descanso_o_inc,
                 }
 
-    # EVALUACIÓN DINÁMICA DE VACACIONES DE ANALISTAS
+    # CORRECCIÓN DE EVALUACIÓN DE FECHAS DE VACACIONES DE ANALISTAS
     hay_analista_vacaciones = False
+    f_inicio_malla = fecha_base_date
+    f_fin_malla = fecha_base_date + timedelta(days=dias_totales - 1)
+
     for _, emp in df_personal.iterrows():
         if "ANALISTA" in str(emp["CARGO"]).upper():
             inc_t = str(emp.get("INCIDENCIA_TIPO", "")).upper()
             f_ini = parsear_fecha_incidencia(emp.get("INCIDENCIA_INI"), anio_ref)
             f_fin = parsear_fecha_incidencia(emp.get("INCIDENCIA_FIN"), anio_ref)
-            f_inicio_malla = fecha_base_date.date()
-            f_fin_malla = (fecha_base_date + timedelta(days=dias_totales - 1)).date()
 
             if "VACACIONES" in inc_t and f_ini and f_fin:
                 if not (f_fin < f_inicio_malla or f_ini > f_fin_malla):
@@ -942,7 +942,6 @@ def generar_malla_matriz(
             "HISTORIAL_SOBRETIEMPO": {},
         }
 
-        # ASIGNACIÓN DE CONTINUIDAD SECUENCIAL PARA ANALISTAS
         if "ANALISTA" in cargo_original:
             sec_previa = historial_analistas_malla_prev.get(cod, [])
             idx_patron, pos_siguiente = encontrar_posicion_secuencia_analista(
@@ -1046,7 +1045,6 @@ def generar_malla_matriz(
             )
             d_an["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = turno_sugerido
 
-            # Avanzar la secuencia para el siguiente día (módul 14)
             d_an["POSICION_SECUENCIA_ANALISTA"] = (pos_actual + 1) % 14
 
             if turno_sugerido not in NO_WORKING_TERMS:
