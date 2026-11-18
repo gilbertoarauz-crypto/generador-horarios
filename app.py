@@ -291,6 +291,7 @@ NO_WORKING_TERMS = {
     "LICENCIA",
     "INCAPACIDAD",
     "PERMISO",
+    "SUSPEND",
 }
 
 # ==========================================
@@ -317,7 +318,7 @@ if tiene_festivo:
         for i in range(dias_totales_temp)
     ]
     fechas_festivas_sel = st.sidebar.multiselect(
-        "Días festivos:",
+        "Días festivos (otorgan día libre compensatorio adicional en su semana):",
         options=fechas_posibles,
         format_func=lambda x: x.strftime("%d-%b-%Y"),
     )
@@ -425,7 +426,9 @@ df_empleados, df_semana_anterior, df_tareas_req = None, None, None
 
 with col_f1:
     uploaded_file = st.file_uploader(
-        "1. Lista de Personal (Excel/CSV)", type=["xlsx", "csv"], key="file_personal"
+        "1. Lista de Personal (Excel/CSV)",
+        type=["xlsx", "csv"],
+        key="file_personal",
     )
 
 with col_f2:
@@ -763,8 +766,16 @@ if df_empleados is not None:
 # FUNCION DE PRE-AUDITORÍA Y BALANCE
 # ==========================================
 def calcular_balance_capacidad(
-    df_personal, semanas_count, fecha_base_date, demandas_matriz, libres_base
+    df_personal,
+    semanas_count,
+    fecha_base_date,
+    demandas_matriz,
+    libres_base,
+    festivos_list=None,
 ):
+    if festivos_list is None:
+        festivos_list = []
+
     dias_totales = semanas_count * 7
     fecha_base = datetime.combine(fecha_base_date, time.min)
     cols_dias = []
@@ -781,17 +792,24 @@ def calcular_balance_capacidad(
     for cargo in cargos:
         cargo_clean = str(cargo).strip().upper()
         tot_emp = len(df_personal[df_personal["CARGO"] == cargo_clean])
-        efectivo_estimado = max(
-            0, tot_emp - int(tot_emp * (libres_base / 7.0))
-        )
 
         for idx_d, col_d in enumerate(cols_dias):
             f_act = fecha_base + timedelta(days=idx_d)
-            nom_dia = DIAS_SEMANA_ES[f_act.weekday()]
+            sem_idx = idx_d // 7
+            f_sem_ini = fecha_base_date + timedelta(days=sem_idx * 7)
+            f_sem_fin = f_sem_ini + timedelta(days=6)
+            festivos_sem = sum(
+                1 for ff in festivos_list if f_sem_ini <= ff <= f_sem_fin
+            )
 
+            libres_sem_total = min(6, libres_base + festivos_sem)
+            efectivo_estimado = max(
+                0, tot_emp - round(tot_emp * (libres_sem_total / 7.0))
+            )
+
+            nom_dia = DIAS_SEMANA_ES[f_act.weekday()]
             req_turnos = demandas_matriz.get(cargo_clean, {}).get(nom_dia, [])
             cant_req = len(req_turnos)
-
             diferencia = efectivo_estimado - cant_req
 
             resumen_balance.append(
@@ -826,6 +844,8 @@ def generar_malla_matriz(
         mapa_reemplazos = {}
     if mapa_sobretiempo is None:
         mapa_sobretiempo = {}
+    if festivos_list is None:
+        festivos_list = []
 
     dias_totales = semanas_count * 7
     fecha_base = datetime.combine(fecha_base_date, time.min)
@@ -839,6 +859,7 @@ def generar_malla_matriz(
             f"{DIAS_SEMANA_ES[f_actual.weekday()]}\n{f_actual.strftime('%d-%b')}"
         )
 
+    # 1. PROCESAR MALLA ANTERIOR (CON RECONSTRUCCIÓN DE SALIDA_PREVIA_DT)
     info_historial = {}
     dias_trabajados_previos = {}
     historial_analistas_malla_prev = {}
@@ -850,16 +871,19 @@ def generar_malla_matriz(
             if c not in ["CODIGO", "NOMBRE", "CARGO", "ESTADO"]
         ]
         if cols_dias_prev:
+            fecha_ultimo_dia_prev = fecha_base - timedelta(days=1)
+
             for _, fila in df_prev.iterrows():
                 c_cod = str(fila["CODIGO"]).strip()
-                val_ult = str(fila[cols_dias_prev[-1]]).strip()
+                val_ult_raw = str(fila[cols_dias_prev[-1]]).strip()
                 val_ult_limpio = (
-                    val_ult.split()[0] if " " in val_ult else val_ult
+                    val_ult_raw.split()[0] if " " in val_ult_raw else val_ult_raw
                 )
                 es_descanso_o_inc = val_ult_limpio.upper() in NO_WORKING_TERMS
 
                 secuencia_prev = [
-                    str(fila[col_p]).strip().split()[0] for col_p in cols_dias_prev
+                    str(fila[col_p]).strip().split()[0]
+                    for col_p in cols_dias_prev
                 ]
                 historial_analistas_malla_prev[c_cod] = secuencia_prev
 
@@ -873,6 +897,23 @@ def generar_malla_matriz(
 
                 dias_trabajados_previos[c_cod] = conteo_cont
 
+                # Reconstruir hora exacta de salida del último día de la malla anterior
+                salida_dt_prev = None
+                ultimo_turno_previo_desc = None
+                franja_previa_desc = None
+
+                if not es_descanso_o_inc:
+                    _, salida_dt_prev = calcular_datetimes_turno(
+                        fecha_ultimo_dia_prev, val_ult_raw
+                    )
+                else:
+                    for col_prev in reversed(cols_dias_prev):
+                        v_p = str(fila[col_prev]).strip().split()[0]
+                        if v_p.upper() not in NO_WORKING_TERMS:
+                            ultimo_turno_previo_desc = v_p
+                            franja_previa_desc = clasificar_franja(v_p)
+                            break
+
                 info_historial[c_cod] = {
                     "ultimo_turno": None
                     if es_descanso_o_inc
@@ -881,9 +922,12 @@ def generar_malla_matriz(
                     if es_descanso_o_inc
                     else clasificar_franja(val_ult_limpio),
                     "termino_en_descanso": es_descanso_o_inc,
+                    "salida_previa_dt": salida_dt_prev,
+                    "turno_previo_desc": ultimo_turno_previo_desc,
+                    "franja_previa_desc": franja_previa_desc,
                 }
 
-    # CORRECCIÓN DE EVALUACIÓN DE FECHAS DE VACACIONES DE ANALISTAS
+    # 2. DETECTAR VACACIONES DE ANALISTAS
     hay_analista_vacaciones = False
     f_inicio_malla = fecha_base_date
     f_fin_malla = fecha_base_date + timedelta(days=dias_totales - 1)
@@ -930,16 +974,17 @@ def generar_malla_matriz(
             "TURNO_FIJO_BLOQUE": hist.get("ultimo_turno")
             if not hist.get("termino_en_descanso", True)
             else None,
-            "TURNO_PREVIO_DESCANSO": None,
-            "FRANJA_PREVIA_DESCANSO": None,
-            "VIENE_DE_DESCANSO": False,
+            "TURNO_PREVIO_DESCANSO": hist.get("turno_previo_desc"),
+            "FRANJA_PREVIA_DESCANSO": hist.get("franja_previa_desc"),
+            "VIENE_DE_DESCANSO": hist.get("termino_en_descanso", False),
             "ULTIMA_FRANJA": hist.get("ultima_franja"),
-            "SALIDA_PREVIA_DT": None,
+            "SALIDA_PREVIA_DT": hist.get("salida_previa_dt"),
             "DIAS_SEGUIDOS_TRABAJADOS": dias_trabajados_previos.get(cod, 0),
             "POSICION_SECUENCIA_ANALISTA": 0,
             "HISTORIAL_CARGOS_DIARIOS": {},
             "HISTORIAL_TURNOS_LIMPIOS": {},
             "HISTORIAL_SOBRETIEMPO": {},
+            "LIBRES_POR_SEMANA": {s: 0 for s in range(semanas_count)},
         }
 
         if "ANALISTA" in cargo_original:
@@ -950,7 +995,9 @@ def generar_malla_matriz(
 
             if idx_patron is not None:
                 programacion_matriz[cod]["PATRON_BASE"] = idx_patron
-                programacion_matriz[cod]["POSICION_SECUENCIA_ANALISTA"] = pos_siguiente
+                programacion_matriz[cod][
+                    "POSICION_SECUENCIA_ANALISTA"
+                ] = pos_siguiente
             else:
                 programacion_matriz[cod]["PATRON_BASE"] = (
                     idx_patron_analistas_counter % len(patrones_analistas)
@@ -964,23 +1011,34 @@ def generar_malla_matriz(
         if "TÉCNICO" in d["CARGO_ORIGINAL"] or "TECNICO" in d["CARGO_ORIGINAL"]
     ]
 
-    # GENERACIÓN DÍA A DÍA
+    # 3. GENERACIÓN DÍA A DÍA
     for idx_dia, col_nombre in enumerate(columnas_fechas):
         fecha_col = fechas_dt[idx_dia]
         fecha_actual_date = fecha_col.date()
         nombre_dia_semana = DIAS_SEMANA_ES[fecha_col.weekday()]
+        semana_actual_idx = idx_dia // 7
+        dias_restantes_semana = 6 - (idx_dia % 7)
+
+        # Calcular cuota de libres para esta semana (base + festivos en la semana)
+        f_sem_ini = fecha_base_date + timedelta(days=semana_actual_idx * 7)
+        f_sem_fin = f_sem_ini + timedelta(days=6)
+        festivos_en_semana = sum(
+            1 for ff in festivos_list if f_sem_ini <= ff <= f_sem_fin
+        )
+        cuota_libres_semana = min(6, libres_base + festivos_en_semana)
 
         demandas_dia_actual = {
             c_k: list(v_dict.get(nombre_dia_semana, []))
             for c_k, v_dict in reglas_demanda.items()
         }
 
-        # ETAPA 1: RESTRICCIÓN DE MÁXIMO 10 DÍAS SEGUIDOS, INCIDENCIAS Y DESCANSO
+        # ETAPA 1: INCIDENCIAS, TOPE 10 DÍAS SEGUIDOS Y DESCANSOS SEMANALES PROGRAMADOS
         disponibles_hoy = []
         for cod_e, d_e in programacion_matriz.items():
             cargo_orig = d_e["CARGO_ORIGINAL"]
             es_analista = "ANALISTA" in cargo_orig
 
+            # 1A. Incidencias (Vacaciones, Incapacidad, Licencias)
             if (
                 d_e["INCIDENCIA_TIPO"]
                 and d_e["INCIDENCIA_INI"]
@@ -1001,26 +1059,87 @@ def generar_malla_matriz(
                             "DIAS_SEGUIDOS_TRABAJADOS": 0,
                         }
                     )
+                    d_e["LIBRES_POR_SEMANA"][semana_actual_idx] += 1
                     d_e["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = cargo_orig
                     d_e["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = d_e[
                         "INCIDENCIA_TIPO"
                     ]
                     continue
 
-            if not es_analista and d_e["DIAS_SEGUIDOS_TRABAJADOS"] >= 10:
+            if es_analista:
+                disponibles_hoy.append(cod_e)
+                continue
+
+            # 1B. Tope legal/operativo de máximo 10 días trabajados seguidos
+            forzar_libre_10_dias = d_e["DIAS_SEGUIDOS_TRABAJADOS"] >= 10
+
+            # 1C. Verificar si está obligado a tomar libre hoy para cumplir su cuota semanal
+            libres_tomados = d_e["LIBRES_POR_SEMANA"][semana_actual_idx]
+            libres_faltantes = max(0, cuota_libres_semana - libres_tomados)
+            obligado_por_fin_semana = libres_faltantes > dias_restantes_semana
+
+            if forzar_libre_10_dias or obligado_por_fin_semana:
                 programacion_matriz[cod_e][col_nombre] = "L"
                 d_e.update(
                     {
+                        "FRANJA_PREVIA_DESCANSO": d_e.get("ULTIMA_FRANJA"),
                         "VIENE_DE_DESCANSO": True,
                         "TURNO_FIJO_BLOQUE": None,
                         "SALIDA_PREVIA_DT": None,
                         "DIAS_SEGUIDOS_TRABAJADOS": 0,
                     }
                 )
+                d_e["LIBRES_POR_SEMANA"][semana_actual_idx] += 1
                 d_e["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = cargo_orig
                 d_e["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = "L"
             else:
                 disponibles_hoy.append(cod_e)
+
+        # 1D. Distribución escalonada de libres voluntarios si sobra personal hoy vs demanda
+        por_cargo_disp = {}
+        for cod_e in list(disponibles_hoy):
+            c_orig = programacion_matriz[cod_e]["CARGO_ORIGINAL"]
+            if "ANALISTA" not in c_orig:
+                por_cargo_disp.setdefault(c_orig, []).append(cod_e)
+
+        for c_orig, lista_cods in por_cargo_disp.items():
+            demanda_hoy_cargo = len(demandas_dia_actual.get(c_orig, []))
+            excedente_hoy = len(lista_cods) - demanda_hoy_cargo
+
+            if excedente_hoy > 0:
+                candidatos_descanso = [
+                    c
+                    for c in lista_cods
+                    if programacion_matriz[c]["LIBRES_POR_SEMANA"][
+                        semana_actual_idx
+                    ]
+                    < cuota_libres_semana
+                    and programacion_matriz[c]["DIAS_SEGUIDOS_TRABAJADOS"] >= 4
+                ]
+                # Priorizar a quienes llevan más días seguidos trabajando
+                candidatos_descanso.sort(
+                    key=lambda c: programacion_matriz[c][
+                        "DIAS_SEGUIDOS_TRABAJADOS"
+                    ],
+                    reverse=True,
+                )
+
+                for c_desc in candidatos_descanso[:excedente_hoy]:
+                    d_e = programacion_matriz[c_desc]
+                    programacion_matriz[c_desc][col_nombre] = "L"
+                    d_e.update(
+                        {
+                            "FRANJA_PREVIA_DESCANSO": d_e.get("ULTIMA_FRANJA"),
+                            "VIENE_DE_DESCANSO": True,
+                            "TURNO_FIJO_BLOQUE": None,
+                            "SALIDA_PREVIA_DT": None,
+                            "DIAS_SEGUIDOS_TRABAJADOS": 0,
+                        }
+                    )
+                    d_e["LIBRES_POR_SEMANA"][semana_actual_idx] += 1
+                    d_e["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = c_orig
+                    d_e["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = "L"
+                    disponibles_hoy.remove(c_desc)
 
         # ETAPA 2: ANALISTAS DE OPERACIONES (ROTA SECUENCIALMENTE DÍA A DÍA)
         analistas_hoy = [
@@ -1054,9 +1173,12 @@ def generar_malla_matriz(
                 )
                 d_an["SALIDA_PREVIA_DT"] = dt_salida
                 d_an["VIENE_DE_DESCANSO"] = False
+                d_an["DIAS_SEGUIDOS_TRABAJADOS"] += 1
             else:
                 d_an["SALIDA_PREVIA_DT"] = None
                 d_an["VIENE_DE_DESCANSO"] = True
+                d_an["DIAS_SEGUIDOS_TRABAJADOS"] = 0
+                d_an["LIBRES_POR_SEMANA"][semana_actual_idx] += 1
 
             if turno_sugerido in req_analistas:
                 req_analistas.remove(turno_sugerido)
@@ -1139,7 +1261,7 @@ def generar_malla_matriz(
                 else:
                     programacion_matriz[cod_tec][col_nombre] = "AO"
 
-        # ETAPA 4: COBERTURA INTER-CARGO
+        # ETAPA 4: COBERTURA INTER-CARGO (POLIVALENCIA)
         resto_empleados = [
             c
             for c in disponibles_hoy
@@ -1282,15 +1404,19 @@ def generar_malla_matriz(
                     ] = turno_a_asignar
                 else:
                     programacion_matriz[cod_emp][col_nombre] = "AO"
+                    d_emp["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = cargo_orig
+                    d_emp["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = "AO"
             else:
                 programacion_matriz[cod_emp][col_nombre] = "AO"
+                d_emp["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = cargo_orig
+                d_emp["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = "AO"
 
         # Marcar sobrantes finales
         for cod_e in disponibles_hoy:
             if programacion_matriz[cod_e].get(col_nombre) is None:
                 programacion_matriz[cod_e][col_nombre] = "AO"
 
-        # ETAPA 6: SOBRE TIEMPO (HORAS EXTRAS)
+        # ETAPA 6: SOBRE TIEMPO (HORAS EXTRAS - FLEXIBLE Y COBERTURA PARCIAL)
         for cargo_k, v_turnos_pendientes in demandas_dia_actual.items():
             if not v_turnos_pendientes:
                 continue
@@ -1299,10 +1425,12 @@ def generar_malla_matriz(
                 c
                 for c in disponibles_hoy
                 if programacion_matriz[c]["MAX_HORAS_EXTRA_DIA"] > 0
-                and programacion_matriz[c]["HISTORIAL_CARGOS_DIARIOS"].get(
-                    col_nombre
+                and col_nombre
+                not in programacion_matriz[c]["HISTORIAL_SOBRETIEMPO"]
+                and (
+                    programacion_matriz[c]["CARGO_ORIGINAL"] == cargo_k
+                    or programacion_matriz[c]["CARGO_SECUNDARIO"] == cargo_k
                 )
-                == cargo_k
                 and programacion_matriz[c]["HISTORIAL_TURNOS_LIMPIOS"].get(
                     col_nombre
                 )
@@ -1328,23 +1456,34 @@ def generar_malla_matriz(
                     if not dt_ent_act:
                         continue
 
-                    horas_st_max = d_st["MAX_HORAS_EXTRA_DIA"]
-                    mismo_dia = (
-                        dt_sal_act == dt_ent_f or dt_ent_act == dt_sal_f
-                    )
+                    horas_st_max = float(d_st["MAX_HORAS_EXTRA_DIA"])
 
-                    if mismo_dia:
+                    # Gap permitido entre turno ordinario y turno faltante: 0 a 1 hora
+                    gap_despues = (dt_ent_f - dt_sal_act).total_seconds() / 3600.0
+                    gap_antes = (dt_ent_act - dt_sal_f).total_seconds() / 3600.0
+
+                    es_contiguo_despues = 0.0 <= gap_despues <= 1.0
+                    es_contiguo_antes = 0.0 <= gap_antes <= 1.0
+
+                    if es_contiguo_despues or es_contiguo_antes:
                         duracion_turno_falta = (
                             dt_sal_f - dt_ent_f
                         ).total_seconds() / 3600.0
                         horas_st_asignadas = min(
-                            duracion_turno_falta, float(horas_st_max)
+                            duracion_turno_falta, horas_st_max
+                        )
+
+                        tipo_cobertura = (
+                            "Completa"
+                            if horas_st_asignadas >= duracion_turno_falta
+                            else "Parcial"
                         )
 
                         d_st["HISTORIAL_SOBRETIEMPO"][col_nombre] = {
                             "TURNO_BASE": turno_actual_st,
                             "TURNO_CUBIERTO_ST": turno_falta,
                             "HORAS_EXTRA": horas_st_asignadas,
+                            "COBERTURA": tipo_cobertura,
                         }
 
                         val_actual_vis = programacion_matriz[cod_st][col_nombre]
@@ -1352,10 +1491,17 @@ def generar_malla_matriz(
                             col_nombre
                         ] = f"{val_actual_vis} (+{int(horas_st_asignadas)}h ST)"
 
+                        # Actualizar salida previa si el ST fue después del turno ordinario
+                        if es_contiguo_despues:
+                            d_st["SALIDA_PREVIA_DT"] = dt_sal_act + timedelta(
+                                hours=horas_st_asignadas
+                            )
+
                         v_turnos_pendientes.remove(turno_falta)
                         d_st["HISTORIAL_TURNOS_LIMPIOS"][
                             col_nombre
                         ] = f"{turno_actual_st} / ST {turno_falta}"
+                        candidatos_st.remove(cod_st)
                         break
 
     columnas_excluir = {
@@ -1377,6 +1523,7 @@ def generar_malla_matriz(
         "HISTORIAL_CARGOS_DIARIOS",
         "HISTORIAL_TURNOS_LIMPIOS",
         "HISTORIAL_SOBRETIEMPO",
+        "LIBRES_POR_SEMANA",
     }
     df_resultado = pd.DataFrame(
         [
@@ -1404,6 +1551,7 @@ if df_empleados is not None:
                 fecha_inicio_date,
                 matriz_demanda,
                 libres_por_semana_base,
+                fechas_festivas_sel,
             )
             st.session_state.df_balance = df_balance
 
@@ -1480,17 +1628,64 @@ if "df_resultado" in st.session_state:
     st.subheader("3. Malla Horaria Generada")
     st.dataframe(df_resultado, use_container_width=True)
 
-    # REPORTE COBERTURA
-    st.markdown("---")
-    st.subheader("🔄 Reporte de Cobertura de Turnos de Diferente Cargo")
-
-    reporte_coberturas = []
+    # AUDITORÍA DE HORAS Y DÍAS LIBRES POR COLABORADOR
     cols_fechas_malla = [
         c
         for c in df_resultado.columns
         if c not in ["CODIGO", "NOMBRE", "CARGO"]
     ]
 
+    resumen_auditoria = []
+    for cod_emp, d_emp in dict_matriz.items():
+        dias_trab = 0
+        dias_libres = 0
+        dias_ao = 0
+        horas_ord = 0.0
+        horas_st = sum(
+            v["HORAS_EXTRA"]
+            for v in d_emp.get("HISTORIAL_SOBRETIEMPO", {}).values()
+        )
+
+        for col_f in cols_fechas_malla:
+            val_limpio = d_emp.get("HISTORIAL_TURNOS_LIMPIOS", {}).get(
+                col_f, ""
+            )
+            if val_limpio == "L":
+                dias_libres += 1
+            elif val_limpio == "AO":
+                dias_ao += 1
+            elif val_limpio not in NO_WORKING_TERMS and val_limpio != "":
+                dias_trab += 1
+                turno_base = val_limpio.split(" / ST ")[0]
+                dt_i, dt_f = calcular_datetimes_turno(datetime.now(), turno_base)
+                if dt_i and dt_f:
+                    horas_ord += (dt_f - dt_i).total_seconds() / 3600.0
+
+        resumen_auditoria.append(
+            {
+                "CÓDIGO": cod_emp,
+                "NOMBRE": d_emp["NOMBRE"],
+                "CARGO": d_emp["CARGO_ORIGINAL"],
+                "DÍAS LABORADOS": dias_trab,
+                "DÍAS LIBRES (L)": dias_libres,
+                "DÍAS DISPONIBLE (AO)": dias_ao,
+                "HORAS ORDINARIAS": round(horas_ord, 1),
+                "HORAS EXTRA (ST)": round(horas_st, 1),
+            }
+        )
+    df_auditoria = pd.DataFrame(resumen_auditoria)
+
+    with st.expander(
+        "📋 Auditoría Individual: Días Trabajados, Libres (L) y Horas",
+        expanded=False,
+    ):
+        st.dataframe(df_auditoria, use_container_width=True)
+
+    # REPORTE COBERTURA
+    st.markdown("---")
+    st.subheader("🔄 Reporte de Cobertura de Turnos de Diferente Cargo")
+
+    reporte_coberturas = []
     for cod_emp, d_emp in dict_matriz.items():
         cargo_orig = d_emp["CARGO_ORIGINAL"]
         cargo_sec = d_emp["CARGO_SECUNDARIO"]
@@ -1545,6 +1740,7 @@ if "df_resultado" in st.session_state:
                     "TAREA / TURNO CUBIERTO EN ST": datos_st[
                         "TURNO_CUBIERTO_ST"
                     ],
+                    "TIPO COBERTURA": datos_st.get("COBERTURA", "Completa"),
                     "HORAS EXTRA": f"{int(datos_st['HORAS_EXTRA'])} hrs",
                 }
             )
@@ -1668,6 +1864,9 @@ if "df_resultado" in st.session_state:
     with pd.ExcelWriter(buffer_excel) as writer:
         df_resultado.to_excel(
             writer, sheet_name="Malla Horaria", index=False
+        )
+        df_auditoria.to_excel(
+            writer, sheet_name="Auditoría Horas y Libres", index=False
         )
         if not df_coberturas.empty:
             df_coberturas.to_excel(
