@@ -23,6 +23,7 @@ CATALOGO_TURNOS = [
     "19:00-35:00 AT",
     "20:00-28:00",
     "22:00-30:00",
+    "23:00-31:00",
 ]
 
 TURNOS_DEFAULT_POR_CARGO = {
@@ -379,6 +380,23 @@ def calcular_descanso_suficiente(
         entrada_actual_dt - salida_previa_dt
     ).total_seconds() / 3600.0
     return diferencia_horas >= min_horas
+
+
+def prioridad_por_restriccion_horaria(cod: str, matriz: dict):
+    """
+    Ordena primero a quienes tienen la hora de salida previa más tardía
+    (mayor restricción de 12h/24h para entrar temprano), evitando que queden en AO.
+    """
+    d = matriz[cod]
+    sal = d.get("SALIDA_PREVIA_DT")
+    if sal is not None:
+        return (0, -sal.timestamp())
+    if d.get("VIENE_DE_DESCANSO"):
+        # Quienes descansaron tras turno nocturno también tienen preferencia vespertina/nocturna
+        franja_ant = d.get("FRANJA_PREVIA_DESCANSO")
+        peso_franja = {"NOCHE": 0, "TARDE": 1, "MAÑANA": 2}.get(franja_ant, 3)
+        return (1, peso_franja)
+    return (2, 0)
 
 
 def parsear_fecha_incidencia(val_fecha, anio_referencia: int):
@@ -819,7 +837,7 @@ def calcular_balance_capacidad(
                     "FECHA_ORDEN": f_act,
                     "TAREAS REQUERIDAS": cant_req,
                     "PERSONAL DISPONIBLE": efectivo_estimado,
-                    "BALANCE (DÉFICIT / SUPERÁVIT)": diferencia,
+                    "BALANCE (+ SOBRA / - FALTA)": diferencia,
                 }
             )
 
@@ -897,7 +915,6 @@ def generar_malla_matriz(
 
                 dias_trabajados_previos[c_cod] = conteo_cont
 
-                # Reconstruir hora exacta de salida del último día de la malla anterior
                 salida_dt_prev = None
                 ultimo_turno_previo_desc = None
                 franja_previa_desc = None
@@ -1019,7 +1036,6 @@ def generar_malla_matriz(
         semana_actual_idx = idx_dia // 7
         dias_restantes_semana = 6 - (idx_dia % 7)
 
-        # Calcular cuota de libres para esta semana (base + festivos en la semana)
         f_sem_ini = fecha_base_date + timedelta(days=semana_actual_idx * 7)
         f_sem_fin = f_sem_ini + timedelta(days=6)
         festivos_en_semana = sum(
@@ -1038,7 +1054,6 @@ def generar_malla_matriz(
             cargo_orig = d_e["CARGO_ORIGINAL"]
             es_analista = "ANALISTA" in cargo_orig
 
-            # 1A. Incidencias (Vacaciones, Incapacidad, Licencias)
             if (
                 d_e["INCIDENCIA_TIPO"]
                 and d_e["INCIDENCIA_INI"]
@@ -1070,10 +1085,8 @@ def generar_malla_matriz(
                 disponibles_hoy.append(cod_e)
                 continue
 
-            # 1B. Tope legal/operativo de máximo 10 días trabajados seguidos
             forzar_libre_10_dias = d_e["DIAS_SEGUIDOS_TRABAJADOS"] >= 10
 
-            # 1C. Verificar si está obligado a tomar libre hoy para cumplir su cuota semanal
             libres_tomados = d_e["LIBRES_POR_SEMANA"][semana_actual_idx]
             libres_faltantes = max(0, cuota_libres_semana - libres_tomados)
             obligado_por_fin_semana = libres_faltantes > dias_restantes_semana
@@ -1116,7 +1129,6 @@ def generar_malla_matriz(
                     < cuota_libres_semana
                     and programacion_matriz[c]["DIAS_SEGUIDOS_TRABAJADOS"] >= 4
                 ]
-                # Priorizar a quienes llevan más días seguidos trabajando
                 candidatos_descanso.sort(
                     key=lambda c: programacion_matriz[c][
                         "DIAS_SEGUIDOS_TRABAJADOS"
@@ -1183,15 +1195,30 @@ def generar_malla_matriz(
             if turno_sugerido in req_analistas:
                 req_analistas.remove(turno_sugerido)
 
-        # ETAPA 3: TÉCNICOS PLANTA
-        tecnicos_planta_hoy = [
-            c for c in disponibles_hoy if c in tecnicos_planta_cods
-        ]
+        # ETAPA 3: TÉCNICOS PLANTA (PRIORIZA DIURNOS PRIMERO PARA DEJAR NOCHE A POLIVALENTES SI APLICA)
+        tecnicos_planta_hoy = sorted(
+            [c for c in disponibles_hoy if c in tecnicos_planta_cods],
+            key=lambda c: prioridad_por_restriccion_horaria(
+                c, programacion_matriz
+            ),
+        )
         turnos_tec_disp = demandas_dia_actual.get(
             "TÉCNICO DE OPERACIONES", []
         )
 
-        for t_target in ["03:00-11:00", "11:00-19:00", "19:00-27:00"]:
+        # Si hay polivalentes apuntando a Técnico, los técnicos de planta cubren primero mañana/tarde
+        hay_polivalentes_tec = any(
+            programacion_matriz[c]["CARGO_SECUNDARIO"]
+            == "TÉCNICO DE OPERACIONES"
+            for c in disponibles_hoy
+        )
+        orden_turnos_tec = (
+            ["06:00-15:00", "03:00-11:00", "11:00-19:00", "19:00-27:00"]
+            if hay_polivalentes_tec
+            else ["03:00-11:00", "11:00-19:00", "19:00-27:00", "06:00-15:00"]
+        )
+
+        for t_target in orden_turnos_tec:
             if t_target in turnos_tec_disp:
                 for cod_tec in tecnicos_planta_hoy:
                     if (
@@ -1260,15 +1287,24 @@ def generar_malla_matriz(
                     d_tec["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = cand_t
                 else:
                     programacion_matriz[cod_tec][col_nombre] = "AO"
+                    d_tec["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = (
+                        "TÉCNICO DE OPERACIONES"
+                    )
+                    d_tec["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = "AO"
 
-        # ETAPA 4: COBERTURA INTER-CARGO (POLIVALENCIA)
-        resto_empleados = [
-            c
-            for c in disponibles_hoy
-            if "ANALISTA"
-            not in programacion_matriz[c]["CARGO_ORIGINAL"]
-            and c not in tecnicos_planta_hoy
-        ]
+        # ETAPA 4: COBERTURA INTER-CARGO (ORDENADA POR RESTRICCIÓN HORARIA)
+        resto_empleados = sorted(
+            [
+                c
+                for c in disponibles_hoy
+                if "ANALISTA"
+                not in programacion_matriz[c]["CARGO_ORIGINAL"]
+                and c not in tecnicos_planta_hoy
+            ],
+            key=lambda c: prioridad_por_restriccion_horaria(
+                c, programacion_matriz
+            ),
+        )
 
         empleados_polivalentes = [
             c
@@ -1285,7 +1321,17 @@ def generar_malla_matriz(
             turnos_faltantes_sec = demandas_dia_actual.get(cargo_sec, [])
 
             if turnos_faltantes_sec:
-                for cand_t in list(turnos_faltantes_sec):
+                # Ordenar turnos faltantes dando preferencia a mantener continuidad de franja o iniciar temprano si hay margen
+                turnos_ordenados_sec = sorted(
+                    list(turnos_faltantes_sec),
+                    key=lambda t: (
+                        0
+                        if clasificar_franja(t) == d_poli.get("ULTIMA_FRANJA")
+                        else 1,
+                        extraer_horas(t)[0] if extraer_horas(t) else 99,
+                    ),
+                )
+                for cand_t in turnos_ordenados_sec:
                     dt_ent, dt_salida = calcular_datetimes_turno(
                         fecha_col, cand_t
                     )
@@ -1325,7 +1371,7 @@ def generar_malla_matriz(
                         turnos_faltantes_sec.remove(cand_t)
                         break
 
-        # ETAPA 5: COBERTURA REGULAR PUESTO ORIGINAL
+        # ETAPA 5: COBERTURA REGULAR PUESTO ORIGINAL (PRIORIZANDO A QUIENES SALIERON MÁS TARDE)
         for cod_emp in resto_empleados:
             if programacion_matriz[cod_emp].get(col_nombre) is not None:
                 continue
@@ -1350,6 +1396,14 @@ def generar_malla_matriz(
                     for t in turnos_disp_cargo
                     if clasificar_franja(t) in franjas_permitidas
                 ]
+
+                # Ordenar candidatos: primero misma franja que el día anterior, luego por hora de inicio
+                cand_list.sort(
+                    key=lambda t: (
+                        0 if clasificar_franja(t) == franja_ref else 1,
+                        extraer_horas(t)[0] if extraer_horas(t) else 99,
+                    )
+                )
 
                 turno_a_asignar = None
                 min_desc = 24.0 if d_emp.get("VIENE_DE_DESCANSO") else 12.0
@@ -1458,7 +1512,6 @@ def generar_malla_matriz(
 
                     horas_st_max = float(d_st["MAX_HORAS_EXTRA_DIA"])
 
-                    # Gap permitido entre turno ordinario y turno faltante: 0 a 1 hora
                     gap_despues = (dt_ent_f - dt_sal_act).total_seconds() / 3600.0
                     gap_antes = (dt_ent_act - dt_sal_f).total_seconds() / 3600.0
 
@@ -1491,7 +1544,6 @@ def generar_malla_matriz(
                             col_nombre
                         ] = f"{val_actual_vis} (+{int(horas_st_asignadas)}h ST)"
 
-                        # Actualizar salida previa si el ST fue después del turno ordinario
                         if es_contiguo_despues:
                             d_st["SALIDA_PREVIA_DT"] = dt_sal_act + timedelta(
                                 hours=horas_st_asignadas
@@ -1564,7 +1616,7 @@ if "df_balance" in st.session_state:
     pivot_balance = df_bal.pivot_table(
         index="CARGO",
         columns="DÍA",
-        values="BALANCE (DÉFICIT / SUPERÁVIT)",
+        values="BALANCE (+ SOBRA / - FALTA)",
         aggfunc="first",
     )
 
