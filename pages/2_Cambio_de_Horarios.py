@@ -1689,3 +1689,55 @@ with tab_historial:
             else:
                 st.caption(
                     "Ingresa un código arriba para ver todos sus cambios, fechas, horarios y responsables."
+                )
+
+    st.markdown("---")
+    st.markdown("##### 📋 Tabla General de Registros y Descarga Excel")
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        filtro_op = st.text_input("Filtrar tabla general por Código:", "")
+    with col_f2:
+        filtro_resp = st.multiselect(
+            "Filtrar por Responsable:",
+            options=sorted(
+                df_h_show["RESPONSABLE DEL CAMBIO"].dropna().astype(str).unique().tolist()
+            )
+            if not df_h_show.empty and "RESPONSABLE DEL CAMBIO" in df_h_show.columns
+            else [],
+        )
+
+    df_filtrado = df_h_show.drop(
+        columns=["FECHA_ANALISIS", "TIPO_MOVIMIENTO"], errors="ignore"
+    ).copy()
+    if filtro_op.strip():
+        df_filtrado = df_filtrado[
+            df_filtrado["COGIDO"].astype(str).str.contains(filtro_op.strip(), case=False)
+        ]
+    if filtro_resp:
+        df_filtrado = df_filtrado[
+            df_filtrado["RESPONSABLE DEL CAMBIO"].astype(str).isin(filtro_resp)
+        ]
+
+    st.caption(f"Mostrando **{len(df_filtrado)}** de **{len(df_h_show)}** registros acumulados.")
+    st.dataframe(df_filtrado, use_container_width=True, hide_index=True)
+
+    df_export = st.session_state.historial_cambios.drop(
+        columns=["FECHA_ANALISIS", "TIPO_MOVIMIENTO"], errors="ignore"
+    )
+    buffer_xlsx = io.BytesIO()
+    with pd.ExcelWriter(buffer_xlsx, engine="openpyxl") as writer:
+        df_export.to_excel(
+            writer, sheet_name="HISTORIAL DE CAMBIOS (2)", index=False
+        )
+        pd.DataFrame({"NOMBRE": st.session_state.lista_responsables}).to_excel(
+            writer, sheet_name="Lista", index=False
+        )
+    buffer_xlsx.seek(0)
+
+    st.download_button(
+        label="📥 Descargar Historial Completo Actualizado (Excel .xlsx)",
+        data=buffer_xlsx,
+        file_name=f"HISTORIAL_CAMBIOS_HORARIO_{date.today().strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="primary",
+    )
