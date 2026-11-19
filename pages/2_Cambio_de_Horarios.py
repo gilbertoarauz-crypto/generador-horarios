@@ -4,7 +4,7 @@ import pandas as pd
 import streamlit as st
 from fpdf import FPDF
 
-# Estilo CSS para impresión directa limpia desde navegador (Ctrl + P)
+# Estilo CSS para impresión directa limpia y apariencia compacta tipo módulo BRT
 st.markdown(
     """
     <style>
@@ -18,6 +18,27 @@ st.markdown(
             max-width: 100% !important;
         }
     }
+    .header-brt {
+        background-color: #0070c0;
+        color: #ffffff;
+        padding: 7px 12px;
+        border-radius: 4px;
+        font-weight: bold;
+        font-size: 14px;
+        text-align: center;
+        letter-spacing: 0.5px;
+        margin-bottom: 8px;
+    }
+    .sub-header-brt {
+        background-color: #1e293b;
+        color: #f8fafc;
+        padding: 5px 10px;
+        border-left: 4px solid #0070c0;
+        font-weight: bold;
+        font-size: 13px;
+        margin-top: 8px;
+        margin-bottom: 6px;
+    }
     .boleta-preview {
         border: 2px solid #0f2952;
         padding: 14px;
@@ -30,18 +51,25 @@ st.markdown(
         background-color: #fef3c7;
         border-left: 5px solid #d97706;
         color: #78350f;
-        padding: 8px 12px;
+        padding: 6px 10px;
         border-radius: 4px;
-        font-size: 13.5px;
+        font-size: 13px;
         margin-top: 4px;
-        margin-bottom: 8px;
+        margin-bottom: 6px;
+    }
+    .rango-banner {
+        background-color: #0f2952;
+        border: 1px solid #38bdf8;
+        color: #e0f2fe;
+        padding: 8px 14px;
+        border-radius: 6px;
+        font-size: 13.5px;
+        margin-bottom: 12px;
     }
     </style>
     """,
     unsafe_allow_html=True,
 )
-
-st.title("🚌 Módulo de Cambio de Horarios & Emisión F-ZEN-GO-07")
 
 # ==========================================
 # CATÁLOGOS OFICIALES
@@ -251,9 +279,11 @@ def normalizar_tabla_programacion(df_raw: pd.DataFrame) -> pd.DataFrame:
 
 
 def indexar_programacion_en_sesion(df_norm: pd.DataFrame, nombre_fuente: str):
-    """Guarda en st.session_state los diccionarios indexados para consulta instantánea."""
+    """Guarda en st.session_state los diccionarios indexados y las fechas exactas disponibles."""
     operadores_dict = {}
     turnos_dict = {}
+    fechas_unicas = []
+
     if not df_norm.empty:
         df_ops = df_norm.drop_duplicates(subset=["CODIGO_STR"], keep="last")
         for _, r in df_ops.iterrows():
@@ -268,9 +298,13 @@ def indexar_programacion_en_sesion(df_norm: pd.DataFrame, nombre_fuente: str):
                 "p_inicio": r["origen"] if r["origen"] else "-",
                 "p_fin": r["Patio Final"] if r["Patio Final"] else "-",
             }
+        fechas_unicas = sorted(df_norm["FECHA_DATE"].dropna().unique().tolist())
 
     st.session_state.operadores_dict = operadores_dict
     st.session_state.turnos_dict = turnos_dict
+    st.session_state.fechas_disponibles = fechas_unicas
+    st.session_state.fecha_min = fechas_unicas[0] if fechas_unicas else None
+    st.session_state.fecha_max = fechas_unicas[-1] if fechas_unicas else None
     st.session_state.prog_total_filas = len(df_norm)
     st.session_state.prog_nombre_archivo = nombre_fuente
     st.session_state.prog_cargada = len(df_norm) > 0
@@ -278,24 +312,19 @@ def indexar_programacion_en_sesion(df_norm: pd.DataFrame, nombre_fuente: str):
 
 
 def parsear_texto_pegado_excel(texto_tsv: str) -> pd.DataFrame:
-    """Convierte texto copiado directo desde Excel (separado por tabulaciones) en DataFrame normalizado."""
     lineas = [l for l in texto_tsv.splitlines() if l.strip()]
     if not lineas:
         return pd.DataFrame()
 
-    # Leer como TSV
     df_tsv = pd.read_csv(io.StringIO("\n".join(lineas)), sep="\t", header=None)
-    # Revisar si la primera fila contiene encabezados reales
     primera_fila_upper = [str(x).strip().upper() for x in df_tsv.iloc[0].tolist()]
     if any(k in primera_fila_upper for k in ["CODIGO", "CÓDIGO", "FECHA"]):
         df_tsv.columns = [str(x).strip() for x in df_tsv.iloc[0].tolist()]
         df_tsv = df_tsv.iloc[1:].reset_index(drop=True)
         return normalizar_tabla_programacion(df_tsv)
 
-    # Si pegaron sin encabezados, inferir según cantidad de columnas (formato ASIGNACIÓN o ROW-DATA)
     ncols = df_tsv.shape[1]
     if ncols >= 11:
-        # Formato estándar A..K: Ref, Fecha, Tarea, CODIGO, NOMBRE, W.T., H.Inicial, origen, H. Final, Patio Final, PADMIN
         cols_std = [
             "Ref",
             "Fecha",
@@ -311,7 +340,6 @@ def parsear_texto_pegado_excel(texto_tsv: str) -> pd.DataFrame:
         ] + [f"Extra_{i}" for i in range(ncols - 11)]
         df_tsv.columns = cols_std
     elif ncols >= 9:
-        # Sin columna Ref (B..J/K): Fecha, Tarea, CODIGO, NOMBRE, W.T., H.Inicial, origen, H. Final, Patio Final, [PADMIN]
         cols_std = [
             "Fecha",
             "Tarea",
@@ -722,6 +750,9 @@ if "prog_cargada" not in st.session_state:
     st.session_state.prog_nombre_archivo = ""
     st.session_state.operadores_dict = {}
     st.session_state.turnos_dict = {}
+    st.session_state.fechas_disponibles = []
+    st.session_state.fecha_min = None
+    st.session_state.fecha_max = None
     st.session_state.prog_total_filas = 0
     st.session_state.lista_responsables = list(RESPONSABLES_DEFAULT)
     st.session_state.historial_cambios = pd.DataFrame(
@@ -740,13 +771,17 @@ if "prog_cargada" not in st.session_state:
 
 
 # ==========================================
-# SIDEBAR: CARGA PERSISTENTE (ARCHIVO O PEGAR EXCEL)
+# SIDEBAR: CARGA PERSISTENTE + RANGO DE FECHAS
 # ==========================================
 st.sidebar.header("📂 1. Programación Activa")
 
 if st.session_state.prog_cargada and not st.session_state.mostrar_cargador:
+    f_ini_txt = st.session_state.fecha_min.strftime("%d/%m/%Y")
+    f_fin_txt = st.session_state.fecha_max.strftime("%d/%m/%Y")
     st.sidebar.success(
         f"📌 **Fuente activa:**\n{st.session_state.prog_nombre_archivo}\n\n"
+        f"📅 **Fecha Inicial:** {f_ini_txt}\n"
+        f"📅 **Fecha Final:** {f_fin_txt}\n\n"
         f"• **{st.session_state.prog_total_filas:,}** turnos indexados\n"
         f"• **{len(st.session_state.historial_cambios)}** cambios en historial"
     )
@@ -831,25 +866,49 @@ def buscar_turno_rapido(codigo: str, fecha_obj: date):
 
 
 # ==========================================
+# ENCABEZADO TIPO MÓDULO BRT + RANGO ACTIVO
+# ==========================================
+st.markdown(
+    '<div class="header-brt">🚌 MÓDULO CAMBIO DE HORARIO — EMISIÓN F-ZEN-GO-07</div>',
+    unsafe_allow_html=True,
+)
+
+if st.session_state.prog_cargada:
+    f_ini_b = st.session_state.fecha_min.strftime("%d/%m/%Y")
+    f_fin_b = st.session_state.fecha_max.strftime("%d/%m/%Y")
+    n_dias_prog = len(st.session_state.fechas_disponibles)
+    st.markdown(
+        f'<div class="rango-banner">'
+        f'📅 <b>Programación Cargada:</b> Desde el <b>{f_ini_b}</b> hasta el <b>{f_fin_b}</b> '
+        f'({n_dias_prog} días operativos disponibles · {st.session_state.prog_total_filas:,} turnos) &nbsp;|&nbsp; '
+        f'<i>Solo se permiten seleccionar fechas dentro de este rango.</i>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+else:
+    st.warning(
+        "⚠️ **Aún no has cargado ninguna programación.** Sube el archivo Excel o pega los horarios en la barra lateral izquierda (o en la pestaña 4) para habilitar el calendario de fechas válidas."
+    )
+
+# ==========================================
 # PESTAÑAS PRINCIPALES
 # ==========================================
 tab_registro, tab_boleta, tab_historial, tab_pegar_tabla = st.tabs(
     [
-        "📝 1. Registrar Cambio de Horario",
-        "🖨️ 2. Boleta F-ZEN-GO-07 (PDF / Imprimir)",
+        "📝 1. Módulo Cambio de Horario (BRT)",
+        "🖨️ 2. Boleta Oficial F-ZEN-GO-07 (PDF)",
         "📊 3. Historial Acumulado y Descarga Excel",
         "📋 4. Tabla Tipo Excel (Pegar / Editar)",
     ]
 )
 
 # ------------------------------------------
-# TAB 1: FORMULARIO + CONTADOR HISTÓRICO MENSUAL
+# TAB 1: INTERFAZ COMPACTA TIPO HOJA BRT
 # ------------------------------------------
 with tab_registro:
-    st.subheader("Captura de Solicitud de Cambio")
-
-    col_m1, col_m2, col_m3, col_m4 = st.columns([1.3, 1, 1.2, 1.5])
-    with col_m1:
+    # Bloque superior de control (igual que la cabecera de BRT)
+    c_top1, c_top2, c_top3, c_top4 = st.columns([1.3, 1, 1.3, 1.5])
+    with c_top1:
         modalidad = st.selectbox(
             "Tipo de Movimiento",
             [
@@ -858,18 +917,18 @@ with tab_registro:
                 "Cambio de día libre",
             ],
         )
-    with col_m2:
+    with c_top2:
         fecha_solicitud = st.date_input("Fecha de Solicitud", value=date.today())
-    with col_m3:
+    with c_top3:
         responsable = st.selectbox(
             "Responsable del Cambio", st.session_state.lista_responsables
         )
-    with col_m4:
-        motivo_sel = st.selectbox("Motivo / Autorización", MOTIVOS_ESTANDAR)
+    with c_top4:
+        motivo_sel = st.selectbox("Razón / Autorización", MOTIVOS_ESTANDAR)
 
     motivo_extra = st.text_input(
-        "Detalle adicional en Observaciones (Opcional)",
-        placeholder="Ej. Cita cardiología / Cubre servicio específico...",
+        "Observación adicional (Opcional)",
+        placeholder="Ej. Cita médica / Autoriza JOP / Cubre servicio...",
     )
     motivo_final = (
         f"{motivo_sel} - {motivo_extra.strip().upper()}"
@@ -879,250 +938,339 @@ with tab_registro:
 
     es_intercambio = modalidad == "Cambio con otro operador"
 
-    st.markdown("---")
-    c_op1, c_op2 = st.columns(2)
-    with c_op1:
-        cod_op1 = limpiar_codigo(st.text_input("Código Operador 1", value="82601"))
-        nom_op1, patio_op1, ok1 = buscar_operador_rapido(cod_op1)
-        if ok1:
-            st.success(f"👤 **Operador 1:** {nom_op1} | **Patio:** {patio_op1}")
-        else:
-            st.warning(f"👤 **Operador 1:** {nom_op1}")
+    if not st.session_state.prog_cargada:
+        st.info("👈 Carga primero la programación en el panel izquierdo para comenzar.")
+    else:
+        # Opciones estrictas de fechas (solo las que existen en la programación cargada)
+        fechas_disp = st.session_state.fechas_disponibles
+        mapa_fechas_label = {
+            f"{f.strftime('%d/%m/%Y')} ({fecha_corta_es(f)})": f for f in fechas_disp
+        }
+        opciones_fecha_sel = ["— Sin cambio —"] + list(mapa_fechas_label.keys())
 
-        tot1, det1 = obtener_resumen_mensual_operador(
-            st.session_state.historial_cambios, cod_op1
-        )
-        if tot1 > 0:
-            resumen_txt1 = ", ".join(det1) if det1 else "sin fecha detallada"
+        filas_prog_op1, filas_cambio_op1 = [], []
+        filas_prog_op2, filas_cambio_op2 = [], []
+        cod_op1, nom_op1, patio_op1 = "", "", "LOS PUEBLOS"
+        cod_op2, nom_op2 = "", ""
+
+        # ==========================================================
+        # MODO A: CAMBIO DE HORARIO O DÍA LIBRE (TABLA COMPACTA 7 FILAS)
+        # ==========================================================
+        if not es_intercambio:
             st.markdown(
-                f'<div class="alerta-historial">📊 <b>Historial Operador {cod_op1}:</b> '
-                f'<b>{tot1}</b> cambio(s) registrado(s) → <b>{resumen_txt1}</b></div>',
+                '<div class="sub-header-brt">1. DATOS DEL OPERADOR Y DETALLE DE CAMBIO (FILAS 1 A 7)</div>',
                 unsafe_allow_html=True,
             )
-        elif cod_op1:
-            st.caption(f"📊 Historial Operador {cod_op1}: 0 cambios previos registrados.")
+            col_op_a, col_op_b = st.columns([1, 2.5])
+            with col_op_a:
+                cod_op1 = limpiar_codigo(st.text_input("Código Operador", value="82601"))
+            with col_op_b:
+                nom_op1, patio_op1, ok1 = buscar_operador_rapido(cod_op1)
+                if ok1:
+                    st.success(f"👤 **{nom_op1}** | Patio: **{patio_op1}**")
+                else:
+                    st.warning(f"👤 **{nom_op1}**")
 
-    cod_op2, nom_op2 = "", ""
-    if es_intercambio:
-        with c_op2:
-            cod_op2 = limpiar_codigo(st.text_input("Código Operador 2", value="82602"))
-            nom_op2, _, ok2 = buscar_operador_rapido(cod_op2)
-            if ok2:
-                st.success(f"👤 **Operador 2:** {nom_op2}")
-            else:
-                st.warning(f"👤 **Operador 2:** {nom_op2}")
-
-            tot2, det2 = obtener_resumen_mensual_operador(
-                st.session_state.historial_cambios, cod_op2
-            )
-            if tot2 > 0:
-                resumen_txt2 = ", ".join(det2) if det2 else "sin fecha detallada"
-                st.markdown(
-                    f'<div class="alerta-historial">📊 <b>Historial Operador {cod_op2}:</b> '
-                    f'<b>{tot2}</b> cambio(s) registrado(s) → <b>{resumen_txt2}</b></div>',
-                    unsafe_allow_html=True,
+                tot1, det1 = obtener_resumen_mensual_operador(
+                    st.session_state.historial_cambios, cod_op1
                 )
-            elif cod_op2:
-                st.caption(f"📊 Historial Operador {cod_op2}: 0 cambios previos registrados.")
-
-    st.markdown("---")
-    cant_dias = st.number_input(
-        "Cantidad de días a modificar (1 a 7)", min_value=1, max_value=7, value=1
-    )
-
-    filas_prog_op1, filas_cambio_op1 = [], []
-    filas_prog_op2, filas_cambio_op2 = [], []
-
-    for i in range(int(cant_dias)):
-        st.markdown(f"**Día #{i + 1}**")
-        fecha_d = st.date_input(
-            f"Fecha del cambio #{i + 1}",
-            value=fecha_solicitud + timedelta(days=i + 1),
-            key=f"f_cambio_{i}",
-        )
-
-        prog1 = buscar_turno_rapido(cod_op1, fecha_d)
-        filas_prog_op1.append(
-            {
-                "fecha": fecha_d.strftime("%d/%m/%Y"),
-                "fecha_corta": fecha_corta_es(fecha_d),
-                "codigo": cod_op1,
-                **prog1,
-            }
-        )
-
-        if es_intercambio:
-            prog2 = buscar_turno_rapido(cod_op2, fecha_d)
-            filas_prog_op2.append(
-                {
-                    "fecha": fecha_d.strftime("%d/%m/%Y"),
-                    "fecha_corta": fecha_corta_es(fecha_d),
-                    "codigo": cod_op2,
-                    **prog2,
-                }
-            )
-
-            col_i1, col_i2 = st.columns(2)
-            with col_i1:
-                st.caption(
-                    f"Programado Op 1 ({cod_op1}): `{prog1['horario']}` | Sercon: `{prog1['sercon']}` | {prog1['p_inicio']} → {prog1['p_fin']}"
-                )
-            with col_i2:
-                st.caption(
-                    f"Programado Op 2 ({cod_op2}): `{prog2['horario']}` | Sercon: `{prog2['sercon']}` | {prog2['p_inicio']} → {prog2['p_fin']}"
-                )
-
-            filas_cambio_op1.append(
-                {
-                    "fecha": fecha_d.strftime("%d/%m/%Y"),
-                    "fecha_corta": fecha_corta_es(fecha_d),
-                    "codigo": cod_op1,
-                    "horario": prog2["horario"],
-                    "sercon": prog2["sercon"],
-                    "p_inicio": prog2["p_inicio"],
-                    "p_fin": prog2["p_fin"],
-                }
-            )
-            filas_cambio_op2.append(
-                {
-                    "fecha": fecha_d.strftime("%d/%m/%Y"),
-                    "fecha_corta": fecha_corta_es(fecha_d),
-                    "codigo": cod_op2,
-                    "horario": prog1["horario"],
-                    "sercon": prog1["sercon"],
-                    "p_inicio": prog1["p_inicio"],
-                    "p_fin": prog1["p_fin"],
-                }
-            )
-        else:
-            st.caption(
-                f"Programado actual ({cod_op1}): `{prog1['horario']}` | Sercon: `{prog1['sercon']}` | {prog1['p_inicio']} → {prog1['p_fin']}"
-            )
-            c1, c2, c3, c4 = st.columns([1.2, 1.2, 1.3, 1.3])
-            with c1:
-                nuevo_hor = st.selectbox(
-                    f"Nuevo Horario #{i + 1}",
-                    JORNADAS_CATALOGO,
-                    index=2,
-                    key=f"hor_{i}",
-                )
-            with c2:
-                nueva_tarea = st.selectbox(
-                    f"Nueva Tarea / Sercon #{i + 1}",
-                    TAREAS_CATALOGO,
-                    key=f"tar_{i}",
-                )
-            with c3:
-                nuevo_pi = st.selectbox(
-                    f"Patio Inicio #{i + 1}",
-                    PATIOS_CATALOGO,
-                    key=f"pi_{i}",
-                )
-            with c4:
-                nuevo_pf = st.selectbox(
-                    f"Patio Final #{i + 1}",
-                    PATIOS_CATALOGO,
-                    key=f"pf_{i}",
-                )
-
-            filas_cambio_op1.append(
-                {
-                    "fecha": fecha_d.strftime("%d/%m/%Y"),
-                    "fecha_corta": fecha_corta_es(fecha_d),
-                    "codigo": cod_op1,
-                    "horario": nuevo_hor,
-                    "sercon": nueva_tarea,
-                    "p_inicio": nuevo_pi,
-                    "p_fin": nuevo_pf,
-                }
-            )
-
-    st.markdown("---")
-    if st.button(
-        "✅ Guardar Cambio en Historial y Generar Boleta F-ZEN-GO-07",
-        type="primary",
-        use_container_width=True,
-    ):
-        if not cod_op1 or (es_intercambio and not cod_op2):
-            st.error("⚠️ Debes ingresar el código del operador antes de guardar.")
-        else:
-            codigo_registro = (
-                f"{cod_op1}_{cod_op2}" if es_intercambio else str(cod_op1)
-            )
-            fecha_cambio_principal = filas_cambio_op1[0]["fecha"]
-            hora_cambio_resumen = (
-                f"{filas_prog_op1[0]['horario']}/{filas_cambio_op1[0]['horario']}"
-            )
-
-            df_h_actual = st.session_state.historial_cambios
-            ya_existe = False
-            if not df_h_actual.empty:
-                fecha_cmp_str = str(
-                    datetime.strptime(fecha_cambio_principal, "%d/%m/%Y").date()
-                )
-                dups = df_h_actual[
-                    (df_h_actual["COGIDO"].astype(str).str.strip() == codigo_registro)
-                    & (
-                        df_h_actual["FECHA DE CAMBIO"]
-                        .astype(str)
-                        .str.slice(0, 10)
-                        == fecha_cmp_str
+                if tot1 > 0:
+                    st.markdown(
+                        f'<div class="alerta-historial">📊 <b>Historial Operador {cod_op1}:</b> '
+                        f'<b>{tot1}</b> cambio(s) → <b>{", ".join(det1)}</b></div>',
+                        unsafe_allow_html=True,
                     )
-                    & (
-                        df_h_actual["HORA DE CAMBIO"].astype(str).str.strip()
-                        == hora_cambio_resumen
-                    )
-                ]
-                ya_existe = not dups.empty
+                elif cod_op1:
+                    st.caption(f"📊 Historial Operador {cod_op1}: 0 cambios previos.")
 
-            if ya_existe:
-                st.warning(
-                    "⚠️ Este cambio ya se encuentra registrado en el historial (duplicado bloqueado). Puedes descargar su boleta en la pestaña 2."
+            # Encabezados de la tabla tipo BRT
+            h_cols = st.columns([0.35, 1.45, 1.35, 1.25, 1.25, 1.35, 1.35])
+            h_cols[0].markdown("**#**")
+            h_cols[1].markdown("**Fecha (Programada)**")
+            h_cols[2].markdown("**Turno Actual (Auto)**")
+            h_cols[3].markdown("**Nuevo Horario**")
+            h_cols[4].markdown("**Nueva Tarea / Sercon**")
+            h_cols[5].markdown("**P. Inicio**")
+            h_cols[6].markdown("**P. Final**")
+
+            for idx in range(7):
+                r_cols = st.columns([0.35, 1.45, 1.35, 1.25, 1.25, 1.35, 1.35])
+                r_cols[0].markdown(f"**{idx + 1}**")
+                # Por defecto preseleccionar el primer día disponible solo en la fila 1
+                default_idx = 1 if (idx == 0 and len(opciones_fecha_sel) > 1) else 0
+                sel_f_str = r_cols[1].selectbox(
+                    f"F{idx+1}",
+                    opciones_fecha_sel,
+                    index=default_idx,
+                    key=f"brt_ind_fecha_{idx}",
+                    label_visibility="collapsed",
                 )
-            else:
-                ref_num = (fecha_solicitud - date(1899, 12, 30)).days
-                nueva_fila = pd.DataFrame(
-                    [
+
+                if sel_f_str != "— Sin cambio —":
+                    f_obj = mapa_fechas_label[sel_f_str]
+                    prog1 = buscar_turno_rapido(cod_op1, f_obj)
+                    r_cols[2].info(f"`{prog1['horario']}` · {prog1['sercon']}")
+
+                    nuevo_hor = r_cols[3].selectbox(
+                        f"H{idx+1}",
+                        JORNADAS_CATALOGO,
+                        index=0 if modalidad == "Cambio de día libre" else 2,
+                        key=f"brt_ind_hor_{idx}",
+                        label_visibility="collapsed",
+                    )
+                    nueva_tar = r_cols[4].selectbox(
+                        f"T{idx+1}",
+                        TAREAS_CATALOGO,
+                        index=6 if modalidad == "Cambio de día libre" else 0,
+                        key=f"brt_ind_tar_{idx}",
+                        label_visibility="collapsed",
+                    )
+                    nuevo_pi = r_cols[5].selectbox(
+                        f"PI{idx+1}",
+                        PATIOS_CATALOGO,
+                        key=f"brt_ind_pi_{idx}",
+                        label_visibility="collapsed",
+                    )
+                    nuevo_pf = r_cols[6].selectbox(
+                        f"PF{idx+1}",
+                        PATIOS_CATALOGO,
+                        key=f"brt_ind_pf_{idx}",
+                        label_visibility="collapsed",
+                    )
+
+                    filas_prog_op1.append(
                         {
-                            "REF": ref_num,
-                            "COGIDO": codigo_registro,
-                            "FECHA DE SOLICITUD": pd.Timestamp(fecha_solicitud),
-                            "FECHA DE CAMBIO": pd.Timestamp(
-                                datetime.strptime(
-                                    fecha_cambio_principal, "%d/%m/%Y"
-                                ).date()
-                            ),
-                            "HORA DE CAMBIO": hora_cambio_resumen,
-                            "RESPONSABLE DEL CAMBIO": responsable,
-                            "OBSERVACIONES": motivo_final,
-                            "Stamp": datetime.now().replace(microsecond=0),
+                            "fecha": f_obj.strftime("%d/%m/%Y"),
+                            "fecha_corta": fecha_corta_es(f_obj),
+                            "codigo": cod_op1,
+                            **prog1,
                         }
-                    ]
+                    )
+                    filas_cambio_op1.append(
+                        {
+                            "fecha": f_obj.strftime("%d/%m/%Y"),
+                            "fecha_corta": fecha_corta_es(f_obj),
+                            "codigo": cod_op1,
+                            "horario": nuevo_hor,
+                            "sercon": nueva_tar,
+                            "p_inicio": nuevo_pi,
+                            "p_fin": nuevo_pf,
+                        }
+                    )
+                else:
+                    r_cols[2].caption("—")
+                    r_cols[3].caption("—")
+                    r_cols[4].caption("—")
+                    r_cols[5].caption("—")
+                    r_cols[6].caption("—")
+
+        # ==========================================================
+        # MODO B: INTERCAMBIO ENTRE 2 OPERADORES (TABLA COMPACTA TIPO BRT)
+        # ==========================================================
+        else:
+            st.markdown(
+                '<div class="sub-header-brt">2. INTERCAMBIO ENTRE OPERADORES (FILAS 1 A 7)</div>',
+                unsafe_allow_html=True,
+            )
+            c_op1, c_op2 = st.columns(2)
+            with c_op1:
+                cod_op1 = limpiar_codigo(st.text_input("Operador 1 (Código)", value="82601"))
+                nom_op1, patio_op1, ok1 = buscar_operador_rapido(cod_op1)
+                if ok1:
+                    st.success(f"👤 **Op. 1:** {nom_op1} | Patio: **{patio_op1}**")
+                else:
+                    st.warning(f"👤 **Op. 1:** {nom_op1}")
+
+                tot1, det1 = obtener_resumen_mensual_operador(
+                    st.session_state.historial_cambios, cod_op1
                 )
-                st.session_state.historial_cambios = pd.concat(
-                    [nueva_fila, df_h_actual], ignore_index=True
+                if tot1 > 0:
+                    st.markdown(
+                        f'<div class="alerta-historial">📊 <b>Historial Op. {cod_op1}:</b> '
+                        f'<b>{tot1}</b> cambio(s) → <b>{", ".join(det1)}</b></div>',
+                        unsafe_allow_html=True,
+                    )
+
+            with c_op2:
+                cod_op2 = limpiar_codigo(st.text_input("Operador 2 (Código)", value="82602"))
+                nom_op2, _, ok2 = buscar_operador_rapido(cod_op2)
+                if ok2:
+                    st.success(f"👤 **Op. 2:** {nom_op2}")
+                else:
+                    st.warning(f"👤 **Op. 2:** {nom_op2}")
+
+                tot2, det2 = obtener_resumen_mensual_operador(
+                    st.session_state.historial_cambios, cod_op2
                 )
-                st.success(
-                    f"✅ Registro guardado y sumado al historial ({len(st.session_state.historial_cambios)} registros totales). Ve a la pestaña **2. Boleta F-ZEN-GO-07** para descargar el PDF."
+                if tot2 > 0:
+                    st.markdown(
+                        f'<div class="alerta-historial">📊 <b>Historial Op. {cod_op2}:</b> '
+                        f'<b>{tot2}</b> cambio(s) → <b>{", ".join(det2)}</b></div>',
+                        unsafe_allow_html=True,
+                    )
+
+            # Encabezados de tabla intercambio tipo BRT
+            hi_cols = st.columns([0.35, 1.5, 2.2, 2.2])
+            hi_cols[0].markdown("**#**")
+            hi_cols[1].markdown("**Fecha del Intercambio**")
+            hi_cols[2].markdown(f"**Programado Operador 1 ({cod_op1})**")
+            hi_cols[3].markdown(f"**Programado Operador 2 ({cod_op2})**")
+
+            for idx in range(7):
+                ri_cols = st.columns([0.35, 1.5, 2.2, 2.2])
+                ri_cols[0].markdown(f"**{idx + 1}**")
+                default_idx = 1 if (idx == 0 and len(opciones_fecha_sel) > 1) else 0
+                sel_f_str = ri_cols[1].selectbox(
+                    f"FI{idx+1}",
+                    opciones_fecha_sel,
+                    index=default_idx,
+                    key=f"brt_int_fecha_{idx}",
+                    label_visibility="collapsed",
                 )
 
-            st.session_state.boleta_activa = {
-                "modalidad": modalidad,
-                "es_intercambio": es_intercambio,
-                "fecha_sol": fecha_solicitud.strftime("%d/%m/%Y"),
-                "fecha_sol_larga": fecha_larga_es(fecha_solicitud),
-                "patio": patio_op1,
-                "responsable": responsable,
-                "motivo": motivo_final,
-                "cod_1": cod_op1,
-                "nombre_1": nom_op1,
-                "cod_2": cod_op2,
-                "nombre_2": nom_op2,
-                "prog_op1": filas_prog_op1,
-                "cambio_op1": filas_cambio_op1,
-                "prog_op2": filas_prog_op2,
-                "cambio_op2": filas_cambio_op2,
-            }
+                if sel_f_str != "— Sin cambio —":
+                    f_obj = mapa_fechas_label[sel_f_str]
+                    prog1 = buscar_turno_rapido(cod_op1, f_obj)
+                    prog2 = buscar_turno_rapido(cod_op2, f_obj)
+
+                    ri_cols[2].info(
+                        f"`{prog1['horario']}` | {prog1['sercon']} | {prog1['p_inicio']} → {prog1['p_fin']}"
+                    )
+                    ri_cols[3].info(
+                        f"`{prog2['horario']}` | {prog2['sercon']} | {prog2['p_inicio']} → {prog2['p_fin']}"
+                    )
+
+                    filas_prog_op1.append(
+                        {
+                            "fecha": f_obj.strftime("%d/%m/%Y"),
+                            "fecha_corta": fecha_corta_es(f_obj),
+                            "codigo": cod_op1,
+                            **prog1,
+                        }
+                    )
+                    filas_prog_op2.append(
+                        {
+                            "fecha": f_obj.strftime("%d/%m/%Y"),
+                            "fecha_corta": fecha_corta_es(f_obj),
+                            "codigo": cod_op2,
+                            **prog2,
+                        }
+                    )
+                    # En intercambio, Op 1 recibe lo de Op 2 y viceversa
+                    filas_cambio_op1.append(
+                        {
+                            "fecha": f_obj.strftime("%d/%m/%Y"),
+                            "fecha_corta": fecha_corta_es(f_obj),
+                            "codigo": cod_op1,
+                            "horario": prog2["horario"],
+                            "sercon": prog2["sercon"],
+                            "p_inicio": prog2["p_inicio"],
+                            "p_fin": prog2["p_fin"],
+                        }
+                    )
+                    filas_cambio_op2.append(
+                        {
+                            "fecha": f_obj.strftime("%d/%m/%Y"),
+                            "fecha_corta": fecha_corta_es(f_obj),
+                            "codigo": cod_op2,
+                            "horario": prog1["horario"],
+                            "sercon": prog1["sercon"],
+                            "p_inicio": prog1["p_inicio"],
+                            "p_fin": prog1["p_fin"],
+                        }
+                    )
+                else:
+                    ri_cols[2].caption("—")
+                    ri_cols[3].caption("—")
+
+        st.markdown("---")
+        if st.button(
+            "✅ Guardar Cambio en Historial y Generar Boleta F-ZEN-GO-07",
+            type="primary",
+            use_container_width=True,
+        ):
+            if not cod_op1 or (es_intercambio and not cod_op2):
+                st.error("⚠️ Debes ingresar el código del operador antes de guardar.")
+            elif not filas_cambio_op1:
+                st.error("⚠️ Selecciona al menos 1 fecha válida en la tabla para registrar el cambio.")
+            else:
+                codigo_registro = (
+                    f"{cod_op1}_{cod_op2}" if es_intercambio else str(cod_op1)
+                )
+                fecha_cambio_principal = filas_cambio_op1[0]["fecha"]
+                hora_cambio_resumen = (
+                    f"{filas_prog_op1[0]['horario']}/{filas_cambio_op1[0]['horario']}"
+                )
+
+                df_h_actual = st.session_state.historial_cambios
+                ya_existe = False
+                if not df_h_actual.empty:
+                    fecha_cmp_str = str(
+                        datetime.strptime(fecha_cambio_principal, "%d/%m/%Y").date()
+                    )
+                    dups = df_h_actual[
+                        (df_h_actual["COGIDO"].astype(str).str.strip() == codigo_registro)
+                        & (
+                            df_h_actual["FECHA DE CAMBIO"]
+                            .astype(str)
+                            .str.slice(0, 10)
+                            == fecha_cmp_str
+                        )
+                        & (
+                            df_h_actual["HORA DE CAMBIO"].astype(str).str.strip()
+                            == hora_cambio_resumen
+                        )
+                    ]
+                    ya_existe = not dups.empty
+
+                if ya_existe:
+                    st.warning(
+                        "⚠️ Este cambio ya se encuentra registrado en el historial (duplicado bloqueado). Puedes descargar su boleta en la pestaña 2."
+                    )
+                else:
+                    ref_num = (fecha_solicitud - date(1899, 12, 30)).days
+                    nueva_fila = pd.DataFrame(
+                        [
+                            {
+                                "REF": ref_num,
+                                "COGIDO": codigo_registro,
+                                "FECHA DE SOLICITUD": pd.Timestamp(fecha_solicitud),
+                                "FECHA DE CAMBIO": pd.Timestamp(
+                                    datetime.strptime(
+                                        fecha_cambio_principal, "%d/%m/%Y"
+                                    ).date()
+                                ),
+                                "HORA DE CAMBIO": hora_cambio_resumen,
+                                "RESPONSABLE DEL CAMBIO": responsable,
+                                "OBSERVACIONES": motivo_final,
+                                "Stamp": datetime.now().replace(microsecond=0),
+                            }
+                        ]
+                    )
+                    st.session_state.historial_cambios = pd.concat(
+                        [nueva_fila, df_h_actual], ignore_index=True
+                    )
+                    st.success(
+                        f"✅ Registro guardado y sumado al historial ({len(st.session_state.historial_cambios)} registros totales). Ve a la pestaña **2. Boleta Oficial F-ZEN-GO-07 (PDF)** para descargar."
+                    )
+
+                st.session_state.boleta_activa = {
+                    "modalidad": modalidad,
+                    "es_intercambio": es_intercambio,
+                    "fecha_sol": fecha_solicitud.strftime("%d/%m/%Y"),
+                    "fecha_sol_larga": fecha_larga_es(fecha_solicitud),
+                    "patio": patio_op1,
+                    "responsable": responsable,
+                    "motivo": motivo_final,
+                    "cod_1": cod_op1,
+                    "nombre_1": nom_op1,
+                    "cod_2": cod_op2,
+                    "nombre_2": nom_op2,
+                    "prog_op1": filas_prog_op1,
+                    "cambio_op1": filas_cambio_op1,
+                    "prog_op2": filas_prog_op2,
+                    "cambio_op2": filas_cambio_op2,
+                }
 
 # ------------------------------------------
 # TAB 2: BOLETA OFICIAL F-ZEN-GO-07 Y PDF
@@ -1132,7 +1280,7 @@ with tab_boleta:
 
     if "boleta_activa" not in st.session_state:
         st.info(
-            "ℹ️ Registra primero un cambio en la pestaña **1. Registrar Cambio de Horario** para generar aquí su boleta oficial."
+            "ℹ️ Registra primero un cambio en la pestaña **1. Módulo Cambio de Horario (BRT)** para generar aquí su boleta oficial."
         )
     else:
         bol = st.session_state.boleta_activa
