@@ -181,9 +181,8 @@ def limpiar_codigo(val):
 
 
 def normalizar_tabla_programacion(df_raw: pd.DataFrame) -> pd.DataFrame:
-    """Normaliza tanto ROW-DATA como el reporte ASIGNACIÓN (encabezado en fila 1 o 3)."""
+    """Normaliza tanto ROW-DATA como el reporte ASIGNACIÓN o datos pegados desde Excel."""
     df = df_raw.copy()
-    # Detectar si el encabezado está desplazado (ej. fila 3 en ASIGNACIÓN)
     cols_upper = [str(c).strip().upper() for c in df.columns]
     if not any(k in cols_upper for k in ["CODIGO", "CÓDIGO"]):
         for idx in range(min(10, len(df))):
@@ -198,21 +197,21 @@ def normalizar_tabla_programacion(df_raw: pd.DataFrame) -> pd.DataFrame:
         cu = str(c).strip().upper()
         if cu in ["FECHA"]:
             col_map[c] = "Fecha"
-        elif cu in ["TAREA"]:
+        elif cu in ["TAREA", "CODIGO SERCON", "CÓDIGO SERCON"]:
             col_map[c] = "Tarea"
         elif cu in ["CODIGO", "CÓDIGO"]:
             col_map[c] = "CODIGO"
-        elif cu in ["NOMBRE", "NOMBRE Y APELLIDO"]:
+        elif cu in ["NOMBRE", "NOMBRE Y APELLIDO", "OPERADOR"]:
             col_map[c] = "NOMBRE"
-        elif cu in ["H.INICIAL", "HORA INICIAL"]:
+        elif cu in ["H.INICIAL", "HORA INICIAL", "HORA I"]:
             col_map[c] = "H.Inicial"
-        elif cu in ["ORIGEN", "PATIO ORIGEN"]:
+        elif cu in ["ORIGEN", "PATIO ORIGEN", "P. INICIO"]:
             col_map[c] = "origen"
         elif cu in ["H. FINAL", "H.FINAL", "HORA FIN", "HORA FINAL"]:
             col_map[c] = "H. Final"
-        elif cu in ["PATIO FINAL"]:
+        elif cu in ["PATIO FINAL", "P. FINAL"]:
             col_map[c] = "Patio Final"
-        elif cu in ["PADMIN"]:
+        elif cu in ["PADMIN", "PATIO"]:
             col_map[c] = "PADMIN"
         elif "UNNAMED" in cu or "HORARIO" in cu:
             col_map[c] = "HORARIO_RAW"
@@ -251,12 +250,88 @@ def normalizar_tabla_programacion(df_raw: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def indexar_programacion_en_sesion(df_norm: pd.DataFrame, nombre_fuente: str):
+    """Guarda en st.session_state los diccionarios indexados para consulta instantánea."""
+    operadores_dict = {}
+    turnos_dict = {}
+    if not df_norm.empty:
+        df_ops = df_norm.drop_duplicates(subset=["CODIGO_STR"], keep="last")
+        for _, r in df_ops.iterrows():
+            operadores_dict[r["CODIGO_STR"]] = {
+                "nombre": r["NOMBRE"],
+                "patio": r["PADMIN"].upper() if r["PADMIN"] else "LOS PUEBLOS",
+            }
+        for _, r in df_norm.iterrows():
+            turnos_dict[(r["CODIGO_STR"], r["FECHA_DATE"])] = {
+                "horario": r["HORARIO_STR"] if r["HORARIO_STR"] else "-",
+                "sercon": r["Tarea"] if r["Tarea"] else "-",
+                "p_inicio": r["origen"] if r["origen"] else "-",
+                "p_fin": r["Patio Final"] if r["Patio Final"] else "-",
+            }
+
+    st.session_state.operadores_dict = operadores_dict
+    st.session_state.turnos_dict = turnos_dict
+    st.session_state.prog_total_filas = len(df_norm)
+    st.session_state.prog_nombre_archivo = nombre_fuente
+    st.session_state.prog_cargada = len(df_norm) > 0
+    st.session_state.mostrar_cargador = False
+
+
+def parsear_texto_pegado_excel(texto_tsv: str) -> pd.DataFrame:
+    """Convierte texto copiado directo desde Excel (separado por tabulaciones) en DataFrame normalizado."""
+    lineas = [l for l in texto_tsv.splitlines() if l.strip()]
+    if not lineas:
+        return pd.DataFrame()
+
+    # Leer como TSV
+    df_tsv = pd.read_csv(io.StringIO("\n".join(lineas)), sep="\t", header=None)
+    # Revisar si la primera fila contiene encabezados reales
+    primera_fila_upper = [str(x).strip().upper() for x in df_tsv.iloc[0].tolist()]
+    if any(k in primera_fila_upper for k in ["CODIGO", "CÓDIGO", "FECHA"]):
+        df_tsv.columns = [str(x).strip() for x in df_tsv.iloc[0].tolist()]
+        df_tsv = df_tsv.iloc[1:].reset_index(drop=True)
+        return normalizar_tabla_programacion(df_tsv)
+
+    # Si pegaron sin encabezados, inferir según cantidad de columnas (formato ASIGNACIÓN o ROW-DATA)
+    ncols = df_tsv.shape[1]
+    if ncols >= 11:
+        # Formato estándar A..K: Ref, Fecha, Tarea, CODIGO, NOMBRE, W.T., H.Inicial, origen, H. Final, Patio Final, PADMIN
+        cols_std = [
+            "Ref",
+            "Fecha",
+            "Tarea",
+            "CODIGO",
+            "NOMBRE",
+            "W.T.",
+            "H.Inicial",
+            "origen",
+            "H. Final",
+            "Patio Final",
+            "PADMIN",
+        ] + [f"Extra_{i}" for i in range(ncols - 11)]
+        df_tsv.columns = cols_std
+    elif ncols >= 9:
+        # Sin columna Ref (B..J/K): Fecha, Tarea, CODIGO, NOMBRE, W.T., H.Inicial, origen, H. Final, Patio Final, [PADMIN]
+        cols_std = [
+            "Fecha",
+            "Tarea",
+            "CODIGO",
+            "NOMBRE",
+            "W.T.",
+            "H.Inicial",
+            "origen",
+            "H. Final",
+            "Patio Final",
+        ] + (["PADMIN"] if ncols >= 10 else [])
+        df_tsv.columns = cols_std
+    return normalizar_tabla_programacion(df_tsv)
+
+
 @st.cache_data(show_spinner="Indexando programación completa...")
 def procesar_archivo_excel(file_bytes: bytes):
     xls = pd.ExcelFile(io.BytesIO(file_bytes))
     sheets = xls.sheet_names
 
-    # 1. Lista de responsables
     lista_resp = list(RESPONSABLES_DEFAULT)
     if "Lista" in sheets:
         df_l = pd.read_excel(xls, sheet_name="Lista")
@@ -269,7 +344,6 @@ def procesar_archivo_excel(file_bytes: bytes):
             if vals:
                 lista_resp = vals
 
-    # 2. Programación (ROW-DATA o primera hoja compatible)
     df_prog = pd.DataFrame()
     hojas_candidatas = (
         ["ROW-DATA"] + [s for s in sheets if s != "ROW-DATA"]
@@ -277,7 +351,14 @@ def procesar_archivo_excel(file_bytes: bytes):
         else sheets
     )
     for sh in hojas_candidatas:
-        if sh in ["F-ZEN-GO-06", "F-ZEN-GO-07", "BRT", "HISTORIAL DE CAMBIOS", "HISTORIAL DE CAMBIOS (2)", "Lista"]:
+        if sh in [
+            "F-ZEN-GO-06",
+            "F-ZEN-GO-07",
+            "BRT",
+            "HISTORIAL DE CAMBIOS",
+            "HISTORIAL DE CAMBIOS (2)",
+            "Lista",
+        ]:
             continue
         df_try = pd.read_excel(xls, sheet_name=sh)
         df_norm = normalizar_tabla_programacion(df_try)
@@ -285,27 +366,6 @@ def procesar_archivo_excel(file_bytes: bytes):
             df_prog = df_norm
             break
 
-    # Construir diccionarios rápidos en memoria para búsqueda instantánea
-    operadores_dict = {}
-    turnos_dict = {}
-    if not df_prog.empty:
-        # Información general por operador
-        df_ops = df_prog.drop_duplicates(subset=["CODIGO_STR"], keep="last")
-        for _, r in df_ops.iterrows():
-            operadores_dict[r["CODIGO_STR"]] = {
-                "nombre": r["NOMBRE"],
-                "patio": r["PADMIN"].upper() if r["PADMIN"] else "LOS PUEBLOS",
-            }
-        # Turno exacto por (CODIGO_STR, FECHA_DATE)
-        for _, r in df_prog.iterrows():
-            turnos_dict[(r["CODIGO_STR"], r["FECHA_DATE"])] = {
-                "horario": r["HORARIO_STR"] if r["HORARIO_STR"] else "-",
-                "sercon": r["Tarea"] if r["Tarea"] else "-",
-                "p_inicio": r["origen"] if r["origen"] else "-",
-                "p_fin": r["Patio Final"] if r["Patio Final"] else "-",
-            }
-
-    # 3. Historial de cambios existente
     df_hist = pd.DataFrame(
         columns=[
             "REF",
@@ -332,16 +392,14 @@ def procesar_archivo_excel(file_bytes: bytes):
             df_h["COGIDO"] = df_h["COGIDO"].apply(limpiar_codigo)
         df_hist = df_h
 
-    return operadores_dict, turnos_dict, df_hist, lista_resp, len(df_prog)
+    return df_prog, df_hist, lista_resp
 
 
 def obtener_resumen_mensual_operador(df_hist: pd.DataFrame, codigo: str):
-    """Cuenta cuántos cambios lleva el operador (individuales e intercambios) agrupados por mes."""
     cod = limpiar_codigo(codigo)
     if not cod or df_hist.empty or "COGIDO" not in df_hist.columns:
         return 0, []
 
-    # Coincide exacto ("82601") o en intercambio ("82601_82602" / "82602_82601")
     def contiene_codigo(val):
         partes = [p.strip() for p in str(val).split("_")]
         return cod in partes
@@ -350,7 +408,6 @@ def obtener_resumen_mensual_operador(df_hist: pd.DataFrame, codigo: str):
     if sub.empty:
         return 0, []
 
-    # Usar FECHA DE CAMBIO si es válida; si está en 00:00:00, respaldar con FECHA DE SOLICITUD
     f_cambio = pd.to_datetime(sub.get("FECHA DE CAMBIO"), errors="coerce")
     f_sol = pd.to_datetime(sub.get("FECHA DE SOLICITUD"), errors="coerce")
     fecha_ref = f_cambio.fillna(f_sol)
@@ -416,7 +473,6 @@ def generar_pdf_f_zen_go_07(bol: dict) -> bytes:
     amarillo_cod = (255, 255, 0)
 
     def dibujar_logo_mibus(x, y):
-        # Emblema estilizado MiBus en esquina superior izquierda
         pdf.set_fill_color(0, 112, 192)
         pdf.rect(x, y, 12, 2.2, style="F")
         pdf.set_fill_color(0, 176, 80)
@@ -437,7 +493,6 @@ def generar_pdf_f_zen_go_07(bol: dict) -> bytes:
     def dibujar_bloque_firmas(y_start, resp_nombre):
         pdf.set_xy(10, y_start)
         pdf.set_font("Arial", "B", 6.2)
-        # Fila 1: Operador 1
         pdf.cell(34, 4, "Nombre del Operador 1:", align="L")
         pdf.set_font("Arial", "", 6.2)
         pdf.cell(62, 4, limpiar_texto_pdf(bol["nombre_1"]), border="B", align="C")
@@ -445,7 +500,6 @@ def generar_pdf_f_zen_go_07(bol: dict) -> bytes:
         pdf.cell(34, 4, "Firma del Operador 1:", align="R")
         pdf.cell(66, 4, "", border="B", ln=1)
 
-        # Fila 2: Operador 2
         pdf.set_x(10)
         pdf.cell(34, 4, "Nombre del Operador 2:", align="L")
         pdf.set_font("Arial", "", 6.2)
@@ -460,7 +514,6 @@ def generar_pdf_f_zen_go_07(bol: dict) -> bytes:
         pdf.cell(34, 4, "Firma del Operador 2:", align="R")
         pdf.cell(66, 4, "", border="B", ln=1)
 
-        # Fila 3: Analista / Profesional
         pdf.set_x(10)
         pdf.cell(34, 4, "Nombre Analista de Op.:", align="L")
         pdf.set_font("Arial", "", 6.2)
@@ -469,9 +522,6 @@ def generar_pdf_f_zen_go_07(bol: dict) -> bytes:
         pdf.cell(34, 4, "Firma Profesional de Op.:", align="R")
         pdf.cell(66, 4, limpiar_texto_pdf(resp_nombre), border="B", ln=1)
 
-    # ==========================================================
-    # SECCIÓN 1: ORIGINAL PLANILLA (Y: 8 -> 124 mm)
-    # ==========================================================
     dibujar_logo_mibus(11, 8)
     pdf.set_xy(28, 8)
     pdf.set_font("Arial", "B", 11)
@@ -483,7 +533,6 @@ def generar_pdf_f_zen_go_07(bol: dict) -> bytes:
     pdf.set_font("Arial", "B", 7.5)
     pdf.cell(168, 4, limpiar_texto_pdf(bol["motivo"]), align="L", ln=1)
 
-    # Barra I. DATOS GENERALES DEL OPERADOR
     pdf.set_xy(10, 18)
     pdf.set_fill_color(*azul_hdr)
     pdf.set_text_color(255, 255, 255)
@@ -507,7 +556,6 @@ def generar_pdf_f_zen_go_07(bol: dict) -> bytes:
     pdf.cell(42, 5.5, limpiar_texto_pdf(bol["fecha_sol_larga"]), border=1, align="C")
     pdf.cell(48, 5.5, limpiar_texto_pdf(bol["patio"]), border=1, align="C", ln=1)
 
-    # Barra II. DETALLE DEL CAMBIO
     pdf.set_x(10)
     pdf.set_fill_color(*azul_hdr)
     pdf.set_text_color(255, 255, 255)
@@ -515,7 +563,6 @@ def generar_pdf_f_zen_go_07(bol: dict) -> bytes:
     pdf.cell(196, 4.5, "II. DETALLE DEL CAMBIO", border=1, ln=1, align="C", fill=True)
     pdf.set_text_color(0, 0, 0)
 
-    # Checkboxes de modalidad
     pdf.set_x(10)
     pdf.cell(196, 5.5, "", border=1, ln=1)
     dibujar_checkbox(18, 38.2, bol["modalidad"] == "Cambio con otro operador", "Cambio con otro operador")
@@ -533,7 +580,6 @@ def generar_pdf_f_zen_go_07(bol: dict) -> bytes:
         pdf.set_text_color(0, 0, 0)
         pdf.set_fill_color(*gris_sub)
         pdf.set_font("Arial", "B", 5.8)
-        # Subheaders Izquierda (98mm total) y Derecha (98mm total)
         w_izq = [6, 17, 13, 21, 20, 21]
         h_izq = ["N", "Fecha", "Codigo", "Horario", "Cod. Sercon", "P. Inicio"]
         w_der = [17, 13, 21, 23, 24]
@@ -573,12 +619,10 @@ def generar_pdf_f_zen_go_07(bol: dict) -> bytes:
                 pdf.cell(w, 3.6, limpiar_texto_pdf(v)[:17], border=1, align="C")
             pdf.ln()
 
-        # Línea divisoria vertical gruesa en el centro (X = 108)
         pdf.set_line_width(0.6)
         pdf.line(108, y_top, 108, y_top + 4.2 + 3.8 + 7 * 3.6)
         pdf.set_line_width(0.2)
 
-    # Cuadrícula Doble 1: Programado Op 1 vs Op 2
     dibujar_doble_tabla(
         43,
         "HORARIO PROGRAMADO OPERADOR 1",
@@ -586,7 +630,6 @@ def generar_pdf_f_zen_go_07(bol: dict) -> bytes:
         bol["prog_op1"],
         bol["prog_op2"] if bol["es_intercambio"] else [],
     )
-    # Cuadrícula Doble 2: Cambio Op 1 vs Op 2
     dibujar_doble_tabla(
         77.5,
         "HORARIO CAMBIO OPERADOR 1",
@@ -597,11 +640,7 @@ def generar_pdf_f_zen_go_07(bol: dict) -> bytes:
 
     dibujar_bloque_firmas(112, bol["responsable"])
 
-    # ==========================================================
-    # FUNCIÓN PARA COPIA OPERADOR 1 Y COPIA OPERADOR 2
-    # ==========================================================
     def dibujar_seccion_copia(y_base, titulo_tabla, filas_cambio):
-        # Línea punteada de corte
         pdf.set_xy(10, y_base)
         pdf.set_font("Arial", "", 6)
         pdf.cell(196, 2.5, "- " * 88, align="C", ln=1)
@@ -622,7 +661,6 @@ def generar_pdf_f_zen_go_07(bol: dict) -> bytes:
             ln=1,
         )
 
-        # Barra azul
         pdf.set_xy(10, y_base + 12)
         pdf.set_fill_color(*azul_hdr)
         pdf.set_text_color(255, 255, 255)
@@ -661,17 +699,13 @@ def generar_pdf_f_zen_go_07(bol: dict) -> bytes:
         pdf.set_font("Arial", "B", 5.8)
         pdf.cell(196, 3, "COPIA NO CONTROLADA", align="C")
 
-    # SECCIÓN 2: COPIA OPERADOR 1 (Y: 126 -> 188 mm)
     dibujar_seccion_copia(126, "HORARIO DE CAMBIO OPERADOR 1", bol["cambio_op1"])
-
-    # SECCIÓN 3: COPIA OPERADOR 2 (Y: 190 -> 252 mm)
     dibujar_seccion_copia(
         190,
         "HORARIO DE CAMBIO OPERADOR 2",
         bol["cambio_op2"] if bol["es_intercambio"] else [],
     )
 
-    # Marco exterior azul institucional
     pdf.set_draw_color(0, 112, 192)
     pdf.set_line_width(0.5)
     pdf.rect(9, 7, 198, 247)
@@ -706,50 +740,77 @@ if "prog_cargada" not in st.session_state:
 
 
 # ==========================================
-# SIDEBAR: CARGA PERSISTENTE DE PROGRAMACIÓN
+# SIDEBAR: CARGA PERSISTENTE (ARCHIVO O PEGAR EXCEL)
 # ==========================================
 st.sidebar.header("📂 1. Programación Activa")
 
 if st.session_state.prog_cargada and not st.session_state.mostrar_cargador:
     st.sidebar.success(
-        f"📌 **Archivo activo:**\n{st.session_state.prog_nombre_archivo}\n\n"
+        f"📌 **Fuente activa:**\n{st.session_state.prog_nombre_archivo}\n\n"
         f"• **{st.session_state.prog_total_filas:,}** turnos indexados\n"
         f"• **{len(st.session_state.historial_cambios)}** cambios en historial"
     )
-    if st.sidebar.button("🔄 Cambiar archivo de programación", use_container_width=True):
+    if st.sidebar.button("🔄 Cambiar / Pegar nueva programación", use_container_width=True):
         st.session_state.mostrar_cargador = True
         st.rerun()
 else:
-    archivo_subido = st.sidebar.file_uploader(
-        "Sube CAMBIO DE HORARIOS 2026 o ASIGNACIÓN (.xlsx / .xlsm)",
-        type=["xlsx", "xlsm"],
-        key="uploader_prog_persistente",
+    metodo_carga = st.sidebar.radio(
+        "¿Cómo deseas cargar los horarios?",
+        ["📁 Subir archivo Excel", "📋 Pegar desde Excel (Ctrl + V)"],
     )
-    if archivo_subido is not None:
-        ops_d, tur_d, df_h_loaded, resp_l, n_filas = procesar_archivo_excel(
-            archivo_subido.getvalue()
+
+    if metodo_carga == "📁 Subir archivo Excel":
+        archivo_subido = st.sidebar.file_uploader(
+            "Sube CAMBIO DE HORARIOS 2026 o ASIGNACIÓN (.xlsx / .xlsm)",
+            type=["xlsx", "xlsm"],
+            key="uploader_prog_persistente",
         )
-        st.session_state.operadores_dict = ops_d
-        st.session_state.turnos_dict = tur_d
-        st.session_state.prog_total_filas = n_filas
-        st.session_state.lista_responsables = resp_l
-        st.session_state.prog_nombre_archivo = archivo_subido.name
-        st.session_state.prog_cargada = True
-        st.session_state.mostrar_cargador = False
-
-        # Conservar los registros que ya traía el archivo Excel
-        if not df_h_loaded.empty:
-            st.session_state.historial_cambios = df_h_loaded.copy()
-
-        st.rerun()
+        if archivo_subido is not None:
+            df_prog_l, df_h_loaded, resp_l = procesar_archivo_excel(
+                archivo_subido.getvalue()
+            )
+            st.session_state.lista_responsables = resp_l
+            if not df_h_loaded.empty:
+                st.session_state.historial_cambios = df_h_loaded.copy()
+            indexar_programacion_en_sesion(df_prog_l, archivo_subido.name)
+            st.rerun()
+    else:
+        st.sidebar.caption(
+            "Copia las filas en Excel (`Ctrl + C`) desde **Fecha** hasta **PADMIN** (o toda la tabla de ASIGNACIÓN) y pégalas aquí:"
+        )
+        texto_pegado = st.sidebar.text_area(
+            "Pega aquí con Ctrl + V",
+            height=160,
+            placeholder="Pega las celdas copiadas de Excel...",
+            key="area_pegar_excel",
+        )
+        if st.sidebar.button(
+            "✅ Cargar programación pegada",
+            type="primary",
+            use_container_width=True,
+        ):
+            if texto_pegado.strip():
+                df_pegado = parsear_texto_pegado_excel(texto_pegado)
+                if not df_pegado.empty:
+                    indexar_programacion_en_sesion(
+                        df_pegado,
+                        f"Pegado desde Excel ({datetime.now().strftime('%H:%M')})",
+                    )
+                    st.rerun()
+                else:
+                    st.sidebar.error(
+                        "⚠️ No se reconocieron las columnas. Asegúrate de copiar desde la columna Fecha hasta Patio Final/PADMIN."
+                    )
+            else:
+                st.sidebar.warning("⚠️ Pega primero los datos copiados de Excel.")
 
     if st.session_state.prog_cargada:
-        if st.sidebar.button("Cancelar cambio de archivo", use_container_width=True):
+        if st.sidebar.button("Cancelar cambio", use_container_width=True):
             st.session_state.mostrar_cargador = False
             st.rerun()
     else:
         st.sidebar.info(
-            "ℹ️ Sube tu archivo una sola vez; se mantendrá fijo mientras trabajas hasta que decidas cambiarlo."
+            "ℹ️ La programación quedará fija en pantalla mientras trabajas hasta que decidas cambiarla."
         )
 
 
@@ -772,11 +833,12 @@ def buscar_turno_rapido(codigo: str, fecha_obj: date):
 # ==========================================
 # PESTAÑAS PRINCIPALES
 # ==========================================
-tab_registro, tab_boleta, tab_historial = st.tabs(
+tab_registro, tab_boleta, tab_historial, tab_pegar_tabla = st.tabs(
     [
         "📝 1. Registrar Cambio de Horario",
         "🖨️ 2. Boleta F-ZEN-GO-07 (PDF / Imprimir)",
         "📊 3. Historial Acumulado y Descarga Excel",
+        "📋 4. Tabla Tipo Excel (Pegar / Editar)",
     ]
 )
 
@@ -827,7 +889,6 @@ with tab_registro:
         else:
             st.warning(f"👤 **Operador 1:** {nom_op1}")
 
-        # Contador histórico mensual en vivo para Operador 1
         tot1, det1 = obtener_resumen_mensual_operador(
             st.session_state.historial_cambios, cod_op1
         )
@@ -851,7 +912,6 @@ with tab_registro:
             else:
                 st.warning(f"👤 **Operador 2:** {nom_op2}")
 
-            # Contador histórico mensual en vivo para Operador 2
             tot2, det2 = obtener_resumen_mensual_operador(
                 st.session_state.historial_cambios, cod_op2
             )
@@ -1183,7 +1243,6 @@ with tab_historial:
     st.caption(f"Mostrando **{len(df_filtrado)}** de **{len(df_h_show)}** registros acumulados.")
     st.dataframe(df_filtrado, use_container_width=True, hide_index=True)
 
-    # Exportar Excel manteniendo el historial completo acumulado
     buffer_xlsx = io.BytesIO()
     with pd.ExcelWriter(buffer_xlsx, engine="openpyxl") as writer:
         df_h_show.to_excel(
@@ -1201,3 +1260,55 @@ with tab_historial:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         type="primary",
     )
+
+# ------------------------------------------
+# TAB 4: CUADRÍCULA INTERACTIVA TIPO EXCEL (CTRL + V)
+# ------------------------------------------
+with tab_pegar_tabla:
+    st.subheader("📋 Cuadrícula Tipo Excel — Pega o Edita Horarios Directamente")
+    st.markdown(
+        "Haz clic en la primera celda (`Fecha`), presiona **`Ctrl + V`** para pegar las filas copiadas desde Excel y luego pulsa **Guardar programación en sesión**."
+    )
+
+    plantilla_excel = pd.DataFrame(
+        [
+            {
+                "Fecha": "",
+                "Tarea": "",
+                "CODIGO": "",
+                "NOMBRE": "",
+                "H.Inicial": "",
+                "origen": "",
+                "H. Final": "",
+                "Patio Final": "",
+                "PADMIN": "",
+            }
+            for _ in range(15)
+        ]
+    )
+
+    df_editor = st.data_editor(
+        plantilla_excel,
+        num_rows="dynamic",
+        use_container_width=True,
+        key="editor_excel_grid",
+    )
+
+    if st.button(
+        "💾 Fijar programación de esta cuadrícula en sesión",
+        type="primary",
+    ):
+        df_norm_grid = normalizar_tabla_programacion(df_editor)
+        if not df_norm_grid.empty:
+            indexar_programacion_en_sesion(
+                df_norm_grid,
+                f"Cuadrícula Excel ({len(df_norm_grid)} turnos - {datetime.now().strftime('%H:%M')})",
+            )
+            st.success(
+                f"✅ Se cargaron **{len(df_norm_grid)}** turnos desde la cuadrícula. Ya puedes ir a la pestaña 1."
+            )
+            st.rerun()
+        else:
+            st.warning(
+                "⚠️ Asegúrate de que al menos las columnas **Fecha** y **CODIGO** tengan datos válidos antes de guardar."
+            )
