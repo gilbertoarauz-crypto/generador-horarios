@@ -1,5 +1,6 @@
 from datetime import datetime, date, time, timedelta
 import io
+import altair as alt
 import gspread
 from google.oauth2.service_account import Credentials
 import pandas as pd
@@ -503,6 +504,16 @@ def procesar_archivo_excel(file_bytes: bytes):
     return df_prog, df_hist, lista_resp
 
 
+def obtener_fechas_validas_serie(df_h: pd.DataFrame) -> pd.Series:
+    """Extrae fecha válida ignorando fechas ficticias de Excel (1899-12-30)."""
+    f_cambio = pd.to_datetime(df_h.get("FECHA DE CAMBIO"), errors="coerce")
+    f_sol = pd.to_datetime(df_h.get("FECHA DE SOLICITUD"), errors="coerce")
+    # Descartar fechas centinela <= 1900
+    f_cambio = f_cambio.where(f_cambio.dt.year > 1900)
+    f_sol = f_sol.where(f_sol.dt.year > 1900)
+    return f_cambio.fillna(f_sol)
+
+
 def obtener_resumen_anual_operador(df_hist: pd.DataFrame, codigo: str, anio_objetivo: int):
     cod = limpiar_codigo(codigo)
     if not cod or df_hist.empty or "COGIDO" not in df_hist.columns:
@@ -516,11 +527,7 @@ def obtener_resumen_anual_operador(df_hist: pd.DataFrame, codigo: str, anio_obje
     if sub.empty:
         return 0, 0, []
 
-    f_cambio = pd.to_datetime(sub.get("FECHA DE CAMBIO"), errors="coerce")
-    f_sol = pd.to_datetime(sub.get("FECHA DE SOLICITUD"), errors="coerce")
-    fecha_ref = f_cambio.fillna(f_sol)
-
-    sub["FECHA_REF"] = fecha_ref
+    sub["FECHA_REF"] = obtener_fechas_validas_serie(sub)
     total_historico = len(sub)
 
     sub_anio = sub[sub["FECHA_REF"].dt.year == anio_objetivo].copy()
@@ -534,7 +541,7 @@ def obtener_resumen_anual_operador(df_hist: pd.DataFrame, codigo: str, anio_obje
         sub_anio.groupby("MES_NUM")
         .size()
         .reset_index(name="cant")
-        .sort_values("MES_NUM", ascending=False)
+        .sort_values("MES_NUM", ascending=True)
     )
     detalle_meses = [
         f"{int(r['cant'])} en {MESES_ES.get(int(r['MES_NUM']), str(r['MES_NUM']))}"
@@ -581,7 +588,6 @@ def renderizar_tarjeta_lateral_anual(codigo: str, df_hist: pd.DataFrame, anio_re
 
 
 def clasificar_tipo_cambio(row):
-    """Deduce la categoría del movimiento a partir del código y la hora de cambio."""
     cod = str(row.get("COGIDO", "")).strip()
     hora = str(row.get("HORA DE CAMBIO", "")).upper().strip()
     obs = str(row.get("OBSERVACIONES", "")).upper().strip()
@@ -1486,7 +1492,7 @@ with tab_boleta:
                 )
 
 # ------------------------------------------
-# TAB 3: HISTORIAL ACUMULADO, GRÁFICAS Y TOP 10
+# TAB 3: HISTORIAL ACUMULADO, GRÁFICAS CON VALORES Y TOP 10
 # ------------------------------------------
 with tab_historial:
     st.subheader("📊 Panel Estadístico e Historial Acumulado")
@@ -1495,10 +1501,7 @@ with tab_historial:
     if df_h_show.empty:
         st.info("ℹ️ Aún no hay registros en el historial para graficar.")
     else:
-        # Preparar columnas analíticas (Mes y Tipo de Cambio)
-        f_cambio = pd.to_datetime(df_h_show.get("FECHA DE CAMBIO"), errors="coerce")
-        f_sol = pd.to_datetime(df_h_show.get("FECHA DE SOLICITUD"), errors="coerce")
-        df_h_show["FECHA_ANALISIS"] = f_cambio.fillna(f_sol)
+        df_h_show["FECHA_ANALISIS"] = obtener_fechas_validas_serie(df_h_show)
         df_h_show["TIPO_MOVIMIENTO"] = df_h_show.apply(clasificar_tipo_cambio, axis=1)
 
         # KPIs superiores
@@ -1514,26 +1517,61 @@ with tab_historial:
         )
 
         st.markdown("---")
-        # SECCIÓN DE GRÁFICAS: CAMBIOS POR MES Y TIPOS DE CAMBIO
-        col_g1, col_g2 = st.columns([1.3, 1])
+        # SECCIÓN DE GRÁFICAS CON ETIQUETAS NUMÉRICAS Y ORDEN CRONOLÓGICO DE MESES
+        col_g1, col_g2 = st.columns([1.35, 1])
 
         with col_g1:
-            st.markdown("##### 📅 Cambios Totales por Mes")
+            st.markdown("##### 📅 Cambios Totales por Mes (Orden Cronológico)")
             df_mes = df_h_show[df_h_show["FECHA_ANALISIS"].notna()].copy()
             if not df_mes.empty:
-                df_mes["PERIODO"] = df_mes["FECHA_ANALISIS"].dt.to_period("M")
+                df_mes["ORDEN_MES"] = (
+                    df_mes["FECHA_ANALISIS"].dt.year * 100
+                    + df_mes["FECHA_ANALISIS"].dt.month
+                )
+                df_mes["MES_NUM"] = df_mes["FECHA_ANALISIS"].dt.month
+                df_mes["ANIO_NUM"] = df_mes["FECHA_ANALISIS"].dt.year
+
                 res_mes = (
-                    df_mes.groupby("PERIODO")
+                    df_mes.groupby(["ORDEN_MES", "ANIO_NUM", "MES_NUM"])
                     .size()
                     .reset_index(name="Cambios")
-                    .sort_values("PERIODO")
+                    .sort_values("ORDEN_MES", ascending=True)
                 )
-                res_mes["Mes"] = res_mes["PERIODO"].apply(
-                    lambda p: f"{MESES_ES.get(p.month, p.month)} {p.year}"
+                res_mes["Mes"] = res_mes.apply(
+                    lambda r: f"{MESES_ES.get(int(r['MES_NUM']), int(r['MES_NUM']))} {int(r['ANIO_NUM'])}",
+                    axis=1,
                 )
-                st.bar_chart(
-                    res_mes.set_index("Mes")["Cambios"],
-                    color="#0070c0",
+                orden_cronologico = res_mes["Mes"].tolist()
+
+                base_mes = alt.Chart(res_mes).encode(
+                    x=alt.X(
+                        "Mes:N",
+                        sort=orden_cronologico,
+                        title="Mes del Año",
+                        axis=alt.Axis(labelAngle=0),
+                    ),
+                    y=alt.Y("Cambios:Q", title="Total de Cambios"),
+                    tooltip=["Mes", "Cambios"],
+                )
+                barras_mes = base_mes.mark_bar(
+                    color="#0070c0", cornerRadiusTopLeft=4, cornerRadiusTopRight=4
+                )
+                etiquetas_mes = base_mes.mark_text(
+                    align="center",
+                    baseline="bottom",
+                    dy=-4,
+                    color="#f8fafc",
+                    fontWeight="bold",
+                    fontSize=12,
+                ).encode(text="Cambios:Q")
+
+                st.altair_chart(
+                    (barras_mes + etiquetas_mes).properties(height=300),
+                    use_container_width=True,
+                )
+                # Tabla compacta horizontal con el detalle mensual
+                st.dataframe(
+                    res_mes[["Mes", "Cambios"]].set_index("Mes").T,
                     use_container_width=True,
                 )
             else:
@@ -1547,9 +1585,31 @@ with tab_historial:
                 .reset_index()
             )
             res_tipo.columns = ["Tipo de Cambio", "Cantidad"]
-            st.bar_chart(
-                res_tipo.set_index("Tipo de Cambio")["Cantidad"],
-                color="#00b050",
+
+            base_tipo = alt.Chart(res_tipo).encode(
+                x=alt.X(
+                    "Tipo de Cambio:N",
+                    sort="-y",
+                    title="Tipo de Movimiento",
+                    axis=alt.Axis(labelAngle=-12),
+                ),
+                y=alt.Y("Cantidad:Q", title="Cantidad"),
+                tooltip=["Tipo de Cambio", "Cantidad"],
+            )
+            barras_tipo = base_tipo.mark_bar(
+                color="#00b050", cornerRadiusTopLeft=4, cornerRadiusTopRight=4
+            )
+            etiquetas_tipo = base_tipo.mark_text(
+                align="center",
+                baseline="bottom",
+                dy=-4,
+                color="#f8fafc",
+                fontWeight="bold",
+                fontSize=12,
+            ).encode(text="Cantidad:Q")
+
+            st.altair_chart(
+                (barras_tipo + etiquetas_tipo).properties(height=300),
                 use_container_width=True,
             )
             st.dataframe(res_tipo, use_container_width=True, hide_index=True)
@@ -1560,7 +1620,6 @@ with tab_historial:
 
         with col_top:
             st.markdown("##### 🏆 Top 10 Operadores con Más Cambios")
-            # Descomponer códigos compuestos (ej. "82601_82602") para contar cada operador individualmente
             conteo_ops = {}
             for val in df_h_show["COGIDO"].dropna().astype(str):
                 for parte in val.split("_"):
@@ -1630,56 +1689,3 @@ with tab_historial:
             else:
                 st.caption(
                     "Ingresa un código arriba para ver todos sus cambios, fechas, horarios y responsables."
-                )
-
-    st.markdown("---")
-    st.markdown("##### 📋 Tabla General de Registros y Descarga Excel")
-    col_f1, col_f2 = st.columns(2)
-    with col_f1:
-        filtro_op = st.text_input("Filtrar tabla general por Código:", "")
-    with col_f2:
-        filtro_resp = st.multiselect(
-            "Filtrar por Responsable:",
-            options=sorted(
-                df_h_show["RESPONSABLE DEL CAMBIO"].dropna().astype(str).unique().tolist()
-            )
-            if not df_h_show.empty and "RESPONSABLE DEL CAMBIO" in df_h_show.columns
-            else [],
-        )
-
-    df_filtrado = df_h_show.drop(
-        columns=["FECHA_ANALISIS", "TIPO_MOVIMIENTO"], errors="ignore"
-    ).copy()
-    if filtro_op.strip():
-        df_filtrado = df_filtrado[
-            df_filtrado["COGIDO"].astype(str).str.contains(filtro_op.strip(), case=False)
-        ]
-    if filtro_resp:
-        df_filtrado = df_filtrado[
-            df_filtrado["RESPONSABLE DEL CAMBIO"].astype(str).isin(filtro_resp)
-        ]
-
-    st.caption(f"Mostrando **{len(df_filtrado)}** de **{len(df_h_show)}** registros acumulados.")
-    st.dataframe(df_filtrado, use_container_width=True, hide_index=True)
-
-    # Exportar Excel limpio (sin columnas auxiliares internas)
-    df_export = st.session_state.historial_cambios.drop(
-        columns=["FECHA_ANALISIS", "TIPO_MOVIMIENTO"], errors="ignore"
-    )
-    buffer_xlsx = io.BytesIO()
-    with pd.ExcelWriter(buffer_xlsx, engine="openpyxl") as writer:
-        df_export.to_excel(
-            writer, sheet_name="HISTORIAL DE CAMBIOS (2)", index=False
-        )
-        pd.DataFrame({"NOMBRE": st.session_state.lista_responsables}).to_excel(
-            writer, sheet_name="Lista", index=False
-        )
-    buffer_xlsx.seek(0)
-
-    st.download_button(
-        label="📥 Descargar Historial Completo Actualizado (Excel .xlsx)",
-        data=buffer_xlsx,
-        file_name=f"HISTORIAL_CAMBIOS_HORARIO_{date.today().strftime('%Y%m%d')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary",
-    )
