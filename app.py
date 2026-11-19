@@ -390,11 +390,6 @@ def calcular_descanso_suficiente(
 
 
 def prioridad_por_restriccion_horaria(cod: str, matriz: dict):
-    """
-    Ordena primero a quienes tienen la hora de salida previa más tardía
-    (mayor restricción de 12h/24h) para que tomen los turnos de tarde/noche
-    antes que quienes tienen libertad de horario.
-    """
     d = matriz[cod]
     sal = d.get("SALIDA_PREVIA_DT")
     if sal is not None:
@@ -605,7 +600,23 @@ if df_empleados is not None:
             st.session_state.lista_reemplazos = []
 
         lista_empleados_nombres = df_empleados["NOMBRE"].tolist()
-        cargos_disponibles = sorted(
+        emps_sel = st.sidebar.multiselect(
+            "1. Seleccionar Colaborador(es):",
+            lista_empleados_nombres,
+            key="sel_remplazo",
+        )
+
+        # Filtrar cargos origen de los seleccionados para evitar asignar el mismo cargo
+        cargos_origen_sel = set()
+        if emps_sel:
+            cargos_origen_sel = set(
+                df_empleados[df_empleados["NOMBRE"].isin(emps_sel)]["CARGO"]
+                .str.strip()
+                .str.upper()
+                .tolist()
+            )
+
+        todos_los_cargos = sorted(
             list(
                 set(
                     df_empleados["CARGO"].tolist()
@@ -613,14 +624,22 @@ if df_empleados is not None:
                 )
             )
         )
+        cargos_destino_validos = [
+            c for c in todos_los_cargos if c not in cargos_origen_sel
+        ] or todos_los_cargos
 
-        emps_sel = st.sidebar.multiselect(
-            "1. Seleccionar Colaborador(es):",
-            lista_empleados_nombres,
-            key="sel_remplazo",
+        # Preseleccionar TÉCNICO DE OPERACIONES si está en las opciones válidas
+        idx_default_cargo = (
+            cargos_destino_validos.index("TÉCNICO DE OPERACIONES")
+            if "TÉCNICO DE OPERACIONES" in cargos_destino_validos
+            else 0
         )
+
         cargo_destino_sel = st.sidebar.selectbox(
-            "2. Cargo secundario a cubrir:", cargos_disponibles
+            "2. Cargo secundario a cubrir:",
+            cargos_destino_validos,
+            index=idx_default_cargo,
+            key="sel_cargo_destino_poli",
         )
 
         if st.sidebar.button("➕ Agregar Polivalencia"):
@@ -629,12 +648,30 @@ if df_empleados is not None:
                     df_empleados["NOMBRE"] == emp_nombre
                 ].iloc[0]
                 cod = str(row_emp["CODIGO"]).strip()
-                c_orig = row_emp["CARGO"]
+                c_orig = str(row_emp["CARGO"]).strip().upper()
 
-                if not any(
-                    item["CODIGO"] == cod
-                    for item in st.session_state.lista_reemplazos
-                ):
+                if c_orig == cargo_destino_sel:
+                    st.sidebar.error(
+                        f"⚠️ {emp_nombre} ya pertenece a {c_orig}. Elige un cargo diferente."
+                    )
+                    continue
+
+                # Actualizar si ya existía o agregar nuevo
+                idx_ex = next(
+                    (
+                        i
+                        for i, item in enumerate(
+                            st.session_state.lista_reemplazos
+                        )
+                        if item["CODIGO"] == cod
+                    ),
+                    None,
+                )
+                if idx_ex is not None:
+                    st.session_state.lista_reemplazos[idx_ex][
+                        "CARGO A CUBRIR"
+                    ] = cargo_destino_sel
+                else:
                     st.session_state.lista_reemplazos.append(
                         {
                             "CODIGO": cod,
@@ -656,7 +693,8 @@ if df_empleados is not None:
                 st.session_state.lista_reemplazos = []
 
             for item in st.session_state.lista_reemplazos:
-                reemplazos_config[item["CODIGO"]] = item["CARGO A CUBRIR"]
+                if item["CARGO ORIGEN"] != item["CARGO A CUBRIR"]:
+                    reemplazos_config[item["CODIGO"]] = item["CARGO A CUBRIR"]
 
     # SECCIÓN SOBRE TIEMPO
     st.sidebar.markdown("---")
@@ -977,7 +1015,12 @@ def generar_malla_matriz(
     for _, emp in df_personal.iterrows():
         cod = str(emp["CODIGO"]).strip()
         cargo_original = str(emp["CARGO"]).strip().upper()
-        cargo_secundario = mapa_reemplazos.get(cod, None)
+        cargo_sec_raw = mapa_reemplazos.get(cod, None)
+        cargo_secundario = (
+            cargo_sec_raw
+            if cargo_sec_raw and cargo_sec_raw != cargo_original
+            else None
+        )
         max_st = mapa_sobretiempo.get(cod, 0)
         hist = info_historial.get(cod, {})
 
@@ -1508,7 +1551,7 @@ def generar_malla_matriz(
                         break
 
         # ==============================================================================
-        # ETAPA 5: COBERTURA INTER-CARGO CON ROTACIÓN EQUITATIVA Y ENROQUE DE DESCANSOS
+        # ETAPA 5: COBERTURA INTER-CARGO CON ROTACIÓN EQUITATIVA Y ENROQUE UNIVERSAL
         # ==============================================================================
         sin_tarea_aun = sorted(
             [
@@ -1580,30 +1623,23 @@ def generar_malla_matriz(
                         sin_tarea_aun.remove(cod_poli)
                         break
 
-        # 5B. ENROQUE INTELIGENTE DE DESCANSOS PARA COBERTURA INTER-CARGO
+        # 5B. ENROQUE UNIVERSAL: Si quedó personal sin asignar (AO) mientras faltan turnos
+        #     en el cargo secundario (ej. Técnico de Operaciones), intercambiamos con
+        #     cualquier compañero del mismo cargo original que hoy tenga turno regular
+        #     para que el polivalente compatible suba a cubrir Técnico y el excedente cubra Auxiliar.
         for cod_sin_t in list(sin_tarea_aun):
             d_sin = programacion_matriz[cod_sin_t]
-            cargo_sec = d_sin.get("CARGO_SECUNDARIO")
-            if not cargo_sec:
-                continue
+            cargo_orig_sin = d_sin["CARGO_ORIGINAL"]
 
-            turnos_faltantes_sec = demandas_dia_actual.get(cargo_sec, [])
-            if not turnos_faltantes_sec:
-                continue
-
-            candidatos_enroque = sorted(
+            # Buscar cargos secundarios habilitados en este grupo de cargo original que aún tengan faltantes
+            polivalentes_grupo = sorted(
                 [
                     c
                     for c in disponibles_hoy
-                    if programacion_matriz[c]["CARGO_SECUNDARIO"] == cargo_sec
-                    and programacion_matriz[c]["HISTORIAL_CARGOS_DIARIOS"].get(
-                        col_nombre
-                    )
-                    == programacion_matriz[c]["CARGO_ORIGINAL"]
-                    and programacion_matriz[c]["HISTORIAL_TURNOS_LIMPIOS"].get(
-                        col_nombre
-                    )
-                    not in NO_WORKING_TERMS
+                    if programacion_matriz[c]["CARGO_ORIGINAL"]
+                    == cargo_orig_sin
+                    and programacion_matriz[c].get("CARGO_SECUNDARIO")
+                    is not None
                 ],
                 key=lambda c: (
                     programacion_matriz[c]["COBERTURAS_SEC_POR_SEMANA"][
@@ -1614,88 +1650,212 @@ def generar_malla_matriz(
             )
 
             enroque_exitoso = False
-            for turno_tec_pend in list(turnos_faltantes_sec):
-                dt_ent_tec, dt_sal_tec = calcular_datetimes_turno(
-                    fecha_col, turno_tec_pend
-                )
-                if not dt_ent_tec:
+            for cod_poli_cand in polivalentes_grupo:
+                d_poli_cand = programacion_matriz[cod_poli_cand]
+                cargo_sec = d_poli_cand.get("CARGO_SECUNDARIO")
+                turnos_faltantes_sec = demandas_dia_actual.get(cargo_sec, [])
+                if not turnos_faltantes_sec:
                     continue
 
-                for cod_pol_ocup in candidatos_enroque:
-                    d_ocup = programacion_matriz[cod_pol_ocup]
-                    turno_aux_actual = d_ocup["HISTORIAL_TURNOS_LIMPIOS"].get(
-                        col_nombre
-                    )
+                # Caso 1: El polivalente candidato ya está trabajando hoy en su cargo original (ej. 11:00-19:00 Auxiliar)
+                # y el que quedó en AO (cod_sin_t) puede tomar ese turno de Auxiliar para liberarlo hacia Técnico.
+                if (
+                    cod_poli_cand != cod_sin_t
+                    and d_poli_cand["HISTORIAL_CARGOS_DIARIOS"].get(col_nombre)
+                    == cargo_orig_sin
+                    and d_poli_cand["HISTORIAL_TURNOS_LIMPIOS"].get(col_nombre)
+                    not in NO_WORKING_TERMS
+                ):
+                    turno_aux_actual = d_poli_cand[
+                        "HISTORIAL_TURNOS_LIMPIOS"
+                    ].get(col_nombre)
                     dt_ent_aux, dt_sal_aux = calcular_datetimes_turno(
                         fecha_col, turno_aux_actual
-                    )
-                    if not dt_ent_aux:
-                        continue
-
-                    min_desc_ocup = (
-                        24.0 if d_ocup.get("VIENE_DE_DESCANSO") else 12.0
                     )
                     min_desc_sin = (
                         24.0 if d_sin.get("VIENE_DE_DESCANSO") else 12.0
                     )
-
-                    ocup_puede_ir_a_tec = calcular_descanso_suficiente(
-                        d_ocup.get("SALIDA_PREV_AYER_DT"),
-                        dt_ent_tec,
-                        min_horas=min_desc_ocup,
+                    min_desc_poli = (
+                        24.0 if d_poli_cand.get("VIENE_DE_DESCANSO") else 12.0
                     )
-                    sin_puede_tomar_aux = calcular_descanso_suficiente(
+
+                    if dt_ent_aux and calcular_descanso_suficiente(
                         d_sin.get("SALIDA_PREV_AYER_DT"),
                         dt_ent_aux,
                         min_horas=min_desc_sin,
-                    )
+                    ):
+                        for turno_tec_pend in list(turnos_faltantes_sec):
+                            dt_ent_tec, dt_sal_tec = calcular_datetimes_turno(
+                                fecha_col, turno_tec_pend
+                            )
+                            if dt_ent_tec and calcular_descanso_suficiente(
+                                d_poli_cand.get("SALIDA_PREV_AYER_DT"),
+                                dt_ent_tec,
+                                min_horas=min_desc_poli,
+                            ):
+                                sufijo_cargo = (
+                                    " TO"
+                                    if "TÉCNICO" in cargo_sec
+                                    or "TECNICO" in cargo_sec
+                                    else (
+                                        " AN"
+                                        if "ANALISTA" in cargo_sec
+                                        else ""
+                                    )
+                                )
+                                programacion_matriz[cod_poli_cand][
+                                    col_nombre
+                                ] = f"{turno_tec_pend}{sufijo_cargo}"
+                                d_poli_cand["HISTORIAL_CARGOS_DIARIOS"][
+                                    col_nombre
+                                ] = cargo_sec
+                                d_poli_cand["HISTORIAL_TURNOS_LIMPIOS"][
+                                    col_nombre
+                                ] = turno_tec_pend
+                                d_poli_cand["ULTIMA_FRANJA"] = clasificar_franja(
+                                    turno_tec_pend
+                                )
+                                d_poli_cand["SALIDA_PREVIA_DT"] = dt_sal_tec
+                                d_poli_cand["COBERTURAS_SEC_POR_SEMANA"][
+                                    semana_actual_idx
+                                ] += 1
+                                d_poli_cand["COBERTURAS_SEC_TOTAL"] += 1
 
-                    if ocup_puede_ir_a_tec and sin_puede_tomar_aux:
-                        sufijo_cargo = (
-                            " TO"
-                            if "TÉCNICO" in cargo_sec
-                            or "TECNICO" in cargo_sec
-                            else (" AN" if "ANALISTA" in cargo_sec else "")
+                                programacion_matriz[cod_sin_t][
+                                    col_nombre
+                                ] = turno_aux_actual
+                                d_sin["HISTORIAL_CARGOS_DIARIOS"][
+                                    col_nombre
+                                ] = cargo_orig_sin
+                                d_sin["HISTORIAL_TURNOS_LIMPIOS"][
+                                    col_nombre
+                                ] = turno_aux_actual
+                                d_sin["ULTIMA_FRANJA"] = clasificar_franja(
+                                    turno_aux_actual
+                                )
+                                d_sin["SALIDA_PREVIA_DT"] = dt_sal_aux
+                                d_sin["VIENE_DE_DESCANSO"] = False
+                                d_sin["DIAS_SEGUIDOS_TRABAJADOS"] += 1
+
+                                turnos_faltantes_sec.remove(turno_tec_pend)
+                                sin_tarea_aun.remove(cod_sin_t)
+                                enroque_exitoso = True
+                                break
+
+                if enroque_exitoso:
+                    break
+
+                # Caso 2: El polivalente candidato es el mismo que quedó en AO (cod_poli_cand == cod_sin_t)
+                # pero salió tarde ayer, así que intercambia con CUALQUIER compañero del cargo original
+                # que hoy tenga un turno compatible (ej. 19:00-27:00) y pueda cubrir el turno temprano de Técnico.
+                if cod_poli_cand == cod_sin_t:
+                    companeros_ocupados = [
+                        c
+                        for c in disponibles_hoy
+                        if c != cod_sin_t
+                        and programacion_matriz[c]["CARGO_ORIGINAL"]
+                        == cargo_orig_sin
+                        and programacion_matriz[c][
+                            "HISTORIAL_CARGOS_DIARIOS"
+                        ].get(col_nombre)
+                        == cargo_orig_sin
+                        and programacion_matriz[c][
+                            "HISTORIAL_TURNOS_LIMPIOS"
+                        ].get(col_nombre)
+                        not in NO_WORKING_TERMS
+                    ]
+                    for turno_tec_pend in list(turnos_faltantes_sec):
+                        dt_ent_tec, dt_sal_tec = calcular_datetimes_turno(
+                            fecha_col, turno_tec_pend
                         )
-                        programacion_matriz[cod_pol_ocup][
-                            col_nombre
-                        ] = f"{turno_tec_pend}{sufijo_cargo}"
-                        d_ocup["HISTORIAL_CARGOS_DIARIOS"][
-                            col_nombre
-                        ] = cargo_sec
-                        d_ocup["HISTORIAL_TURNOS_LIMPIOS"][
-                            col_nombre
-                        ] = turno_tec_pend
-                        d_ocup["ULTIMA_FRANJA"] = clasificar_franja(
-                            turno_tec_pend
-                        )
-                        d_ocup["SALIDA_PREVIA_DT"] = dt_sal_tec
-                        d_ocup["COBERTURAS_SEC_POR_SEMANA"][
-                            semana_actual_idx
-                        ] += 1
-                        d_ocup["COBERTURAS_SEC_TOTAL"] += 1
+                        if not dt_ent_tec:
+                            continue
 
-                        programacion_matriz[cod_sin_t][
-                            col_nombre
-                        ] = turno_aux_actual
-                        d_sin["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = d_sin[
-                            "CARGO_ORIGINAL"
-                        ]
-                        d_sin["HISTORIAL_TURNOS_LIMPIOS"][
-                            col_nombre
-                        ] = turno_aux_actual
-                        d_sin["ULTIMA_FRANJA"] = clasificar_franja(
-                            turno_aux_actual
-                        )
-                        d_sin["SALIDA_PREVIA_DT"] = dt_sal_aux
-                        d_sin["VIENE_DE_DESCANSO"] = False
-                        d_sin["DIAS_SEGUIDOS_TRABAJADOS"] += 1
+                        for cod_comp in companeros_ocupados:
+                            d_comp = programacion_matriz[cod_comp]
+                            # Solo si el compañero también es polivalente hacia ese cargo secundario
+                            if d_comp.get("CARGO_SECUNDARIO") != cargo_sec:
+                                continue
 
-                        turnos_faltantes_sec.remove(turno_tec_pend)
-                        sin_tarea_aun.remove(cod_sin_t)
-                        enroque_exitoso = True
-                        break
+                            turno_comp_act = d_comp[
+                                "HISTORIAL_TURNOS_LIMPIOS"
+                            ].get(col_nombre)
+                            dt_ent_c, dt_sal_c = calcular_datetimes_turno(
+                                fecha_col, turno_comp_act
+                            )
+                            if not dt_ent_c:
+                                continue
 
+                            min_desc_comp = (
+                                24.0
+                                if d_comp.get("VIENE_DE_DESCANSO")
+                                else 12.0
+                            )
+                            min_desc_sin = (
+                                24.0
+                                if d_sin.get("VIENE_DE_DESCANSO")
+                                else 12.0
+                            )
+
+                            if calcular_descanso_suficiente(
+                                d_comp.get("SALIDA_PREV_AYER_DT"),
+                                dt_ent_tec,
+                                min_horas=min_desc_comp,
+                            ) and calcular_descanso_suficiente(
+                                d_sin.get("SALIDA_PREV_AYER_DT"),
+                                dt_ent_c,
+                                min_horas=min_desc_sin,
+                            ):
+                                sufijo_cargo = (
+                                    " TO"
+                                    if "TÉCNICO" in cargo_sec
+                                    or "TECNICO" in cargo_sec
+                                    else (
+                                        " AN"
+                                        if "ANALISTA" in cargo_sec
+                                        else ""
+                                    )
+                                )
+                                programacion_matriz[cod_comp][
+                                    col_nombre
+                                ] = f"{turno_tec_pend}{sufijo_cargo}"
+                                d_comp["HISTORIAL_CARGOS_DIARIOS"][
+                                    col_nombre
+                                ] = cargo_sec
+                                d_comp["HISTORIAL_TURNOS_LIMPIOS"][
+                                    col_nombre
+                                ] = turno_tec_pend
+                                d_comp["ULTIMA_FRANJA"] = clasificar_franja(
+                                    turno_tec_pend
+                                )
+                                d_comp["SALIDA_PREVIA_DT"] = dt_sal_tec
+                                d_comp["COBERTURAS_SEC_POR_SEMANA"][
+                                    semana_actual_idx
+                                ] += 1
+                                d_comp["COBERTURAS_SEC_TOTAL"] += 1
+
+                                programacion_matriz[cod_sin_t][
+                                    col_nombre
+                                ] = turno_comp_act
+                                d_sin["HISTORIAL_CARGOS_DIARIOS"][
+                                    col_nombre
+                                ] = cargo_orig_sin
+                                d_sin["HISTORIAL_TURNOS_LIMPIOS"][
+                                    col_nombre
+                                ] = turno_comp_act
+                                d_sin["ULTIMA_FRANJA"] = clasificar_franja(
+                                    turno_comp_act
+                                )
+                                d_sin["SALIDA_PREVIA_DT"] = dt_sal_c
+                                d_sin["VIENE_DE_DESCANSO"] = False
+                                d_sin["DIAS_SEGUIDOS_TRABAJADOS"] += 1
+
+                                turnos_faltantes_sec.remove(turno_tec_pend)
+                                sin_tarea_aun.remove(cod_sin_t)
+                                enroque_exitoso = True
+                                break
+                        if enroque_exitoso:
+                            break
                 if enroque_exitoso:
                     break
 
