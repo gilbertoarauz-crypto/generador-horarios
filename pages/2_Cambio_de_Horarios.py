@@ -1,5 +1,7 @@
 from datetime import datetime, date, time, timedelta
 import io
+import gspread
+from google.oauth2.service_account import Credentials
 import pandas as pd
 import streamlit as st
 from fpdf import FPDF
@@ -185,6 +187,96 @@ MESES_LARGO_ES = {
     12: "diciembre",
 }
 
+COLUMNAS_HISTORIAL = [
+    "REF",
+    "COGIDO",
+    "FECHA DE SOLICITUD",
+    "FECHA DE CAMBIO",
+    "HORA DE CAMBIO",
+    "RESPONSABLE DEL CAMBIO",
+    "OBSERVACIONES",
+    "Stamp",
+]
+
+
+def limpiar_codigo(val):
+    if pd.isna(val) or val is None:
+        return ""
+    s = str(val).strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    return s
+
+
+# ==========================================
+# CONEXIÓN PERMANENTE A GOOGLE SHEETS
+# ==========================================
+def obtener_hoja_google_sheets():
+    """Conecta con la hoja de cálculo en Google Drive usando gcp_service_account en Secrets."""
+    if "gcp_service_account" not in st.secrets or "SHEET_ID" not in st.secrets:
+        return None
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    creds = Credentials.from_service_account_info(
+        dict(st.secrets["gcp_service_account"]), scopes=scopes
+    )
+    client = gspread.authorize(creds)
+    spreadsheet = client.open_by_key(st.secrets["SHEET_ID"])
+    nombres_hojas = [ws.title for ws in spreadsheet.worksheets()]
+    if "HISTORIAL DE CAMBIOS (2)" in nombres_hojas:
+        return spreadsheet.worksheet("HISTORIAL DE CAMBIOS (2)")
+    if "HISTORIAL" in nombres_hojas:
+        return spreadsheet.worksheet("HISTORIAL")
+    return spreadsheet.sheet1
+
+
+def leer_historial_desde_gsheets():
+    """Lee todos los registros acumulados desde Google Sheets."""
+    try:
+        ws = obtener_hoja_google_sheets()
+        if ws is None:
+            return pd.DataFrame(columns=COLUMNAS_HISTORIAL), False
+        records = ws.get_all_records()
+        if not records:
+            return pd.DataFrame(columns=COLUMNAS_HISTORIAL), True
+        df_h = pd.DataFrame(records)
+        df_h.columns = [str(c).strip() for c in df_h.columns]
+        if "COGIDO" in df_h.columns:
+            df_h = df_h[df_h["COGIDO"].astype(str).str.strip() != ""].copy()
+            df_h["COGIDO"] = df_h["COGIDO"].apply(limpiar_codigo)
+        return df_h, True
+    except Exception:
+        return pd.DataFrame(columns=COLUMNAS_HISTORIAL), False
+
+
+def agregar_fila_en_gsheets(fila_dict: dict):
+    """Inserta el nuevo registro en la fila 2 (arriba del historial) en Google Sheets."""
+    try:
+        ws = obtener_hoja_google_sheets()
+        if ws is None:
+            return False, "Faltan credenciales SHEET_ID o gcp_service_account en Secrets."
+
+        encabezados = ws.row_values(1)
+        if not encabezados:
+            ws.append_row(COLUMNAS_HISTORIAL)
+            encabezados = COLUMNAS_HISTORIAL
+
+        nueva_fila_lista = []
+        for col in encabezados:
+            val = fila_dict.get(col, "")
+            if isinstance(val, (pd.Timestamp, datetime)):
+                val = val.strftime("%Y-%m-%d %H:%M:%S")
+            elif isinstance(val, date):
+                val = val.strftime("%Y-%m-%d")
+            nueva_fila_lista.append(str(val) if val is not None else "")
+
+        ws.insert_row(nueva_fila_lista, index=2, value_input_option="USER_ENTERED")
+        return True, "Guardado en Google Sheets en tiempo real."
+    except Exception as e:
+        return False, f"Error al escribir en Google Sheets: {e}"
+
 
 # ==========================================
 # UTILIDADES DE LIMPIEZA Y LECTURA UNIVERSAL
@@ -206,15 +298,6 @@ def formatear_hora_celda(val):
         return "24:00"
     if len(s) >= 5 and ":" in s:
         return s[:5]
-    return s
-
-
-def limpiar_codigo(val):
-    if pd.isna(val) or val is None:
-        return ""
-    s = str(val).strip()
-    if s.endswith(".0"):
-        s = s[:-2]
     return s
 
 
@@ -402,18 +485,7 @@ def procesar_archivo_excel(file_bytes: bytes):
             df_prog = df_norm
             break
 
-    df_hist = pd.DataFrame(
-        columns=[
-            "REF",
-            "COGIDO",
-            "FECHA DE SOLICITUD",
-            "FECHA DE CAMBIO",
-            "HORA DE CAMBIO",
-            "RESPONSABLE DEL CAMBIO",
-            "OBSERVACIONES",
-            "Stamp",
-        ]
-    )
+    df_hist = pd.DataFrame()
     hist_sheet = (
         "HISTORIAL DE CAMBIOS (2)"
         if "HISTORIAL DE CAMBIOS (2)" in sheets
@@ -432,7 +504,6 @@ def procesar_archivo_excel(file_bytes: bytes):
 
 
 def obtener_resumen_anual_operador(df_hist: pd.DataFrame, codigo: str, anio_objetivo: int):
-    """Calcula el total de cambios en el año objetivo y el desglose mes a mes."""
     cod = limpiar_codigo(codigo)
     if not cod or df_hist.empty or "COGIDO" not in df_hist.columns:
         return 0, 0, []
@@ -472,8 +543,7 @@ def obtener_resumen_anual_operador(df_hist: pd.DataFrame, codigo: str, anio_obje
     return total_anio, total_historico, detalle_meses
 
 
-def renderizar_tarjeta_lateral_anual(codigo: str, nombre_op: str, df_hist: pd.DataFrame, anio_ref: int):
-    """Dibuja la tarjeta informativa lateral al lado de Operador 1 / Operador 2."""
+def renderizar_tarjeta_lateral_anual(codigo: str, df_hist: pd.DataFrame, anio_ref: int):
     if not codigo:
         st.markdown(
             '<div class="panel-lateral-anual-ok">📋 Ingresa un código de operador para ver sus cambios acumulados en el año.</div>',
@@ -508,6 +578,18 @@ def renderizar_tarjeta_lateral_anual(codigo: str, nombre_op: str, df_hist: pd.Da
             f'</div>',
             unsafe_allow_html=True,
         )
+
+
+def clasificar_tipo_cambio(row):
+    """Deduce la categoría del movimiento a partir del código y la hora de cambio."""
+    cod = str(row.get("COGIDO", "")).strip()
+    hora = str(row.get("HORA DE CAMBIO", "")).upper().strip()
+    obs = str(row.get("OBSERVACIONES", "")).upper().strip()
+    if "_" in cod:
+        return "Cambio con otro operador"
+    if "DESCANSO" in hora or "LIBRE" in hora or "LIBRE" in obs:
+        return "Cambio de día libre"
+    return "Cambio de horario"
 
 
 def limpiar_texto_pdf(texto):
@@ -803,23 +885,18 @@ if "prog_cargada" not in st.session_state:
     st.session_state.fecha_max = None
     st.session_state.prog_total_filas = 0
     st.session_state.lista_responsables = list(RESPONSABLES_DEFAULT)
-    st.session_state.historial_cambios = pd.DataFrame(
-        columns=[
-            "REF",
-            "COGIDO",
-            "FECHA DE SOLICITUD",
-            "FECHA DE CAMBIO",
-            "HORA DE CAMBIO",
-            "RESPONSABLE DEL CAMBIO",
-            "OBSERVACIONES",
-            "Stamp",
-        ]
-    )
     st.session_state.mostrar_cargador = True
+
+# Cargar historial persistente desde Google Sheets al iniciar sesión
+if "historial_sincronizado_gs" not in st.session_state:
+    df_gs, ok_gs = leer_historial_desde_gsheets()
+    st.session_state.historial_cambios = df_gs
+    st.session_state.historial_en_gsheets = ok_gs
+    st.session_state.historial_sincronizado_gs = True
 
 
 # ==========================================
-# SIDEBAR: CARGA PERSISTENTE + RANGO DE FECHAS
+# SIDEBAR: CARGA PERSISTENTE + GOOGLE SHEETS
 # ==========================================
 st.sidebar.header("📂 1. Programación Activa")
 
@@ -830,8 +907,7 @@ if st.session_state.prog_cargada and not st.session_state.mostrar_cargador:
         f"📌 **Fuente activa:**\n{st.session_state.prog_nombre_archivo}\n\n"
         f"📅 **Fecha Inicial:** {f_ini_txt}\n"
         f"📅 **Fecha Final:** {f_fin_txt}\n\n"
-        f"• **{st.session_state.prog_total_filas:,}** turnos indexados\n"
-        f"• **{len(st.session_state.historial_cambios)}** cambios en historial"
+        f"• **{st.session_state.prog_total_filas:,}** turnos indexados"
     )
     if st.sidebar.button("🔄 Cambiar / Pegar nueva programación", use_container_width=True):
         st.session_state.mostrar_cargador = True
@@ -853,7 +929,7 @@ else:
                 archivo_subido.getvalue()
             )
             st.session_state.lista_responsables = resp_l
-            if not df_h_loaded.empty:
+            if st.session_state.historial_cambios.empty and not df_h_loaded.empty:
                 st.session_state.historial_cambios = df_h_loaded.copy()
             indexar_programacion_en_sesion(df_prog_l, archivo_subido.name)
             st.rerun()
@@ -891,10 +967,25 @@ else:
         if st.sidebar.button("Cancelar cambio", use_container_width=True):
             st.session_state.mostrar_cargador = False
             st.rerun()
-    else:
-        st.sidebar.info(
-            "ℹ️ La programación quedará fija en pantalla mientras trabajas hasta que decidas cambiarla."
-        )
+
+st.sidebar.markdown("---")
+st.sidebar.header("☁️ 2. Google Drive / Sheets")
+if st.session_state.historial_en_gsheets:
+    st.sidebar.success(
+        f"🟢 Conectado a Google Sheets\n\n📊 **{len(st.session_state.historial_cambios)}** registros sincronizados."
+    )
+else:
+    st.sidebar.warning(
+        "⚠️ Verifica `SHEET_ID` y `gcp_service_account` en Secrets de Streamlit Cloud."
+    )
+
+if st.sidebar.button("🔄 Recargar desde Google Sheets", use_container_width=True):
+    df_gs, ok_gs = leer_historial_desde_gsheets()
+    st.session_state.historial_cambios = df_gs
+    st.session_state.historial_en_gsheets = ok_gs
+    if ok_gs:
+        st.sidebar.success("✅ Historial actualizado desde Google Drive.")
+    st.rerun()
 
 
 def buscar_operador_rapido(codigo: str):
@@ -935,18 +1026,17 @@ if st.session_state.prog_cargada:
     )
 else:
     st.warning(
-        "⚠️ **Aún no has cargado ninguna programación.** Sube el archivo Excel o pega los horarios en la barra lateral izquierda (o en la pestaña 4) para habilitar el calendario de fechas válidas."
+        "⚠️ **Aún no has cargado ninguna programación.** Sube el archivo Excel o pega los horarios en la barra lateral izquierda para habilitar el calendario de fechas válidas."
     )
 
 # ==========================================
-# PESTAÑAS PRINCIPALES
+# PESTAÑAS PRINCIPALES (3 PESTAÑAS)
 # ==========================================
-tab_registro, tab_boleta, tab_historial, tab_pegar_tabla = st.tabs(
+tab_registro, tab_boleta, tab_historial = st.tabs(
     [
         "📝 1. Módulo Cambio de Horario (BRT)",
         "🖨️ 2. Boleta Oficial F-ZEN-GO-07 (PDF)",
-        "📊 3. Historial Acumulado y Descarga Excel",
-        "📋 4. Tabla Tipo Excel (Pegar / Editar)",
+        "📊 3. Historial Acumulado y Estadísticas",
     ]
 )
 
@@ -1004,9 +1094,6 @@ with tab_registro:
         cod_op1, nom_op1, patio_op1 = "", "", "LOS PUEBLOS"
         cod_op2, nom_op2 = "", ""
 
-        # ==========================================================
-        # MODO A: CAMBIO DE HORARIO O DÍA LIBRE + TARJETA LATERAL ANUAL
-        # ==========================================================
         if not es_intercambio:
             st.markdown(
                 '<div class="sub-header-brt">1. DATOS DEL OPERADOR Y DETALLE DE CAMBIO (FILAS 1 A 7)</div>',
@@ -1025,7 +1112,6 @@ with tab_registro:
             with col_op_lat:
                 renderizar_tarjeta_lateral_anual(
                     cod_op1,
-                    nom_op1,
                     st.session_state.historial_cambios,
                     anio_consulta,
                 )
@@ -1109,15 +1195,11 @@ with tab_registro:
                     r_cols[5].caption("—")
                     r_cols[6].caption("—")
 
-        # ==========================================================
-        # MODO B: INTERCAMBIO ENTRE 2 OPERADORES + TARJETAS LATERALES
-        # ==========================================================
         else:
             st.markdown(
                 '<div class="sub-header-brt">2. INTERCAMBIO ENTRE OPERADORES (FILAS 1 A 7)</div>',
                 unsafe_allow_html=True,
             )
-            # Fila lateral para Operador 1
             c1_cod, c1_nom, c1_lat = st.columns([0.9, 1.8, 1.8])
             with c1_cod:
                 cod_op1 = limpiar_codigo(st.text_input("Operador 1 (Código)", value="82601"))
@@ -1131,12 +1213,10 @@ with tab_registro:
             with c1_lat:
                 renderizar_tarjeta_lateral_anual(
                     cod_op1,
-                    nom_op1,
                     st.session_state.historial_cambios,
                     anio_consulta,
                 )
 
-            # Fila lateral para Operador 2
             c2_cod, c2_nom, c2_lat = st.columns([0.9, 1.8, 1.8])
             with c2_cod:
                 cod_op2 = limpiar_codigo(st.text_input("Operador 2 (Código)", value="82602"))
@@ -1150,7 +1230,6 @@ with tab_registro:
             with c2_lat:
                 renderizar_tarjeta_lateral_anual(
                     cod_op2,
-                    nom_op2,
                     st.session_state.historial_cambios,
                     anio_consulta,
                 )
@@ -1229,7 +1308,7 @@ with tab_registro:
 
         st.markdown("---")
         if st.button(
-            "✅ Guardar Cambio en Historial y Generar Boleta F-ZEN-GO-07",
+            "✅ Guardar en Google Sheets y Generar Boleta F-ZEN-GO-07",
             type="primary",
             use_container_width=True,
         ):
@@ -1273,30 +1352,34 @@ with tab_registro:
                     )
                 else:
                     ref_num = (fecha_solicitud - date(1899, 12, 30)).days
-                    nueva_fila = pd.DataFrame(
-                        [
-                            {
-                                "REF": ref_num,
-                                "COGIDO": codigo_registro,
-                                "FECHA DE SOLICITUD": pd.Timestamp(fecha_solicitud),
-                                "FECHA DE CAMBIO": pd.Timestamp(
-                                    datetime.strptime(
-                                        fecha_cambio_principal, "%d/%m/%Y"
-                                    ).date()
-                                ),
-                                "HORA DE CAMBIO": hora_cambio_resumen,
-                                "RESPONSABLE DEL CAMBIO": responsable,
-                                "OBSERVACIONES": motivo_final,
-                                "Stamp": datetime.now().replace(microsecond=0),
-                            }
-                        ]
+                    nuevo_registro = {
+                        "REF": ref_num,
+                        "COGIDO": codigo_registro,
+                        "FECHA DE SOLICITUD": pd.Timestamp(fecha_solicitud),
+                        "FECHA DE CAMBIO": pd.Timestamp(
+                            datetime.strptime(
+                                fecha_cambio_principal, "%d/%m/%Y"
+                            ).date()
+                        ),
+                        "HORA DE CAMBIO": hora_cambio_resumen,
+                        "RESPONSABLE DEL CAMBIO": responsable,
+                        "OBSERVACIONES": motivo_final,
+                        "Stamp": datetime.now().replace(microsecond=0),
+                    }
+                    df_actualizado = pd.concat(
+                        [pd.DataFrame([nuevo_registro]), df_h_actual], ignore_index=True
                     )
-                    st.session_state.historial_cambios = pd.concat(
-                        [nueva_fila, df_h_actual], ignore_index=True
-                    )
-                    st.success(
-                        f"✅ Registro guardado y sumado al historial ({len(st.session_state.historial_cambios)} registros totales). Ve a la pestaña **2. Boleta Oficial F-ZEN-GO-07 (PDF)** para descargar."
-                    )
+                    st.session_state.historial_cambios = df_actualizado
+
+                    ok_gs, msg_gs = agregar_fila_en_gsheets(nuevo_registro)
+                    if ok_gs:
+                        st.success(
+                            f"✅ Registro guardado en Google Sheets ({len(df_actualizado)} registros totales). Ve a la pestaña **2. Boleta Oficial F-ZEN-GO-07 (PDF)** para descargar."
+                        )
+                    else:
+                        st.warning(
+                            f"✅ Registro añadido en pantalla ({len(df_actualizado)} registros), pero no se sincronizó con Google Sheets: {msg_gs}"
+                        )
 
                 st.session_state.boleta_activa = {
                     "modalidad": modalidad,
@@ -1403,15 +1486,157 @@ with tab_boleta:
                 )
 
 # ------------------------------------------
-# TAB 3: HISTORIAL ACUMULADO Y EXPORTACIÓN EXCEL
+# TAB 3: HISTORIAL ACUMULADO, GRÁFICAS Y TOP 10
 # ------------------------------------------
 with tab_historial:
-    st.subheader("📊 Historial Acumulado de Cambios")
-    df_h_show = st.session_state.historial_cambios
+    st.subheader("📊 Panel Estadístico e Historial Acumulado")
+    df_h_show = st.session_state.historial_cambios.copy()
 
+    if df_h_show.empty:
+        st.info("ℹ️ Aún no hay registros en el historial para graficar.")
+    else:
+        # Preparar columnas analíticas (Mes y Tipo de Cambio)
+        f_cambio = pd.to_datetime(df_h_show.get("FECHA DE CAMBIO"), errors="coerce")
+        f_sol = pd.to_datetime(df_h_show.get("FECHA DE SOLICITUD"), errors="coerce")
+        df_h_show["FECHA_ANALISIS"] = f_cambio.fillna(f_sol)
+        df_h_show["TIPO_MOVIMIENTO"] = df_h_show.apply(clasificar_tipo_cambio, axis=1)
+
+        # KPIs superiores
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Total de Cambios Registrados", f"{len(df_h_show):,}")
+        k2.metric(
+            "Intercambios entre Operadores",
+            f"{(df_h_show['TIPO_MOVIMIENTO'] == 'Cambio con otro operador').sum():,}",
+        )
+        k3.metric(
+            "Cambios de Horario / Día Libre",
+            f"{(df_h_show['TIPO_MOVIMIENTO'] != 'Cambio con otro operador').sum():,}",
+        )
+
+        st.markdown("---")
+        # SECCIÓN DE GRÁFICAS: CAMBIOS POR MES Y TIPOS DE CAMBIO
+        col_g1, col_g2 = st.columns([1.3, 1])
+
+        with col_g1:
+            st.markdown("##### 📅 Cambios Totales por Mes")
+            df_mes = df_h_show[df_h_show["FECHA_ANALISIS"].notna()].copy()
+            if not df_mes.empty:
+                df_mes["PERIODO"] = df_mes["FECHA_ANALISIS"].dt.to_period("M")
+                res_mes = (
+                    df_mes.groupby("PERIODO")
+                    .size()
+                    .reset_index(name="Cambios")
+                    .sort_values("PERIODO")
+                )
+                res_mes["Mes"] = res_mes["PERIODO"].apply(
+                    lambda p: f"{MESES_ES.get(p.month, p.month)} {p.year}"
+                )
+                st.bar_chart(
+                    res_mes.set_index("Mes")["Cambios"],
+                    color="#0070c0",
+                    use_container_width=True,
+                )
+            else:
+                st.caption("Sin fechas válidas para agrupar por mes.")
+
+        with col_g2:
+            st.markdown("##### 🔀 Distribución por Tipo de Cambio")
+            res_tipo = (
+                df_h_show["TIPO_MOVIMIENTO"]
+                .value_counts()
+                .reset_index()
+            )
+            res_tipo.columns = ["Tipo de Cambio", "Cantidad"]
+            st.bar_chart(
+                res_tipo.set_index("Tipo de Cambio")["Cantidad"],
+                color="#00b050",
+                use_container_width=True,
+            )
+            st.dataframe(res_tipo, use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+        # SECCIÓN TOP 10 OPERADORES + CONSULTA INDIVIDUAL POR CÓDIGO
+        col_top, col_det = st.columns([1.15, 1.35])
+
+        with col_top:
+            st.markdown("##### 🏆 Top 10 Operadores con Más Cambios")
+            # Descomponer códigos compuestos (ej. "82601_82602") para contar cada operador individualmente
+            conteo_ops = {}
+            for val in df_h_show["COGIDO"].dropna().astype(str):
+                for parte in val.split("_"):
+                    c_clean = limpiar_codigo(parte)
+                    if c_clean:
+                        conteo_ops[c_clean] = conteo_ops.get(c_clean, 0) + 1
+
+            if conteo_ops:
+                df_top10 = (
+                    pd.DataFrame(
+                        list(conteo_ops.items()), columns=["Código", "Total Cambios"]
+                    )
+                    .sort_values("Total Cambios", ascending=False)
+                    .head(10)
+                    .reset_index(drop=True)
+                )
+                df_top10.index = df_top10.index + 1
+                df_top10["Nombre Operador"] = df_top10["Código"].apply(
+                    lambda c: st.session_state.operadores_dict.get(c, {}).get(
+                        "nombre", "—"
+                    )
+                )
+                df_top10 = df_top10[["Código", "Nombre Operador", "Total Cambios"]]
+                st.dataframe(df_top10, use_container_width=True)
+            else:
+                st.caption("No hay códigos de operador registrados.")
+
+        with col_det:
+            st.markdown("##### 🔍 Consultar Detalle por Código de Operador")
+            cod_consulta = limpiar_codigo(
+                st.text_input(
+                    "Escribe el código del operador para ver su historial completo:",
+                    placeholder="Ej. 82601",
+                    key="consulta_detalle_op_tab3",
+                )
+            )
+            if cod_consulta:
+                mask_op = df_h_show["COGIDO"].astype(str).apply(
+                    lambda v: cod_consulta in [p.strip() for p in v.split("_")]
+                )
+                df_op_det = df_h_show[mask_op].copy()
+                nom_c, patio_c, ok_c = buscar_operador_rapido(cod_consulta)
+                titulo_op = f"{nom_c} ({patio_c})" if ok_c else f"Operador {cod_consulta}"
+
+                if df_op_det.empty:
+                    st.info(f"El operador **{cod_consulta}** no tiene cambios registrados.")
+                else:
+                    st.success(
+                        f"👤 **{titulo_op}** — Total: **{len(df_op_det)}** cambio(s) registrado(s)"
+                    )
+                    cols_ver = [
+                        c
+                        for c in [
+                            "FECHA DE CAMBIO",
+                            "FECHA DE SOLICITUD",
+                            "TIPO_MOVIMIENTO",
+                            "COGIDO",
+                            "HORA DE CAMBIO",
+                            "RESPONSABLE DEL CAMBIO",
+                            "OBSERVACIONES",
+                        ]
+                        if c in df_op_det.columns
+                    ]
+                    st.dataframe(
+                        df_op_det[cols_ver], use_container_width=True, hide_index=True
+                    )
+            else:
+                st.caption(
+                    "Ingresa un código arriba para ver todos sus cambios, fechas, horarios y responsables."
+                )
+
+    st.markdown("---")
+    st.markdown("##### 📋 Tabla General de Registros y Descarga Excel")
     col_f1, col_f2 = st.columns(2)
     with col_f1:
-        filtro_op = st.text_input("Buscar por Código de Operador:", "")
+        filtro_op = st.text_input("Filtrar tabla general por Código:", "")
     with col_f2:
         filtro_resp = st.multiselect(
             "Filtrar por Responsable:",
@@ -1422,7 +1647,9 @@ with tab_historial:
             else [],
         )
 
-    df_filtrado = df_h_show.copy()
+    df_filtrado = df_h_show.drop(
+        columns=["FECHA_ANALISIS", "TIPO_MOVIMIENTO"], errors="ignore"
+    ).copy()
     if filtro_op.strip():
         df_filtrado = df_filtrado[
             df_filtrado["COGIDO"].astype(str).str.contains(filtro_op.strip(), case=False)
@@ -1435,9 +1662,13 @@ with tab_historial:
     st.caption(f"Mostrando **{len(df_filtrado)}** de **{len(df_h_show)}** registros acumulados.")
     st.dataframe(df_filtrado, use_container_width=True, hide_index=True)
 
+    # Exportar Excel limpio (sin columnas auxiliares internas)
+    df_export = st.session_state.historial_cambios.drop(
+        columns=["FECHA_ANALISIS", "TIPO_MOVIMIENTO"], errors="ignore"
+    )
     buffer_xlsx = io.BytesIO()
     with pd.ExcelWriter(buffer_xlsx, engine="openpyxl") as writer:
-        df_h_show.to_excel(
+        df_export.to_excel(
             writer, sheet_name="HISTORIAL DE CAMBIOS (2)", index=False
         )
         pd.DataFrame({"NOMBRE": st.session_state.lista_responsables}).to_excel(
@@ -1452,55 +1683,3 @@ with tab_historial:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         type="primary",
     )
-
-# ------------------------------------------
-# TAB 4: CUADRÍCULA INTERACTIVA TIPO EXCEL (CTRL + V)
-# ------------------------------------------
-with tab_pegar_tabla:
-    st.subheader("📋 Cuadrícula Tipo Excel — Pega o Edita Horarios Directamente")
-    st.markdown(
-        "Haz clic en la primera celda (`Fecha`), presiona **`Ctrl + V`** para pegar las filas copiadas desde Excel y luego pulsa **Guardar programación en sesión**."
-    )
-
-    plantilla_excel = pd.DataFrame(
-        [
-            {
-                "Fecha": "",
-                "Tarea": "",
-                "CODIGO": "",
-                "NOMBRE": "",
-                "H.Inicial": "",
-                "origen": "",
-                "H. Final": "",
-                "Patio Final": "",
-                "PADMIN": "",
-            }
-            for _ in range(15)
-        ]
-    )
-
-    df_editor = st.data_editor(
-        plantilla_excel,
-        num_rows="dynamic",
-        use_container_width=True,
-        key="editor_excel_grid",
-    )
-
-    if st.button(
-        "💾 Fijar programación de esta cuadrícula en sesión",
-        type="primary",
-    ):
-        df_norm_grid = normalizar_tabla_programacion(df_editor)
-        if not df_norm_grid.empty:
-            indexar_programacion_en_sesion(
-                df_norm_grid,
-                f"Cuadrícula Excel ({len(df_norm_grid)} turnos - {datetime.now().strftime('%H:%M')})",
-            )
-            st.success(
-                f"✅ Se cargaron **{len(df_norm_grid)}** turnos desde la cuadrícula. Ya puedes ir a la pestaña 1."
-            )
-            st.rerun()
-        else:
-            st.warning(
-                "⚠️ Asegúrate de que al menos las columnas **Fecha** y **CODIGO** tengan datos válidos antes de guardar."
-            )
