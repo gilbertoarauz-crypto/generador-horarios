@@ -606,7 +606,6 @@ if df_empleados is not None:
             key="sel_remplazo",
         )
 
-        # Filtrar cargos origen de los seleccionados para evitar asignar el mismo cargo
         cargos_origen_sel = set()
         if emps_sel:
             cargos_origen_sel = set(
@@ -628,7 +627,6 @@ if df_empleados is not None:
             c for c in todos_los_cargos if c not in cargos_origen_sel
         ] or todos_los_cargos
 
-        # Preseleccionar TÉCNICO DE OPERACIONES si está en las opciones válidas
         idx_default_cargo = (
             cargos_destino_validos.index("TÉCNICO DE OPERACIONES")
             if "TÉCNICO DE OPERACIONES" in cargos_destino_validos
@@ -656,7 +654,6 @@ if df_empleados is not None:
                     )
                     continue
 
-                # Actualizar si ya existía o agregar nuevo
                 idx_ex = next(
                     (
                         i
@@ -1049,6 +1046,7 @@ def generar_malla_matriz(
             "SALIDA_PREV_AYER_DT": hist.get("salida_previa_dt"),
             "DIAS_SEGUIDOS_TRABAJADOS": dias_trabajados_previos.get(cod, 0),
             "POSICION_SECUENCIA_ANALISTA": 0,
+            "TURNO_PATRON_ANALISTA_HOY": None,
             "HISTORIAL_CARGOS_DIARIOS": {},
             "HISTORIAL_TURNOS_LIMPIOS": {},
             "HISTORIAL_SOBRETIEMPO": {},
@@ -1096,6 +1094,7 @@ def generar_malla_matriz(
 
         for d_e in programacion_matriz.values():
             d_e["SALIDA_PREV_AYER_DT"] = d_e.get("SALIDA_PREVIA_DT")
+            d_e["TURNO_PATRON_ANALISTA_HOY"] = None
 
         f_sem_ini = fecha_base_date + timedelta(days=semana_actual_idx * 7)
         f_sem_fin = f_sem_ini + timedelta(days=6)
@@ -1144,6 +1143,11 @@ def generar_malla_matriz(
                     d_e["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = d_e[
                         "INCIDENCIA_TIPO"
                     ]
+                    # Avanzar secuencia de analista si aplica
+                    if es_analista:
+                        d_e["POSICION_SECUENCIA_ANALISTA"] = (
+                            d_e["POSICION_SECUENCIA_ANALISTA"] + 1
+                        ) % 14
                     continue
 
             if es_analista:
@@ -1235,7 +1239,9 @@ def generar_malla_matriz(
             else:
                 disponibles_hoy.append(cod_e)
 
-        # ETAPA 2: ANALISTAS DE OPERACIONES
+        # ==============================================================================
+        # ETAPA 2: ANALISTAS DE OPERACIONES (CON SOPORTE PARA POLIVALENCIA)
+        # ==============================================================================
         analistas_hoy = [
             c
             for c in disponibles_hoy
@@ -1245,34 +1251,56 @@ def generar_malla_matriz(
             "ANALISTA DE OPERACIONES", []
         )
 
-        for cod_an in analistas_hoy:
+        analistas_ordenados = sorted(
+            analistas_hoy,
+            key=lambda c: (
+                1
+                if programacion_matriz[c]["CARGO_SECUNDARIO"] is not None
+                else 0,
+                -programacion_matriz[c]["COBERTURAS_SEC_POR_SEMANA"][
+                    semana_actual_idx
+                ],
+            ),
+        )
+
+        for cod_an in analistas_ordenados:
             d_an = programacion_matriz[cod_an]
             idx_pat = d_an["PATRON_BASE"]
             pos_actual = d_an["POSICION_SECUENCIA_ANALISTA"]
-
             turno_sugerido = patrones_analistas[idx_pat][pos_actual]
+
+            # Avanzar puntero de secuencia de 14 días para mantener rotación sincronizada
+            d_an["POSICION_SECUENCIA_ANALISTA"] = (pos_actual + 1) % 14
+            d_an["TURNO_PATRON_ANALISTA_HOY"] = turno_sugerido
+
+            if turno_sugerido in NO_WORKING_TERMS:
+                programacion_matriz[cod_an][col_nombre] = turno_sugerido
+                d_an["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = (
+                    "ANALISTA DE OPERACIONES"
+                )
+                d_an["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = turno_sugerido
+                d_an["SALIDA_PREVIA_DT"] = None
+                d_an["VIENE_DE_DESCANSO"] = True
+                d_an["DIAS_SEGUIDOS_TRABAJADOS"] = 0
+                d_an["LIBRES_POR_SEMANA"][semana_actual_idx] += 1
+                continue
+
+            # Si es polivalente y hoy hay demanda pendiente en su cargo secundario (ej. Técnico),
+            # queda sin asignar en Etapa 2 para pasar a Etapa 5 (y si no cubre, retoma su turno de Analista)
+            cargo_sec_an = d_an.get("CARGO_SECUNDARIO")
+            if cargo_sec_an and demandas_dia_actual.get(cargo_sec_an):
+                continue
 
             programacion_matriz[cod_an][col_nombre] = turno_sugerido
             d_an["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = (
                 "ANALISTA DE OPERACIONES"
             )
             d_an["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = turno_sugerido
-
-            d_an["POSICION_SECUENCIA_ANALISTA"] = (pos_actual + 1) % 14
-
-            if turno_sugerido not in NO_WORKING_TERMS:
-                d_an["ULTIMA_FRANJA"] = clasificar_franja(turno_sugerido)
-                _, dt_salida = calcular_datetimes_turno(
-                    fecha_col, turno_sugerido
-                )
-                d_an["SALIDA_PREVIA_DT"] = dt_salida
-                d_an["VIENE_DE_DESCANSO"] = False
-                d_an["DIAS_SEGUIDOS_TRABAJADOS"] += 1
-            else:
-                d_an["SALIDA_PREVIA_DT"] = None
-                d_an["VIENE_DE_DESCANSO"] = True
-                d_an["DIAS_SEGUIDOS_TRABAJADOS"] = 0
-                d_an["LIBRES_POR_SEMANA"][semana_actual_idx] += 1
+            d_an["ULTIMA_FRANJA"] = clasificar_franja(turno_sugerido)
+            _, dt_salida = calcular_datetimes_turno(fecha_col, turno_sugerido)
+            d_an["SALIDA_PREVIA_DT"] = dt_salida
+            d_an["VIENE_DE_DESCANSO"] = False
+            d_an["DIAS_SEGUIDOS_TRABAJADOS"] += 1
 
             if turno_sugerido in req_analistas:
                 req_analistas.remove(turno_sugerido)
@@ -1623,15 +1651,14 @@ def generar_malla_matriz(
                         sin_tarea_aun.remove(cod_poli)
                         break
 
-        # 5B. ENROQUE UNIVERSAL: Si quedó personal sin asignar (AO) mientras faltan turnos
-        #     en el cargo secundario (ej. Técnico de Operaciones), intercambiamos con
-        #     cualquier compañero del mismo cargo original que hoy tenga turno regular
-        #     para que el polivalente compatible suba a cubrir Técnico y el excedente cubra Auxiliar.
+        # 5B. ENROQUE UNIVERSAL DE DESCANSOS PARA COBERTURA INTER-CARGO
         for cod_sin_t in list(sin_tarea_aun):
             d_sin = programacion_matriz[cod_sin_t]
             cargo_orig_sin = d_sin["CARGO_ORIGINAL"]
 
-            # Buscar cargos secundarios habilitados en este grupo de cargo original que aún tengan faltantes
+            if "ANALISTA" in cargo_orig_sin:
+                continue
+
             polivalentes_grupo = sorted(
                 [
                     c
@@ -1657,8 +1684,6 @@ def generar_malla_matriz(
                 if not turnos_faltantes_sec:
                     continue
 
-                # Caso 1: El polivalente candidato ya está trabajando hoy en su cargo original (ej. 11:00-19:00 Auxiliar)
-                # y el que quedó en AO (cod_sin_t) puede tomar ese turno de Auxiliar para liberarlo hacia Técnico.
                 if (
                     cod_poli_cand != cod_sin_t
                     and d_poli_cand["HISTORIAL_CARGOS_DIARIOS"].get(col_nombre)
@@ -1745,9 +1770,6 @@ def generar_malla_matriz(
                 if enroque_exitoso:
                     break
 
-                # Caso 2: El polivalente candidato es el mismo que quedó en AO (cod_poli_cand == cod_sin_t)
-                # pero salió tarde ayer, así que intercambia con CUALQUIER compañero del cargo original
-                # que hoy tenga un turno compatible (ej. 19:00-27:00) y pueda cubrir el turno temprano de Técnico.
                 if cod_poli_cand == cod_sin_t:
                     companeros_ocupados = [
                         c
@@ -1773,7 +1795,6 @@ def generar_malla_matriz(
 
                         for cod_comp in companeros_ocupados:
                             d_comp = programacion_matriz[cod_comp]
-                            # Solo si el compañero también es polivalente hacia ese cargo secundario
                             if d_comp.get("CARGO_SECUNDARIO") != cargo_sec:
                                 continue
 
@@ -1859,16 +1880,36 @@ def generar_malla_matriz(
                 if enroque_exitoso:
                     break
 
-        # Marcar únicamente los verdaderos excedentes finales como AO
+        # RESPALDO PARA ANALISTAS POLIVALENTES: Si no pudieron cubrir Técnico hoy (por regla 12h),
+        # retoman su turno normal de Analista de Operaciones en lugar de ir a AO
         for cod_e in disponibles_hoy:
             if programacion_matriz[cod_e].get(col_nombre) is None:
-                programacion_matriz[cod_e][col_nombre] = "AO"
-                programacion_matriz[cod_e]["HISTORIAL_CARGOS_DIARIOS"][
-                    col_nombre
-                ] = programacion_matriz[cod_e]["CARGO_ORIGINAL"]
-                programacion_matriz[cod_e]["HISTORIAL_TURNOS_LIMPIOS"][
-                    col_nombre
-                ] = "AO"
+                d_e = programacion_matriz[cod_e]
+                if (
+                    "ANALISTA" in d_e["CARGO_ORIGINAL"]
+                    and d_e.get("TURNO_PATRON_ANALISTA_HOY")
+                ):
+                    t_an_respaldo = d_e["TURNO_PATRON_ANALISTA_HOY"]
+                    programacion_matriz[cod_e][col_nombre] = t_an_respaldo
+                    d_e["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = (
+                        "ANALISTA DE OPERACIONES"
+                    )
+                    d_e["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = t_an_respaldo
+                    d_e["ULTIMA_FRANJA"] = clasificar_franja(t_an_respaldo)
+                    _, dt_sal_an = calcular_datetimes_turno(
+                        fecha_col, t_an_respaldo
+                    )
+                    d_e["SALIDA_PREVIA_DT"] = dt_sal_an
+                    d_e["VIENE_DE_DESCANSO"] = False
+                    d_e["DIAS_SEGUIDOS_TRABAJADOS"] += 1
+                    if t_an_respaldo in req_analistas:
+                        req_analistas.remove(t_an_respaldo)
+                else:
+                    programacion_matriz[cod_e][col_nombre] = "AO"
+                    d_e["HISTORIAL_CARGOS_DIARIOS"][col_nombre] = d_e[
+                        "CARGO_ORIGINAL"
+                    ]
+                    d_e["HISTORIAL_TURNOS_LIMPIOS"][col_nombre] = "AO"
 
         # ETAPA 6: SOBRE TIEMPO (HORAS EXTRAS - FLEXIBLE Y COBERTURA PARCIAL)
         for cargo_k, v_turnos_pendientes in demandas_dia_actual.items():
@@ -1973,6 +2014,7 @@ def generar_malla_matriz(
         "SALIDA_PREV_AYER_DT",
         "DIAS_SEGUIDOS_TRABAJADOS",
         "POSICION_SECUENCIA_ANALISTA",
+        "TURNO_PATRON_ANALISTA_HOY",
         "HISTORIAL_CARGOS_DIARIOS",
         "HISTORIAL_TURNOS_LIMPIOS",
         "HISTORIAL_SOBRETIEMPO",
