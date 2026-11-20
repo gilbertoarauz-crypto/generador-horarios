@@ -305,7 +305,7 @@ def cargar_directorio_desde_drive():
 
         return dir_map, True, f"{ws_dir.title} ({len(dir_map):,} registros)"
     except Exception as e:
-        return {}, False, str(e)
+        return {}, False, f"{type(e).__name__}: {repr(e)}"
 
 
 def leer_permisos_desde_gsheets():
@@ -335,7 +335,7 @@ def leer_permisos_desde_gsheets():
 
         return df_p, True, f"Pestaña '{ws.title}' conectada"
     except Exception as e:
-        return pd.DataFrame(columns=COLUMNAS_PERMISOS), False, f"Detalle técnico: {e}"
+        return pd.DataFrame(columns=COLUMNAS_PERMISOS), False, f"{type(e).__name__}: {repr(e)}"
 
 
 def agregar_permiso_en_gsheets(fila_dict: dict):
@@ -362,7 +362,7 @@ def agregar_permiso_en_gsheets(fila_dict: dict):
         ws.insert_row(nueva_fila_lista, index=2, value_input_option="USER_ENTERED")
         return True, f"Guardado en pestaña '{ws.title}' de Google Sheets."
     except Exception as e:
-        return False, f"Error al escribir en Google Sheets: {e}"
+        return False, f"Error al escribir en Google Sheets ({type(e).__name__}): {repr(e)}"
 
 
 def buscar_colaborador_permiso(codigo: str):
@@ -703,7 +703,7 @@ if st.session_state.permisos_en_gsheets:
     )
 else:
     st.sidebar.warning(
-        f"⚠️ No se pudo leer `SHEET_ID`:\n\n{st.session_state.get('permisos_msg_gs', '')}"
+        f"⚠️ No se pudo leer `SHEET_ID`:\n\n`{st.session_state.get('permisos_msg_gs', '')}`"
     )
 
 if st.sidebar.button("🔄 Recargar Permisos", use_container_width=True):
