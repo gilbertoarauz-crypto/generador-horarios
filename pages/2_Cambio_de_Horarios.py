@@ -251,7 +251,7 @@ def obtener_hoja_google_sheets():
         dict(st.secrets["gcp_service_account"]), scopes=scopes
     )
     client = gspread.authorize(creds)
-    spreadsheet = client.open_by_key(st.secrets["SHEET_ID"])
+    spreadsheet = client.open_by_key(str(st.secrets["SHEET_ID"]).strip())
     nombres_hojas = [ws.title for ws in spreadsheet.worksheets()]
     if "HISTORIAL DE CAMBIOS (2)" in nombres_hojas:
         return spreadsheet.worksheet("HISTORIAL DE CAMBIOS (2)")
@@ -441,7 +441,6 @@ def parsear_texto_pegado_excel(texto_tsv: str) -> pd.DataFrame:
     Parsea datos copiados de Excel desde Columna B (Fecha) hasta Columna M (Jornada)
     [12 columnas: Fecha, Tarea, Código, Nombre y Apellido, Tiempo Trabajado, Hora Inicial,
      Patio Origen, Hora Fin, Patio Final, PADMIN, TIPO, Jornada].
-    También soporta si se incluye columna A (REF -> 13 columnas).
     """
     lineas = [l for l in texto_tsv.splitlines() if l.strip()]
     if not lineas:
@@ -970,7 +969,6 @@ if "prog_cargada" not in st.session_state:
     st.session_state.lista_responsables = list(RESPONSABLES_DEFAULT)
     st.session_state.mostrar_cargador = True
 
-# Cargar historial persistente desde Google Sheets al iniciar sesión
 if "historial_sincronizado_gs" not in st.session_state:
     df_gs, ok_gs = leer_historial_desde_gsheets()
     st.session_state.historial_cambios = df_gs
@@ -1232,7 +1230,6 @@ with tab_registro:
                     jornada_dia = prog1.get("jornada", jornada_op1)
                     r_cols[2].info(f"`{prog1['horario']}` · {prog1['sercon']}")
 
-                    # En Cambio de día libre, fila 1 arranca sugerida en DESCANSO (idx 6) y fila 2+ en DISPONIBILIDAD (idx 0)
                     default_tarea_idx = (
                         6 if (modalidad == "Cambio de día libre" and idx == 0) else 0
                     )
@@ -1244,7 +1241,6 @@ with tab_registro:
                         label_visibility="collapsed",
                     )
 
-                    # Si Nueva Tarea es DESCANSO, el horario es "-" (LIBRE); para DISPONIBILIDAD o cualquier otra tarea, deja elegir Hora y Minutos
                     if nueva_tar == "DESCANSO":
                         r_cols[4].caption("Libre")
                         r_cols[5].caption("—")
@@ -1610,7 +1606,7 @@ with tab_boleta:
                 )
 
 # ------------------------------------------
-# TAB 3: HISTORIAL ACUMULADO, GRÁFICAS CON VALORES Y TOP 10
+# TAB 3: HISTORIAL ACUMULADO, 12 MESES DEL AÑO Y DRILL-DOWN POR MES
 # ------------------------------------------
 with tab_historial:
     st.subheader("📊 Panel Estadístico e Historial Acumulado")
@@ -1634,77 +1630,142 @@ with tab_historial:
         )
 
         st.markdown("---")
-        col_g1, col_g2 = st.columns([1.35, 1])
+
+        # Selector de Año y Mes para filtrar la distribución
+        df_valid_dates = df_h_show[df_h_show["FECHA_ANALISIS"].notna()].copy()
+        anios_disponibles = sorted(
+            df_valid_dates["FECHA_ANALISIS"].dt.year.dropna().astype(int).unique().tolist(),
+            reverse=True,
+        )
+        if not anios_disponibles:
+            anios_disponibles = [date.today().year]
+
+        c_filt_anio, c_filt_mes = st.columns([1, 1.5])
+        with c_filt_anio:
+            anio_sel = st.selectbox(
+                "📆 Seleccionar Año:",
+                options=anios_disponibles,
+                index=0,
+                key="filtro_anio_estadisticas",
+            )
+
+        opciones_meses_filtro = ["Todos los meses (Año completo)"] + [
+            f"{MESES_ES[m]} {anio_sel}" for m in range(1, 13)
+        ]
+        with c_filt_mes:
+            mes_sel_label = st.selectbox(
+                "🔍 Seleccionar Mes para ver detalle en Distribución:",
+                options=opciones_meses_filtro,
+                index=0,
+                key="filtro_mes_estadisticas",
+            )
+
+        col_g1, col_g2 = st.columns([1.4, 1])
 
         with col_g1:
-            st.markdown("##### 📅 Cambios Totales por Mes (Orden Cronológico)")
-            df_mes = df_h_show[df_h_show["FECHA_ANALISIS"].notna()].copy()
-            if not df_mes.empty:
-                df_mes["ORDEN_MES"] = (
-                    df_mes["FECHA_ANALISIS"].dt.year * 100
-                    + df_mes["FECHA_ANALISIS"].dt.month
-                )
-                df_mes["MES_NUM"] = df_mes["FECHA_ANALISIS"].dt.month
-                df_mes["ANIO_NUM"] = df_mes["FECHA_ANALISIS"].dt.year
+            st.markdown(f"##### 📅 Cambios Totales por Mes — Año {anio_sel} (12 Meses)")
+            df_anio_sel = df_valid_dates[
+                df_valid_dates["FECHA_ANALISIS"].dt.year == anio_sel
+            ].copy()
 
-                res_mes = (
-                    df_mes.groupby(["ORDEN_MES", "ANIO_NUM", "MES_NUM"])
-                    .size()
-                    .reset_index(name="Cambios")
-                    .sort_values("ORDEN_MES", ascending=True)
+            # Construir los 12 meses completos del año (Ene a Dic), rellenando con 0 si no hay datos
+            conteo_por_mes = (
+                df_anio_sel.groupby(df_anio_sel["FECHA_ANALISIS"].dt.month)
+                .size()
+                .to_dict()
+            )
+            filas_12_meses = []
+            for m_num in range(1, 13):
+                etiqueta_m = f"{MESES_ES[m_num]} {anio_sel}"
+                filas_12_meses.append(
+                    {
+                        "MES_NUM": m_num,
+                        "Mes": etiqueta_m,
+                        "MesCorto": MESES_ES[m_num],
+                        "Cambios": int(conteo_por_mes.get(m_num, 0)),
+                        "Seleccionado": (
+                            "Seleccionado"
+                            if mes_sel_label == etiqueta_m
+                            else "Normal"
+                        ),
+                    }
                 )
-                res_mes["Mes"] = res_mes.apply(
-                    lambda r: f"{MESES_ES.get(int(r['MES_NUM']), int(r['MES_NUM']))} {int(r['ANIO_NUM'])}",
-                    axis=1,
-                )
-                orden_cronologico = res_mes["Mes"].tolist()
+            res_mes = pd.DataFrame(filas_12_meses)
+            orden_12_meses = res_mes["MesCorto"].tolist()
 
-                base_mes = alt.Chart(res_mes).encode(
-                    x=alt.X(
-                        "Mes:N",
-                        sort=orden_cronologico,
-                        title="Mes del Año",
-                        axis=alt.Axis(labelAngle=0),
-                    ),
-                    y=alt.Y("Cambios:Q", title="Total de Cambios"),
-                    tooltip=["Mes", "Cambios"],
+            base_mes = alt.Chart(res_mes).encode(
+                x=alt.X(
+                    "MesCorto:N",
+                    sort=orden_12_meses,
+                    title=f"Meses del Año {anio_sel}",
+                    axis=alt.Axis(labelAngle=0),
+                ),
+                y=alt.Y("Cambios:Q", title="Total de Cambios"),
+                tooltip=[
+                    alt.Tooltip("Mes:N", title="Mes"),
+                    alt.Tooltip("Cambios:Q", title="Total Cambios"),
+                ],
+            )
+            barras_mes = base_mes.mark_bar(
+                cornerRadiusTopLeft=4, cornerRadiusTopRight=4
+            ).encode(
+                color=alt.condition(
+                    alt.datum.Seleccionado == "Seleccionado",
+                    alt.value("#f59e0b"),  # Resalta en ámbar si el mes está seleccionado
+                    alt.value("#0070c0"),
                 )
-                barras_mes = base_mes.mark_bar(
-                    color="#0070c0", cornerRadiusTopLeft=4, cornerRadiusTopRight=4
-                )
-                etiquetas_mes = base_mes.mark_text(
-                    align="center",
-                    baseline="bottom",
-                    dy=-4,
-                    color="#f8fafc",
-                    fontWeight="bold",
-                    fontSize=12,
-                ).encode(text="Cambios:Q")
+            )
+            etiquetas_mes = base_mes.mark_text(
+                align="center",
+                baseline="bottom",
+                dy=-4,
+                color="#f8fafc",
+                fontWeight="bold",
+                fontSize=12,
+            ).encode(text="Cambios:Q")
 
-                st.altair_chart(
-                    (barras_mes + etiquetas_mes).properties(height=300),
-                    use_container_width=True,
-                )
-                st.dataframe(
-                    res_mes[["Mes", "Cambios"]].set_index("Mes").T,
-                    use_container_width=True,
-                )
-            else:
-                st.caption("Sin fechas válidas para agrupar por mes.")
+            st.altair_chart(
+                (barras_mes + etiquetas_mes).properties(height=310),
+                use_container_width=True,
+            )
+            st.dataframe(
+                res_mes[["MesCorto", "Cambios"]].set_index("MesCorto").T,
+                use_container_width=True,
+            )
 
         with col_g2:
-            st.markdown("##### 🔀 Distribución por Tipo de Cambio")
-            res_tipo = (
-                df_h_show["TIPO_MOVIMIENTO"]
-                .value_counts()
-                .reset_index()
+            # Filtrar el dataframe de distribución según el año y mes seleccionado
+            if mes_sel_label == "Todos los meses (Año completo)":
+                df_dist = df_anio_sel.copy()
+                titulo_dist = f"🔀 Distribución por Tipo — Todo {anio_sel}"
+            else:
+                mes_num_filtro = [
+                    m for m in range(1, 13) if f"{MESES_ES[m]} {anio_sel}" == mes_sel_label
+                ][0]
+                df_dist = df_anio_sel[
+                    df_anio_sel["FECHA_ANALISIS"].dt.month == mes_num_filtro
+                ].copy()
+                titulo_dist = f"🔀 Distribución por Tipo — {mes_sel_label}"
+
+            st.markdown(f"##### {titulo_dist}")
+
+            categorias_base = [
+                "Cambio de horario",
+                "Cambio con otro operador",
+                "Cambio de día libre",
+            ]
+            conteo_tipos = df_dist["TIPO_MOVIMIENTO"].value_counts().to_dict()
+            res_tipo = pd.DataFrame(
+                [
+                    {"Tipo de Cambio": cat, "Cantidad": int(conteo_tipos.get(cat, 0))}
+                    for cat in categorias_base
+                ]
             )
-            res_tipo.columns = ["Tipo de Cambio", "Cantidad"]
 
             base_tipo = alt.Chart(res_tipo).encode(
                 x=alt.X(
                     "Tipo de Cambio:N",
-                    sort="-y",
+                    sort=categorias_base,
                     title="Tipo de Movimiento",
                     axis=alt.Axis(labelAngle=-12),
                 ),
@@ -1724,7 +1785,7 @@ with tab_historial:
             ).encode(text="Cantidad:Q")
 
             st.altair_chart(
-                (barras_tipo + etiquetas_tipo).properties(height=300),
+                (barras_tipo + etiquetas_tipo).properties(height=310),
                 use_container_width=True,
             )
             st.dataframe(res_tipo, use_container_width=True, hide_index=True)
