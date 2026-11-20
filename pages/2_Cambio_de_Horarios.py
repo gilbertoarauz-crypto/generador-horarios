@@ -79,6 +79,17 @@ st.markdown(
         font-size: 13.5px;
         margin-bottom: 12px;
     }
+    .horario-calc-box {
+        background-color: #0f2952;
+        border: 1px solid #0070c0;
+        color: #38bdf8;
+        padding: 6px 8px;
+        border-radius: 5px;
+        font-weight: bold;
+        font-size: 13px;
+        text-align: center;
+        font-family: monospace;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -118,32 +129,8 @@ TAREAS_CATALOGO = [
     "CAPACITACIÓN",
 ]
 
-JORNADAS_CATALOGO = [
-    "-",
-    "02:00-10:00",
-    "03:00-11:00",
-    "04:00-12:00",
-    "05:00-11:40",
-    "05:00-13:00",
-    "06:00-14:40",
-    "07:00-15:40",
-    "08:00-16:40",
-    "09:00-17:40",
-    "10:00-18:00",
-    "11:00-19:00",
-    "12:00-20:00",
-    "13:00-21:00",
-    "14:00-21:40",
-    "15:00-22:40",
-    "16:00-23:40",
-    "17:00-24:40",
-    "18:00-25:40",
-    "19:00-27:00",
-    "20:00-28:00",
-    "21:00-29:00",
-    "22:00-30:00",
-    "23:00-31:00",
-]
+HORAS_CATALOGO = [f"{h:02d}" for h in range(24)]
+MINUTOS_CATALOGO = [f"{m:02d}" for m in range(60)]
 
 MOTIVOS_ESTANDAR = [
     "CAMBIO AUT POR JOP",
@@ -207,6 +194,35 @@ def limpiar_codigo(val):
     if s.endswith(".0"):
         s = s[:-2]
     return s
+
+
+def normalizar_tipo_jornada(val) -> str:
+    """Normaliza el valor de la columna M (Jornada) a FULL TIME o PART TIME 6."""
+    if pd.isna(val) or val is None:
+        return "FULL TIME"
+    s = " ".join(str(val).upper().strip().split())
+    if "PART" in s or "PT" in s or "6" in s:
+        return "PART TIME 6"
+    if "FULL" in s or "FT" in s or "8" in s:
+        return "FULL TIME"
+    return s if s and s != "-" else "FULL TIME"
+
+
+def calcular_rango_horario_por_jornada(hh_str: str, mm_str: str, tipo_jornada: str) -> str:
+    """
+    Calcula la hora de fin automáticamente según el tipo de jornada del operador:
+    - PART TIME 6: 6 horas de trabajo + 30 min de descanso (+390 minutos). Ej: 12:30 -> 12:30-19:00
+    - FULL TIME: 8 horas de trabajo + 40 min de descanso (+520 minutos). Ej: 12:00 -> 12:00-20:40
+    """
+    hh = int(hh_str)
+    mm = int(mm_str)
+    inicio_min = hh * 60 + mm
+    es_pt6 = "PART TIME" in str(tipo_jornada).upper()
+    duracion_min = 390 if es_pt6 else 520  # 6h30m vs 8h40m
+    fin_min = inicio_min + duracion_min
+    fin_hh = fin_min // 60
+    fin_mm = fin_min % 60
+    return f"{hh:02d}:{mm:02d}-{fin_hh:02d}:{fin_mm:02d}"
 
 
 # ==========================================
@@ -280,7 +296,7 @@ def agregar_fila_en_gsheets(fila_dict: dict):
 
 
 # ==========================================
-# UTILIDADES DE LIMPIEZA Y LECTURA UNIVERSAL
+# UTILIDADES DE LIMPIEZA Y LECTURA UNIVERSAL (COLUMNAS B A M)
 # ==========================================
 def formatear_hora_celda(val):
     if pd.isna(val) or val == "":
@@ -306,7 +322,7 @@ def normalizar_tabla_programacion(df_raw: pd.DataFrame) -> pd.DataFrame:
     df = df_raw.copy()
     cols_upper = [str(c).strip().upper() for c in df.columns]
     if not any(k in cols_upper for k in ["CODIGO", "CÓDIGO"]):
-        for idx in range(min(10, len(df))):
+        for idx in range(min(12, len(df))):
             row_vals = [str(x).strip().upper() for x in df.iloc[idx].tolist()]
             if "CODIGO" in row_vals or "CÓDIGO" in row_vals:
                 df.columns = [str(x).strip() for x in df.iloc[idx].tolist()]
@@ -334,6 +350,8 @@ def normalizar_tabla_programacion(df_raw: pd.DataFrame) -> pd.DataFrame:
             col_map[c] = "Patio Final"
         elif cu in ["PADMIN", "PATIO"]:
             col_map[c] = "PADMIN"
+        elif cu in ["JORNADA", "TIPO JORNADA", "JORNADA LABORAL"]:
+            col_map[c] = "Jornada"
         elif "UNNAMED" in cu or "HORARIO" in cu:
             col_map[c] = "HORARIO_RAW"
 
@@ -352,7 +370,7 @@ def normalizar_tabla_programacion(df_raw: pd.DataFrame) -> pd.DataFrame:
         hi = df["H.Inicial"].apply(formatear_hora_celda) if "H.Inicial" in df.columns else ""
         hf = df["H. Final"].apply(formatear_hora_celda) if "H. Final" in df.columns else ""
         df["HORARIO_STR"] = [
-            f"{a} - {b}" if (a and b and a != "-" and b != "-") else "-"
+            f"{a}-{b}" if (a and b and a != "-" and b != "-") else "-"
             for a, b in zip(hi, hf)
         ]
 
@@ -362,12 +380,14 @@ def normalizar_tabla_programacion(df_raw: pd.DataFrame) -> pd.DataFrame:
         ("origen", "-"),
         ("Patio Final", "-"),
         ("PADMIN", "LOS PUEBLOS"),
+        ("Jornada", "FULL TIME"),
     ]:
         if col_req not in df.columns:
             df[col_req] = default_val
         else:
             df[col_req] = df[col_req].fillna(default_val).astype(str).str.strip()
 
+    df["JORNADA_NORM"] = df["Jornada"].apply(normalizar_tipo_jornada)
     return df
 
 
@@ -382,6 +402,7 @@ def indexar_programacion_en_sesion(df_norm: pd.DataFrame, nombre_fuente: str):
             operadores_dict[r["CODIGO_STR"]] = {
                 "nombre": r["NOMBRE"],
                 "patio": r["PADMIN"].upper() if r["PADMIN"] else "LOS PUEBLOS",
+                "jornada": r["JORNADA_NORM"],
             }
         for _, r in df_norm.iterrows():
             turnos_dict[(r["CODIGO_STR"], r["FECHA_DATE"])] = {
@@ -389,6 +410,7 @@ def indexar_programacion_en_sesion(df_norm: pd.DataFrame, nombre_fuente: str):
                 "sercon": r["Tarea"] if r["Tarea"] else "-",
                 "p_inicio": r["origen"] if r["origen"] else "-",
                 "p_fin": r["Patio Final"] if r["Patio Final"] else "-",
+                "jornada": r["JORNADA_NORM"],
             }
         fechas_unicas = sorted(df_norm["FECHA_DATE"].dropna().unique().tolist())
 
@@ -404,6 +426,12 @@ def indexar_programacion_en_sesion(df_norm: pd.DataFrame, nombre_fuente: str):
 
 
 def parsear_texto_pegado_excel(texto_tsv: str) -> pd.DataFrame:
+    """
+    Parsea datos copiados de Excel desde Columna B (Fecha) hasta Columna M (Jornada)
+    [12 columnas: Fecha, Tarea, Código, Nombre y Apellido, Tiempo Trabajado, Hora Inicial,
+     Patio Origen, Hora Fin, Patio Final, PADMIN, TIPO, Jornada].
+    También soporta si se incluye columna A (REF -> 13 columnas).
+    """
     lineas = [l for l in texto_tsv.splitlines() if l.strip()]
     if not lineas:
         return pd.DataFrame()
@@ -416,38 +444,70 @@ def parsear_texto_pegado_excel(texto_tsv: str) -> pd.DataFrame:
         return normalizar_tabla_programacion(df_tsv)
 
     ncols = df_tsv.shape[1]
-    if ncols >= 11:
-        cols_std = [
-            "Ref",
+    # Estructura exacta Columna B (Fecha) a Columna M (Jornada) = 12 columnas
+    if ncols == 12:
+        df_tsv.columns = [
             "Fecha",
             "Tarea",
             "CODIGO",
             "NOMBRE",
-            "W.T.",
+            "Tiempo Trabajado",
             "H.Inicial",
             "origen",
             "H. Final",
             "Patio Final",
             "PADMIN",
-        ] + [f"Extra_{i}" for i in range(ncols - 11)]
-        df_tsv.columns = cols_std
-    elif ncols >= 9:
-        cols_std = [
+            "TIPO",
+            "Jornada",
+        ]
+    # Si copiaron desde Columna A (REF) hasta Columna M (Jornada) = 13 columnas
+    elif ncols >= 13:
+        df_tsv.columns = [
+            "Ref",
             "Fecha",
             "Tarea",
             "CODIGO",
             "NOMBRE",
-            "W.T.",
+            "Tiempo Trabajado",
             "H.Inicial",
             "origen",
             "H. Final",
             "Patio Final",
-        ] + (["PADMIN"] if ncols >= 10 else [])
-        df_tsv.columns = cols_std
+            "PADMIN",
+            "TIPO",
+            "Jornada",
+        ] + [f"Extra_{i}" for i in range(ncols - 13)]
+    # Compatibilidad con pegados parciales hasta PADMIN (10 u 11 cols)
+    elif ncols == 11:
+        df_tsv.columns = [
+            "Ref",
+            "Fecha",
+            "Tarea",
+            "CODIGO",
+            "NOMBRE",
+            "Tiempo Trabajado",
+            "H.Inicial",
+            "origen",
+            "H. Final",
+            "Patio Final",
+            "PADMIN",
+        ]
+    elif ncols >= 9:
+        df_tsv.columns = [
+            "Fecha",
+            "Tarea",
+            "CODIGO",
+            "NOMBRE",
+            "Tiempo Trabajado",
+            "H.Inicial",
+            "origen",
+            "H. Final",
+            "Patio Final",
+        ] + (["PADMIN"] if ncols == 10 else [])
     return normalizar_tabla_programacion(df_tsv)
 
 
-@st.cache_data(show_spinner="Indexando programación completa...")
+@st.cache_data(show_spinner="Indexando asignación de operadores...")
 def procesar_archivo_excel(file_bytes: bytes):
     xls = pd.ExcelFile(io.BytesIO(file_bytes))
     sheets = xls.sheet_names
@@ -508,7 +568,6 @@ def obtener_fechas_validas_serie(df_h: pd.DataFrame) -> pd.Series:
     """Extrae fecha válida ignorando fechas ficticias de Excel (1899-12-30)."""
     f_cambio = pd.to_datetime(df_h.get("FECHA DE CAMBIO"), errors="coerce")
     f_sol = pd.to_datetime(df_h.get("FECHA DE SOLICITUD"), errors="coerce")
-    # Descartar fechas centinela <= 1900
     f_cambio = f_cambio.where(f_cambio.dt.year > 1900)
     f_sol = f_sol.where(f_sol.dt.year > 1900)
     return f_cambio.fillna(f_sol)
@@ -902,9 +961,9 @@ if "historial_sincronizado_gs" not in st.session_state:
 
 
 # ==========================================
-# SIDEBAR: CARGA PERSISTENTE + GOOGLE SHEETS
+# SIDEBAR: CARGA PERSISTENTE (COLUMNA B A M) + GOOGLE SHEETS
 # ==========================================
-st.sidebar.header("📂 1. Programación Activa")
+st.sidebar.header("📂 1. Asignación de Operadores")
 
 if st.session_state.prog_cargada and not st.session_state.mostrar_cargador:
     f_ini_txt = st.session_state.fecha_min.strftime("%d/%m/%Y")
@@ -915,18 +974,21 @@ if st.session_state.prog_cargada and not st.session_state.mostrar_cargador:
         f"📅 **Fecha Final:** {f_fin_txt}\n\n"
         f"• **{st.session_state.prog_total_filas:,}** turnos indexados"
     )
-    if st.sidebar.button("🔄 Cambiar / Pegar nueva programación", use_container_width=True):
+    if st.sidebar.button("🔄 Cambiar / Pegar nueva asignación", use_container_width=True):
         st.session_state.mostrar_cargador = True
         st.rerun()
 else:
+    st.sidebar.info(
+        "📌 **Importante:** Carga el archivo de **Asignación para Operadores** o pega desde la **Columna B (`Fecha`) hasta la Columna M (`Jornada`)** para detectar automáticamente si el operador es `FULL TIME` o `PART TIME 6`."
+    )
     metodo_carga = st.sidebar.radio(
-        "¿Cómo deseas cargar los horarios?",
-        ["📁 Subir archivo Excel", "📋 Pegar desde Excel (Ctrl + V)"],
+        "¿Cómo deseas cargar la asignación?",
+        ["📁 Subir archivo Excel", "📋 Pegar desde Excel (Columna B a M)"],
     )
 
     if metodo_carga == "📁 Subir archivo Excel":
         archivo_subido = st.sidebar.file_uploader(
-            "Sube CAMBIO DE HORARIOS 2026 o ASIGNACIÓN (.xlsx / .xlsm)",
+            "Sube Asignación para Operadores (.xlsx / .xlsm) con columnas B (Fecha) a M (Jornada)",
             type=["xlsx", "xlsm"],
             key="uploader_prog_persistente",
         )
@@ -941,16 +1003,16 @@ else:
             st.rerun()
     else:
         st.sidebar.caption(
-            "Copia las filas en Excel (`Ctrl + C`) desde **Fecha** hasta **PADMIN** (o toda la tabla de ASIGNACIÓN) y pégalas aquí:"
+            "Copia en Excel (`Ctrl + C`) exactamente desde la **Columna B (`Fecha`) hasta la Columna M (`Jornada`)** y pégalo aquí:"
         )
         texto_pegado = st.sidebar.text_area(
-            "Pega aquí con Ctrl + V",
+            "Pega aquí con Ctrl + V (Columna B Fecha → Columna M Jornada)",
             height=160,
-            placeholder="Pega las celdas copiadas de Excel...",
+            placeholder="Pega las celdas copiadas de Excel desde Columna B (Fecha) hasta Columna M (Jornada)...",
             key="area_pegar_excel",
         )
         if st.sidebar.button(
-            "✅ Cargar programación pegada",
+            "✅ Cargar asignación pegada",
             type="primary",
             use_container_width=True,
         ):
@@ -959,12 +1021,12 @@ else:
                 if not df_pegado.empty:
                     indexar_programacion_en_sesion(
                         df_pegado,
-                        f"Pegado desde Excel ({datetime.now().strftime('%H:%M')})",
+                        f"Pegado B→M ({datetime.now().strftime('%H:%M')})",
                     )
                     st.rerun()
                 else:
                     st.sidebar.error(
-                        "⚠️ No se reconocieron las columnas. Asegúrate de copiar desde la columna Fecha hasta Patio Final/PADMIN."
+                        "⚠️ No se reconocieron las columnas. Asegúrate de copiar desde la Columna B (Fecha) hasta la Columna M (Jornada)."
                     )
             else:
                 st.sidebar.warning("⚠️ Pega primero los datos copiados de Excel.")
@@ -998,8 +1060,8 @@ def buscar_operador_rapido(codigo: str):
     cod = limpiar_codigo(codigo)
     info = st.session_state.operadores_dict.get(cod)
     if info:
-        return info["nombre"], info["patio"], True
-    return "OPERADOR NO ENCONTRADO EN PROGRAMACIÓN", "LOS PUEBLOS", False
+        return info["nombre"], info["patio"], info.get("jornada", "FULL TIME"), True
+    return "OPERADOR NO ENCONTRADO EN ASIGNACIÓN", "LOS PUEBLOS", "FULL TIME", False
 
 
 def buscar_turno_rapido(codigo: str, fecha_obj: date):
@@ -1007,7 +1069,7 @@ def buscar_turno_rapido(codigo: str, fecha_obj: date):
     turno = st.session_state.turnos_dict.get((cod, fecha_obj))
     if turno:
         return turno
-    return {"horario": "-", "sercon": "-", "p_inicio": "-", "p_fin": "-"}
+    return {"horario": "-", "sercon": "-", "p_inicio": "-", "p_fin": "-", "jornada": "FULL TIME"}
 
 
 # ==========================================
@@ -1024,15 +1086,15 @@ if st.session_state.prog_cargada:
     n_dias_prog = len(st.session_state.fechas_disponibles)
     st.markdown(
         f'<div class="rango-banner">'
-        f'📅 <b>Programación Cargada:</b> Desde el <b>{f_ini_b}</b> hasta el <b>{f_fin_b}</b> '
+        f'📅 <b>Asignación Cargada:</b> Desde el <b>{f_ini_b}</b> hasta el <b>{f_fin_b}</b> '
         f'({n_dias_prog} días operativos disponibles · {st.session_state.prog_total_filas:,} turnos) &nbsp;|&nbsp; '
-        f'<i>Solo se permiten seleccionar fechas dentro de este rango.</i>'
+        f'<i>Cálculo automático activo: FULL TIME (+8h 40m) · PART TIME 6 (+6h 30m).</i>'
         f'</div>',
         unsafe_allow_html=True,
     )
 else:
     st.warning(
-        "⚠️ **Aún no has cargado ninguna programación.** Sube el archivo Excel o pega los horarios en la barra lateral izquierda para habilitar el calendario de fechas válidas."
+        "⚠️ **Aún no has cargado la asignación.** Sube el archivo Excel o pega desde la **Columna B (Fecha) hasta la Columna M (Jornada)** en el panel izquierdo."
     )
 
 # ==========================================
@@ -1087,7 +1149,7 @@ with tab_registro:
     )
 
     if not st.session_state.prog_cargada:
-        st.info("👈 Carga primero la programación en el panel izquierdo para comenzar.")
+        st.info("👈 Carga primero la asignación de operadores (Columna B a M) en el panel izquierdo.")
     else:
         fechas_disp = st.session_state.fechas_disponibles
         mapa_fechas_label = {
@@ -1097,8 +1159,8 @@ with tab_registro:
 
         filas_prog_op1, filas_cambio_op1 = [], []
         filas_prog_op2, filas_cambio_op2 = [], []
-        cod_op1, nom_op1, patio_op1 = "", "", "LOS PUEBLOS"
-        cod_op2, nom_op2 = "", ""
+        cod_op1, nom_op1, patio_op1, jornada_op1 = "", "", "LOS PUEBLOS", "FULL TIME"
+        cod_op2, nom_op2, jornada_op2 = "", "", "FULL TIME"
 
         if not es_intercambio:
             st.markdown(
@@ -1109,10 +1171,11 @@ with tab_registro:
             with col_op_cod:
                 cod_op1 = limpiar_codigo(st.text_input("Código Operador", value="82601"))
             with col_op_nom:
-                nom_op1, patio_op1, ok1 = buscar_operador_rapido(cod_op1)
+                nom_op1, patio_op1, jornada_op1, ok1 = buscar_operador_rapido(cod_op1)
                 st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
                 if ok1:
-                    st.success(f"👤 **{nom_op1}** · Patio: **{patio_op1}**")
+                    badge_j = "🟦 PART TIME 6 (6h + 30m)" if jornada_op1 == "PART TIME 6" else "🟩 FULL TIME (8h + 40m)"
+                    st.success(f"👤 **{nom_op1}** · Patio: **{patio_op1}** · **{badge_j}**")
                 else:
                     st.warning(f"👤 **{nom_op1}**")
             with col_op_lat:
@@ -1122,17 +1185,19 @@ with tab_registro:
                     anio_consulta,
                 )
 
-            h_cols = st.columns([0.35, 1.45, 1.35, 1.25, 1.25, 1.35, 1.35])
+            h_cols = st.columns([0.3, 1.35, 1.25, 0.72, 0.72, 1.15, 1.15, 1.2, 1.2])
             h_cols[0].markdown("**#**")
-            h_cols[1].markdown("**Fecha (Programada)**")
-            h_cols[2].markdown("**Turno Actual (Auto)**")
-            h_cols[3].markdown("**Nuevo Horario**")
-            h_cols[4].markdown("**Nueva Tarea / Sercon**")
-            h_cols[5].markdown("**P. Inicio**")
-            h_cols[6].markdown("**P. Final**")
+            h_cols[1].markdown("**Fecha**")
+            h_cols[2].markdown("**Turno Actual**")
+            h_cols[3].markdown("**Hora Ini**")
+            h_cols[4].markdown("**Min Ini**")
+            h_cols[5].markdown("**Horario Calculado**")
+            h_cols[6].markdown("**Nueva Tarea**")
+            h_cols[7].markdown("**P. Inicio**")
+            h_cols[8].markdown("**P. Final**")
 
             for idx in range(7):
-                r_cols = st.columns([0.35, 1.45, 1.35, 1.25, 1.25, 1.35, 1.35])
+                r_cols = st.columns([0.3, 1.35, 1.25, 0.72, 0.72, 1.15, 1.15, 1.2, 1.2])
                 r_cols[0].markdown(f"**{idx + 1}**")
                 default_idx = 1 if (idx == 0 and len(opciones_fecha_sel) > 1) else 0
                 sel_f_str = r_cols[1].selectbox(
@@ -1146,29 +1211,54 @@ with tab_registro:
                 if sel_f_str != "— Sin cambio —":
                     f_obj = mapa_fechas_label[sel_f_str]
                     prog1 = buscar_turno_rapido(cod_op1, f_obj)
+                    jornada_dia = prog1.get("jornada", jornada_op1)
                     r_cols[2].info(f"`{prog1['horario']}` · {prog1['sercon']}")
 
-                    nuevo_hor = r_cols[3].selectbox(
-                        f"H{idx+1}",
-                        JORNADAS_CATALOGO,
-                        index=0 if modalidad == "Cambio de día libre" else 2,
-                        key=f"brt_ind_hor_{idx}",
-                        label_visibility="collapsed",
-                    )
-                    nueva_tar = r_cols[4].selectbox(
+                    if modalidad == "Cambio de día libre":
+                        r_cols[3].caption("Libre")
+                        r_cols[4].caption("—")
+                        nuevo_hor = "-"
+                        r_cols[5].markdown(
+                            '<div class="horario-calc-box">- (LIBRE)</div>',
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        sel_hh = r_cols[3].selectbox(
+                            f"HH{idx+1}",
+                            HORAS_CATALOGO,
+                            index=12,  # 12 por defecto
+                            key=f"brt_ind_hh_{idx}",
+                            label_visibility="collapsed",
+                        )
+                        sel_mm = r_cols[4].selectbox(
+                            f"MM{idx+1}",
+                            MINUTOS_CATALOGO,
+                            index=0,  # 00 por defecto
+                            key=f"brt_ind_mm_{idx}",
+                            label_visibility="collapsed",
+                        )
+                        nuevo_hor = calcular_rango_horario_por_jornada(
+                            sel_hh, sel_mm, jornada_dia
+                        )
+                        r_cols[5].markdown(
+                            f'<div class="horario-calc-box">{nuevo_hor}</div>',
+                            unsafe_allow_html=True,
+                        )
+
+                    nueva_tar = r_cols[6].selectbox(
                         f"T{idx+1}",
                         TAREAS_CATALOGO,
                         index=6 if modalidad == "Cambio de día libre" else 0,
                         key=f"brt_ind_tar_{idx}",
                         label_visibility="collapsed",
                     )
-                    nuevo_pi = r_cols[5].selectbox(
+                    nuevo_pi = r_cols[7].selectbox(
                         f"PI{idx+1}",
                         PATIOS_CATALOGO,
                         key=f"brt_ind_pi_{idx}",
                         label_visibility="collapsed",
                     )
-                    nuevo_pf = r_cols[6].selectbox(
+                    nuevo_pf = r_cols[8].selectbox(
                         f"PF{idx+1}",
                         PATIOS_CATALOGO,
                         key=f"brt_ind_pf_{idx}",
@@ -1200,6 +1290,8 @@ with tab_registro:
                     r_cols[4].caption("—")
                     r_cols[5].caption("—")
                     r_cols[6].caption("—")
+                    r_cols[7].caption("—")
+                    r_cols[8].caption("—")
 
         else:
             st.markdown(
@@ -1210,10 +1302,10 @@ with tab_registro:
             with c1_cod:
                 cod_op1 = limpiar_codigo(st.text_input("Operador 1 (Código)", value="82601"))
             with c1_nom:
-                nom_op1, patio_op1, ok1 = buscar_operador_rapido(cod_op1)
+                nom_op1, patio_op1, jornada_op1, ok1 = buscar_operador_rapido(cod_op1)
                 st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
                 if ok1:
-                    st.success(f"👤 **Op. 1:** {nom_op1} · Patio: **{patio_op1}**")
+                    st.success(f"👤 **Op. 1:** {nom_op1} · **{patio_op1}** · **{jornada_op1}**")
                 else:
                     st.warning(f"👤 **Op. 1:** {nom_op1}")
             with c1_lat:
@@ -1227,10 +1319,10 @@ with tab_registro:
             with c2_cod:
                 cod_op2 = limpiar_codigo(st.text_input("Operador 2 (Código)", value="82602"))
             with c2_nom:
-                nom_op2, _, ok2 = buscar_operador_rapido(cod_op2)
+                nom_op2, _, jornada_op2, ok2 = buscar_operador_rapido(cod_op2)
                 st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
                 if ok2:
-                    st.success(f"👤 **Op. 2:** {nom_op2}")
+                    st.success(f"👤 **Op. 2:** {nom_op2} · **{jornada_op2}**")
                 else:
                     st.warning(f"👤 **Op. 2:** {nom_op2}")
             with c2_lat:
@@ -1397,8 +1489,10 @@ with tab_registro:
                     "motivo": motivo_final,
                     "cod_1": cod_op1,
                     "nombre_1": nom_op1,
+                    "jornada_1": jornada_op1,
                     "cod_2": cod_op2,
                     "nombre_2": nom_op2,
+                    "jornada_2": jornada_op2,
                     "prog_op1": filas_prog_op1,
                     "cambio_op1": filas_cambio_op1,
                     "prog_op2": filas_prog_op2,
@@ -1440,7 +1534,7 @@ with tab_boleta:
             <div class="boleta-preview">
                 <h4 style="margin:0; text-align:center; color:#0070c0;">CAMBIO DE HORARIO — F-ZEN-GO-07 / V1-12-2023</h4>
                 <p style="margin:4px 0; font-size:13px;">
-                    <b>Operador 1:</b> {bol['nombre_1']} (<span style="background:#ffff00; padding:1px 4px;"><b>{bol['cod_1']}</b></span>) &nbsp;|&nbsp;
+                    <b>Operador 1:</b> {bol['nombre_1']} (<span style="background:#ffff00; padding:1px 4px;"><b>{bol['cod_1']}</b></span> · {bol.get('jornada_1', 'FULL TIME')}) &nbsp;|&nbsp;
                     <b>Patio:</b> {bol['patio']} &nbsp;|&nbsp;
                     <b>Fecha Solicitud:</b> {bol['fecha_sol_larga']}
                 </p>
@@ -1504,7 +1598,6 @@ with tab_historial:
         df_h_show["FECHA_ANALISIS"] = obtener_fechas_validas_serie(df_h_show)
         df_h_show["TIPO_MOVIMIENTO"] = df_h_show.apply(clasificar_tipo_cambio, axis=1)
 
-        # KPIs superiores
         k1, k2, k3 = st.columns(3)
         k1.metric("Total de Cambios Registrados", f"{len(df_h_show):,}")
         k2.metric(
@@ -1517,7 +1610,6 @@ with tab_historial:
         )
 
         st.markdown("---")
-        # SECCIÓN DE GRÁFICAS CON ETIQUETAS NUMÉRICAS Y ORDEN CRONOLÓGICO DE MESES
         col_g1, col_g2 = st.columns([1.35, 1])
 
         with col_g1:
@@ -1569,7 +1661,6 @@ with tab_historial:
                     (barras_mes + etiquetas_mes).properties(height=300),
                     use_container_width=True,
                 )
-                # Tabla compacta horizontal con el detalle mensual
                 st.dataframe(
                     res_mes[["Mes", "Cambios"]].set_index("Mes").T,
                     use_container_width=True,
@@ -1615,7 +1706,6 @@ with tab_historial:
             st.dataframe(res_tipo, use_container_width=True, hide_index=True)
 
         st.markdown("---")
-        # SECCIÓN TOP 10 OPERADORES + CONSULTA INDIVIDUAL POR CÓDIGO
         col_top, col_det = st.columns([1.15, 1.35])
 
         with col_top:
@@ -1661,8 +1751,8 @@ with tab_historial:
                     lambda v: cod_consulta in [p.strip() for p in v.split("_")]
                 )
                 df_op_det = df_h_show[mask_op].copy()
-                nom_c, patio_c, ok_c = buscar_operador_rapido(cod_consulta)
-                titulo_op = f"{nom_c} ({patio_c})" if ok_c else f"Operador {cod_consulta}"
+                nom_c, patio_c, jornada_c, ok_c = buscar_operador_rapido(cod_consulta)
+                titulo_op = f"{nom_c} ({patio_c} · {jornada_c})" if ok_c else f"Operador {cod_consulta}"
 
                 if df_op_det.empty:
                     st.info(f"El operador **{cod_consulta}** no tiene cambios registrados.")
