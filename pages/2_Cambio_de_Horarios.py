@@ -261,16 +261,17 @@ def obtener_hoja_google_sheets():
 
 
 def leer_historial_desde_gsheets():
-    """Lee todos los registros acumulados desde Google Sheets."""
+    """Lee todos los registros acumulados desde Google Sheets de forma segura."""
     try:
         ws = obtener_hoja_google_sheets()
         if ws is None:
             return pd.DataFrame(columns=COLUMNAS_HISTORIAL), False
-        records = ws.get_all_records()
-        if not records:
+        valores = ws.get_all_values()
+        if not valores or len(valores) <= 1:
             return pd.DataFrame(columns=COLUMNAS_HISTORIAL), True
-        df_h = pd.DataFrame(records)
-        df_h.columns = [str(c).strip() for c in df_h.columns]
+        encabezados = [str(c).strip() for c in valores[0]]
+        df_h = pd.DataFrame(valores[1:], columns=encabezados)
+        df_h = df_h.loc[:, df_h.columns != ""].copy()
         if "COGIDO" in df_h.columns:
             df_h = df_h[df_h["COGIDO"].astype(str).str.strip() != ""].copy()
             df_h["COGIDO"] = df_h["COGIDO"].apply(limpiar_codigo)
@@ -438,9 +439,7 @@ def indexar_programacion_en_sesion(df_norm: pd.DataFrame, nombre_fuente: str):
 
 def parsear_texto_pegado_excel(texto_tsv: str) -> pd.DataFrame:
     """
-    Parsea datos copiados de Excel desde Columna B (Fecha) hasta Columna M (Jornada)
-    [12 columnas: Fecha, Tarea, Código, Nombre y Apellido, Tiempo Trabajado, Hora Inicial,
-     Patio Origen, Hora Fin, Patio Final, PADMIN, TIPO, Jornada].
+    Parsea datos copiados de Excel desde Columna B (Fecha) hasta Columna M (Jornada).
     """
     lineas = [l for l in texto_tsv.splitlines() if l.strip()]
     if not lineas:
@@ -571,12 +570,57 @@ def procesar_archivo_excel(file_bytes: bytes):
     return df_prog, df_hist, lista_resp
 
 
+def parsear_columna_fecha_es(serie: pd.Series) -> pd.Series:
+    """Convierte fechas en español (ej. 15-ene-26), DD/MM/YYYY, YYYY-MM-DD o serial Excel."""
+    if serie is None:
+        return pd.Series(dtype="datetime64[ns]")
+
+    meses_reemplazo = {
+        "ene": "jan",
+        "feb": "feb",
+        "mar": "mar",
+        "abr": "apr",
+        "may": "may",
+        "jun": "jun",
+        "jul": "jul",
+        "ago": "aug",
+        "sep": "sep",
+        "set": "sep",
+        "oct": "oct",
+        "nov": "nov",
+        "dic": "dec",
+    }
+
+    def limpiar_fecha_str(val):
+        if pd.isna(val) or val is None:
+            return None
+        if isinstance(val, (datetime, date, pd.Timestamp)):
+            return pd.Timestamp(val)
+        s = str(val).strip().lower()
+        if not s or s in ["nan", "nat", "none", "-"]:
+            return None
+        # Serial numérico de Excel (ej. 46050)
+        if s.isdigit() and 30000 <= int(s) <= 60000:
+            return pd.Timestamp("1899-12-30") + pd.to_timedelta(int(s), unit="D")
+        for es_m, en_m in meses_reemplazo.items():
+            s = (
+                s.replace(f"-{es_m}-", f"-{en_m}-")
+                .replace(f"/{es_m}/", f"/{en_m}/")
+                .replace(f" {es_m} ", f" {en_m} ")
+            )
+        return s
+
+    serie_limpia = serie.apply(limpiar_fecha_str)
+    dt_dayfirst = pd.to_datetime(serie_limpia, errors="coerce", dayfirst=True)
+    dt_iso = pd.to_datetime(serie_limpia, errors="coerce", format="mixed")
+    dt_final = dt_dayfirst.fillna(dt_iso)
+    return dt_final.where(dt_final.dt.year > 1900)
+
+
 def obtener_fechas_validas_serie(df_h: pd.DataFrame) -> pd.Series:
-    """Extrae fecha válida ignorando fechas ficticias de Excel (1899-12-30)."""
-    f_cambio = pd.to_datetime(df_h.get("FECHA DE CAMBIO"), errors="coerce")
-    f_sol = pd.to_datetime(df_h.get("FECHA DE SOLICITUD"), errors="coerce")
-    f_cambio = f_cambio.where(f_cambio.dt.year > 1900)
-    f_sol = f_sol.where(f_sol.dt.year > 1900)
+    """Extrae fecha válida desde FECHA DE CAMBIO o FECHA DE SOLICITUD."""
+    f_cambio = parsear_columna_fecha_es(df_h.get("FECHA DE CAMBIO"))
+    f_sol = parsear_columna_fecha_es(df_h.get("FECHA DE SOLICITUD"))
     return f_cambio.fillna(f_sol)
 
 
@@ -1711,7 +1755,7 @@ with tab_historial:
             ).encode(
                 color=alt.condition(
                     alt.datum.Seleccionado == "Seleccionado",
-                    alt.value("#f59e0b"),  # Resalta en ámbar si el mes está seleccionado
+                    alt.value("#f59e0b"),
                     alt.value("#0070c0"),
                 )
             )
@@ -1734,7 +1778,6 @@ with tab_historial:
             )
 
         with col_g2:
-            # Filtrar el dataframe de distribución según el año y mes seleccionado
             if mes_sel_label == "Todos los meses (Año completo)":
                 df_dist = df_anio_sel.copy()
                 titulo_dist = f"🔀 Distribución por Tipo — Todo {anio_sel}"
