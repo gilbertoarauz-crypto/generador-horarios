@@ -90,13 +90,14 @@ st.markdown(
 # ==========================================
 # CATÁLOGOS OFICIALES
 # ==========================================
-RESPONSABLES_DEFAULT = [
+RESPONSABLES_PERMISOS = [
     "Kevin Pitti",
     "Roberto Velarde",
     "Keily Agrazal",
     "Kathleen Batista",
     "Alexis Mojica",
     "Gilberto Arauz",
+    "Mayrim Fraguela",
 ]
 
 TIPOS_SOLICITUD = [
@@ -435,193 +436,247 @@ def renderizar_resumen_anual_permisos(codigo: str, df_perm: pd.DataFrame, anio_r
 
 
 # ==========================================
-# GENERADOR PDF IDÉNTICO A F-CORP-GH-PLA-25
+# GENERADOR PDF FIEL A F-CORP-GH-PLA-25/V1-07-2013
 # ==========================================
 def generar_pdf_f_corp_gh_pla_25(bol: dict) -> bytes:
     """
-    Genera el PDF Letter con el formato oficial F-CORP-GH-PLA-25/V1-07-2013
-    (Original arriba + Copia idéntica abajo).
+    Genera el PDF Letter (215.9 x 279.4 mm) con las proporciones exactas de los recuadros
+    del formulario oficial F-CORP-GH-PLA-25/V1-07-2013 (Original arriba + Copia abajo).
     """
     pdf = FPDF(orientation="P", unit="mm", format="Letter")
     pdf.set_auto_page_break(auto=False)
     pdf.add_page()
 
+    # Paleta oficial del formulario MiBus
     azul_hdr = (0, 112, 192)
-    gris_lbl = (235, 238, 242)
+    gris_lbl = (232, 236, 240)
+    gris_sub = (242, 244, 247)
+
+    # Coordenadas horizontales base (ancho útil 198 mm centrado en Carta 215.9 mm)
+    X0 = 9.0
+    W_TOT = 198.0
 
     def dibujar_logo_mibus(x, y):
         pdf.set_fill_color(0, 112, 192)
-        pdf.rect(x, y, 13, 2.3, style="F")
+        pdf.rect(x, y, 14.5, 2.5, style="F")
         pdf.set_fill_color(0, 176, 80)
-        pdf.rect(x + 2, y + 2.8, 13, 2.3, style="F")
+        pdf.rect(x + 2.5, y + 3.1, 14.5, 2.5, style="F")
         pdf.set_text_color(0, 51, 102)
-        pdf.set_font("Arial", "B", 8.5)
-        pdf.set_xy(x, y + 5.5)
-        pdf.cell(16, 3.5, "MiBus", align="C")
+        pdf.set_font("Arial", "B", 9)
+        pdf.set_xy(x - 0.5, y + 6.0)
+        pdf.cell(18, 3.8, "MiBus", align="C")
         pdf.set_text_color(0, 0, 0)
 
     def dibujar_check(x, y, activo: bool, texto: str, ancho_txt: float = 34):
-        pdf.set_xy(x, y)
-        pdf.set_font("Arial", "B", 6.5)
-        pdf.cell(3.2, 3.2, "X" if activo else "", border=1, align="C")
-        pdf.set_xy(x + 3.8, y - 0.2)
-        pdf.set_font("Arial", "", 6.2)
-        pdf.cell(ancho_txt, 3.6, limpiar_texto_pdf(texto), align="L")
-
-    def dibujar_formulario(y_top: float):
         pdf.set_draw_color(0, 0, 0)
-        pdf.set_line_width(0.35)
-        pdf.rect(10, y_top, 196, 121)
+        pdf.set_line_width(0.28)
+        pdf.set_xy(x, y)
+        pdf.set_font("Arial", "B", 7.2)
+        pdf.cell(3.6, 3.6, "X" if activo else "", border=1, align="C")
+        pdf.set_xy(x + 4.3, y - 0.1)
+        pdf.set_font("Arial", "", 6.6)
+        pdf.cell(ancho_txt, 3.9, limpiar_texto_pdf(texto), align="L")
 
-        dibujar_logo_mibus(13, y_top + 2.2)
-        pdf.set_xy(32, y_top + 3)
-        pdf.set_font("Arial", "B", 11)
-        pdf.cell(125, 6, "REPORTE NOVEDAD AUSENTISMO", align="C")
-        pdf.set_xy(158, y_top + 2)
-        pdf.set_font("Arial", "", 6.5)
-        pdf.cell(46, 4, "F-CORP-GH-PLA-25/V1-07-2013", align="R")
+    def dibujar_formulario(y_top: float, etiqueta_ejemplar: str):
+        # Borde exterior principal del formulario (198 x 125.5 mm)
+        pdf.set_draw_color(0, 0, 0)
+        pdf.set_line_width(0.45)
+        pdf.rect(X0, y_top, W_TOT, 125.5)
+        pdf.set_line_width(0.25)
 
-        y1 = y_top + 12
-        pdf.set_fill_color(*gris_lbl)
+        # --- ENCABEZADO SUPERIOR (Logo + Título + Código de Documento) ---
+        dibujar_logo_mibus(X0 + 3.5, y_top + 2.0)
+
+        pdf.set_xy(X0 + 24, y_top + 3.5)
+        pdf.set_font("Arial", "B", 11.5)
+        pdf.cell(132, 6.5, "REPORTE NOVEDAD AUSENTISMO", align="C")
+
+        pdf.set_xy(X0 + 150, y_top + 1.8)
         pdf.set_font("Arial", "B", 6.5)
-        pdf.set_xy(10, y1)
-        pdf.cell(28, 4.2, "Codigo Colaborador", border=1, align="C", fill=True)
-        pdf.cell(88, 4.2, "Nombre y Apellido del Colaborador", border=1, align="C", fill=True)
-        pdf.cell(44, 4.2, "Cargo", border=1, align="C", fill=True)
-        pdf.cell(36, 4.2, "Fecha Solicitud", border=1, align="C", fill=True)
+        pdf.cell(46, 3.8, "F-CORP-GH-PLA-25/V1-07-2013", align="R")
 
-        y1_val = y1 + 4.2
-        pdf.set_xy(10, y1_val)
-        pdf.set_font("Arial", "B", 8)
-        pdf.cell(28, 7.5, limpiar_texto_pdf(bol["codigo"]), border=1, align="C")
-        pdf.cell(88, 7.5, limpiar_texto_pdf(bol["nombre"])[:44], border=1, align="C")
-        pdf.set_font("Arial", "", 7.5)
-        pdf.cell(44, 7.5, limpiar_texto_pdf(bol["cargo"]), border=1, align="C")
-
-        pdf.set_font("Arial", "B", 5.8)
-        pdf.set_xy(170, y1_val)
-        pdf.cell(12, 3.2, "DD", border=1, align="C", fill=True)
-        pdf.cell(12, 3.2, "MM", border=1, align="C", fill=True)
-        pdf.cell(12, 3.2, "AAAA", border=1, align="C", fill=True)
-
-        f_sol = bol["fecha_sol_obj"]
-        pdf.set_font("Arial", "", 7)
-        pdf.set_xy(170, y1_val + 3.2)
-        pdf.cell(12, 4.3, f"{f_sol.day:02d}", border=1, align="C")
-        pdf.cell(12, 4.3, f"{f_sol.month:02d}", border=1, align="C")
-        pdf.cell(12, 4.3, f"{f_sol.year}", border=1, align="C")
-
-        y2 = y1_val + 7.5
-        pdf.set_font("Arial", "B", 6.5)
-        pdf.set_xy(10, y2)
-        pdf.cell(68, 4.2, "Sucursal", border=1, align="C", fill=True)
-        pdf.cell(64, 4.2, "Centro de Costo", border=1, align="C", fill=True)
-        pdf.cell(64, 4.2, "Departamento", border=1, align="C", fill=True)
-
-        y2_val = y2 + 4.2
-        pdf.set_font("Arial", "", 7)
-        pdf.set_xy(10, y2_val)
-        pdf.cell(68, 5, limpiar_texto_pdf(bol["sucursal"]), border=1, align="C")
-        pdf.cell(64, 5, limpiar_texto_pdf(bol["centro_costo"]), border=1, align="C")
-        pdf.cell(64, 5, limpiar_texto_pdf(bol["departamento"]), border=1, align="C")
-
-        y3 = y2_val + 5
-        pdf.set_fill_color(*azul_hdr)
-        pdf.set_text_color(255, 255, 255)
-        pdf.set_font("Arial", "B", 7)
-        pdf.set_xy(10, y3)
-        pdf.cell(132, 4.5, "Tipo de Solicitud", border=1, align="C", fill=True)
-        pdf.cell(64, 4.5, "Periodo del Ausentismo", border=1, align="C", fill=True)
+        pdf.set_xy(X0 + 150, y_top + 5.8)
+        pdf.set_font("Arial", "I", 5.8)
+        pdf.set_text_color(90, 90, 90)
+        pdf.cell(46, 3.2, etiqueta_ejemplar, align="R")
         pdf.set_text_color(0, 0, 0)
 
-        y3_body = y3 + 4.5
-        pdf.set_xy(10, y3_body)
-        pdf.cell(132, 13.5, "", border=1)
+        # --- BLOQUE 1: IDENTIFICACIÓN DEL COLABORADOR Y FECHA SOLICITUD ---
+        # Anchos: 28 + 86 + 45 + 39 = 198 mm
+        w_cod, w_nom, w_car, w_fsol = 28.0, 86.0, 45.0, 39.0
+        y1 = y_top + 12.2
+        pdf.set_fill_color(*gris_lbl)
+        pdf.set_font("Arial", "B", 6.6)
+        pdf.set_xy(X0, y1)
+        pdf.cell(w_cod, 4.4, "Codigo Colaborador", border=1, align="C", fill=True)
+        pdf.cell(w_nom, 4.4, "Nombre y Apellido del Colaborador", border=1, align="C", fill=True)
+        pdf.cell(w_car, 4.4, "Cargo", border=1, align="C", fill=True)
+        pdf.cell(w_fsol, 4.4, "Fecha Solicitud", border=1, align="C", fill=True)
+
+        y1_val = y1 + 4.4
+        h_val1 = 8.4
+        pdf.set_xy(X0, y1_val)
+        pdf.set_font("Arial", "B", 8.5)
+        pdf.cell(w_cod, h_val1, limpiar_texto_pdf(bol["codigo"]), border=1, align="C")
+        pdf.cell(w_nom, h_val1, limpiar_texto_pdf(bol["nombre"])[:45], border=1, align="C")
+        pdf.set_font("Arial", "", 7.8)
+        pdf.cell(w_car, h_val1, limpiar_texto_pdf(bol["cargo"]), border=1, align="C")
+
+        # Subtabla DD / MM / AAAA para Fecha Solicitud (12 + 12 + 15 = 39 mm)
+        x_fsol = X0 + w_cod + w_nom + w_car
+        pdf.set_fill_color(*gris_sub)
+        pdf.set_font("Arial", "B", 6.0)
+        pdf.set_xy(x_fsol, y1_val)
+        pdf.cell(12.0, 3.6, "DD", border=1, align="C", fill=True)
+        pdf.cell(12.0, 3.6, "MM", border=1, align="C", fill=True)
+        pdf.cell(15.0, 3.6, "AAAA", border=1, align="C", fill=True)
+
+        f_sol = bol["fecha_sol_obj"]
+        pdf.set_font("Arial", "B", 7.4)
+        pdf.set_xy(x_fsol, y1_val + 3.6)
+        pdf.cell(12.0, 4.8, f"{f_sol.day:02d}", border=1, align="C")
+        pdf.cell(12.0, 4.8, f"{f_sol.month:02d}", border=1, align="C")
+        pdf.cell(15.0, 4.8, f"{f_sol.year}", border=1, align="C")
+
+        # --- BLOQUE 2: SUCURSAL / CENTRO DE COSTO / DEPARTAMENTO ---
+        # Anchos: 68 + 65 + 65 = 198 mm
+        w_suc, w_cc, w_dep = 68.0, 65.0, 65.0
+        y2 = y1_val + h_val1
+        pdf.set_fill_color(*gris_lbl)
+        pdf.set_font("Arial", "B", 6.6)
+        pdf.set_xy(X0, y2)
+        pdf.cell(w_suc, 4.4, "Sucursal", border=1, align="C", fill=True)
+        pdf.cell(w_cc, 4.4, "Centro de Costo", border=1, align="C", fill=True)
+        pdf.cell(w_dep, 4.4, "Departamento", border=1, align="C", fill=True)
+
+        y2_val = y2 + 4.4
+        h_val2 = 5.6
+        pdf.set_font("Arial", "", 7.3)
+        pdf.set_xy(X0, y2_val)
+        pdf.cell(w_suc, h_val2, limpiar_texto_pdf(bol["sucursal"]), border=1, align="C")
+        pdf.cell(w_cc, h_val2, limpiar_texto_pdf(bol["centro_costo"]), border=1, align="C")
+        pdf.cell(w_dep, h_val2, limpiar_texto_pdf(bol["departamento"]), border=1, align="C")
+
+        # --- BLOQUE 3: TIPO DE SOLICITUD (130 mm) + PERIODO DEL AUSENTISMO (68 mm) ---
+        w_tipo = 130.0
+        w_per = 68.0
+        y3 = y2_val + h_val2
+        pdf.set_fill_color(*azul_hdr)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_font("Arial", "B", 7.2)
+        pdf.set_xy(X0, y3)
+        pdf.cell(w_tipo, 4.8, "Tipo de Solicitud", border=1, align="C", fill=True)
+        pdf.cell(w_per, 4.8, "Periodo del Ausentismo", border=1, align="C", fill=True)
+        pdf.set_text_color(0, 0, 0)
+
+        y3_body = y3 + 4.8
+        h_body3 = 14.4
+        pdf.set_xy(X0, y3_body)
+        pdf.cell(w_tipo, h_body3, "", border=1)
 
         tipo_sel = bol["tipo_solicitud"]
-        dibujar_check(13, y3_body + 2.0, tipo_sel == "Permiso Remunerado", "Permiso Remunerado", 28)
-        dibujar_check(46, y3_body + 2.0, tipo_sel == "Permiso No Remunerado", "Permiso No Remunerado", 31)
-        dibujar_check(82, y3_body + 2.0, tipo_sel == "Licencia Remunerada", "Licencia Remunerada", 27)
-        dibujar_check(112, y3_body + 2.0, tipo_sel == "Licencia No Remunerada", "Licencia No Remunerada", 28)
-        dibujar_check(13, y3_body + 7.8, tipo_sel == "Compensatorio", "Compensatorio", 32)
+        # Fila 1 de checkboxes de Tipo de Solicitud
+        dibujar_check(X0 + 2.5, y3_body + 2.2, tipo_sel == "Permiso Remunerado", "Permiso Remunerado", 27)
+        dibujar_check(X0 + 34.5, y3_body + 2.2, tipo_sel == "Permiso No Remunerado", "Permiso No Remunerado", 30)
+        dibujar_check(X0 + 69.5, y3_body + 2.2, tipo_sel == "Licencia Remunerada", "Licencia Remunerada", 27)
+        dibujar_check(X0 + 100.5, y3_body + 2.2, tipo_sel == "Licencia No Remunerada", "Licencia No Remunerada", 28)
+        # Fila 2 de checkboxes de Tipo de Solicitud
+        dibujar_check(X0 + 2.5, y3_body + 8.4, tipo_sel == "Compensatorio", "Compensatorio", 32)
 
+        # Subcuadro Periodo del Ausentismo: Fecha de Salida (34 mm) + Fecha de Ingreso (34 mm)
+        x_per = X0 + w_tipo
         pdf.set_fill_color(*gris_lbl)
-        pdf.set_font("Arial", "B", 6.2)
-        pdf.set_xy(142, y3_body)
-        pdf.cell(32, 4.2, "Fecha de Salida", border=1, align="C", fill=True)
-        pdf.cell(32, 4.2, "Fecha de Ingreso", border=1, align="C", fill=True)
+        pdf.set_font("Arial", "B", 6.4)
+        pdf.set_xy(x_per, y3_body)
+        pdf.cell(34.0, 4.4, "Fecha de Salida", border=1, align="C", fill=True)
+        pdf.cell(34.0, 4.4, "Fecha de Ingreso", border=1, align="C", fill=True)
 
-        pdf.set_font("Arial", "B", 5.5)
-        pdf.set_xy(142, y3_body + 4.2)
+        pdf.set_fill_color(*gris_sub)
+        pdf.set_font("Arial", "B", 5.8)
+        pdf.set_xy(x_per, y3_body + 4.4)
         for _ in range(2):
-            pdf.cell(10, 3.8, "DD", border=1, align="C", fill=True)
-            pdf.cell(10, 3.8, "MM", border=1, align="C", fill=True)
-            pdf.cell(12, 3.8, "AAAA", border=1, align="C", fill=True)
+            pdf.cell(10.5, 4.0, "DD", border=1, align="C", fill=True)
+            pdf.cell(10.5, 4.0, "MM", border=1, align="C", fill=True)
+            pdf.cell(13.0, 4.0, "AAAA", border=1, align="C", fill=True)
 
         f_sal = bol["fecha_salida_obj"]
         f_ing = bol["fecha_ingreso_obj"]
-        pdf.set_font("Arial", "B", 7)
-        pdf.set_xy(142, y3_body + 8.0)
-        pdf.cell(10, 5.5, f"{f_sal.day:02d}", border=1, align="C")
-        pdf.cell(10, 5.5, f"{f_sal.month:02d}", border=1, align="C")
-        pdf.cell(12, 5.5, f"{f_sal.year}", border=1, align="C")
-        pdf.cell(10, 5.5, f"{f_ing.day:02d}", border=1, align="C")
-        pdf.cell(10, 5.5, f"{f_ing.month:02d}", border=1, align="C")
-        pdf.cell(12, 5.5, f"{f_ing.year}", border=1, align="C")
+        pdf.set_font("Arial", "B", 7.4)
+        pdf.set_xy(x_per, y3_body + 8.4)
+        pdf.cell(10.5, 6.0, f"{f_sal.day:02d}", border=1, align="C")
+        pdf.cell(10.5, 6.0, f"{f_sal.month:02d}", border=1, align="C")
+        pdf.cell(13.0, 6.0, f"{f_sal.year}", border=1, align="C")
+        pdf.cell(10.5, 6.0, f"{f_ing.day:02d}", border=1, align="C")
+        pdf.cell(10.5, 6.0, f"{f_ing.month:02d}", border=1, align="C")
+        pdf.cell(13.0, 6.0, f"{f_ing.year}", border=1, align="C")
 
-        y4 = y3_body + 13.5
+        # --- BLOQUE 4: MOTIVO SOLICITUD (198 mm completo) ---
+        y4 = y3_body + h_body3
         pdf.set_fill_color(*azul_hdr)
         pdf.set_text_color(255, 255, 255)
-        pdf.set_font("Arial", "B", 7)
-        pdf.set_xy(10, y4)
-        pdf.cell(196, 4.5, "Motivo Solicitud", border=1, align="C", fill=True)
+        pdf.set_font("Arial", "B", 7.2)
+        pdf.set_xy(X0, y4)
+        pdf.cell(W_TOT, 4.8, "Motivo Solicitud", border=1, align="C", fill=True)
         pdf.set_text_color(0, 0, 0)
 
-        y4_body = y4 + 4.5
-        pdf.set_xy(10, y4_body)
-        pdf.cell(196, 12.5, "", border=1)
+        y4_body = y4 + 4.8
+        h_body4 = 13.6
+        pdf.set_xy(X0, y4_body)
+        pdf.cell(W_TOT, h_body4, "", border=1)
 
         mot_sel = bol["motivo_solicitud"]
-        dibujar_check(13, y4_body + 1.8, mot_sel == "Enfermedad", "Enfermedad", 22)
-        dibujar_check(42, y4_body + 1.8, mot_sel == "Cita Médica", "Cita Medica", 22)
-        dibujar_check(70, y4_body + 1.8, mot_sel == "Fallecimiento", "Fallecimiento", 22)
-        dibujar_check(98, y4_body + 1.8, mot_sel == "Nacimiento hijo (a)", "Nacimiento hijo (a)", 28)
-        dibujar_check(133, y4_body + 1.8, mot_sel == "Matrimonio", "Matrimonio", 20)
-        dibujar_check(160, y4_body + 1.8, mot_sel == "Asuntos Personales", "Asuntos Personales", 35)
+        # Fila 1 de motivos (6 opciones distribuidas a lo largo de los 198 mm)
+        dibujar_check(X0 + 2.5, y4_body + 2.0, mot_sel == "Enfermedad", "Enfermedad", 22)
+        dibujar_check(X0 + 31.0, y4_body + 2.0, mot_sel == "Cita Médica", "Cita Medica", 22)
+        dibujar_check(X0 + 59.5, y4_body + 2.0, mot_sel == "Fallecimiento", "Fallecimiento", 22)
+        dibujar_check(X0 + 88.5, y4_body + 2.0, mot_sel == "Nacimiento hijo (a)", "Nacimiento hijo (a)", 28)
+        dibujar_check(X0 + 125.0, y4_body + 2.0, mot_sel == "Matrimonio", "Matrimonio", 20)
+        dibujar_check(X0 + 153.0, y4_body + 2.0, mot_sel == "Asuntos Personales", "Asuntos Personales", 38)
+
+        # Fila 2 de motivos (3 opciones)
         dibujar_check(
-            13,
-            y4_body + 7.2,
+            X0 + 2.5,
+            y4_body + 7.8,
             mot_sel == "Representar a la empresa, el Estado o el país",
             "Representar a la empresa, el Estado o el pais",
-            70,
+            75,
         )
-        dibujar_check(98, y4_body + 7.2, mot_sel == "Permiso Sindical", "Permiso Sindical", 30)
-        dibujar_check(133, y4_body + 7.2, mot_sel == "Compensatorio", "Compensatorio", 30)
+        dibujar_check(X0 + 88.5, y4_body + 7.8, mot_sel == "Permiso Sindical", "Permiso Sindical", 30)
+        dibujar_check(X0 + 125.0, y4_body + 7.8, mot_sel == "Compensatorio", "Compensatorio", 30)
 
-        y5 = y4_body + 12.5
-        pdf.set_xy(10, y5)
-        pdf.cell(142, 22, "", border=1)
-        pdf.cell(54, 22, "", border=1)
+        # --- BLOQUE 5: EXPLICACIÓN DEL MOTIVO (142 mm) + FIRMA DEL SOLICITANTE (56 mm) ---
+        y5 = y4_body + h_body4
+        h_body5 = 23.0
+        w_exp = 142.0
+        w_fsol_box = 56.0
+        pdf.set_xy(X0, y5)
+        pdf.cell(w_exp, h_body5, "", border=1)
+        pdf.cell(w_fsol_box, h_body5, "", border=1)
 
-        pdf.set_xy(12, y5 + 1.2)
-        pdf.set_font("Arial", "B", 6.5)
-        pdf.cell(138, 3.8, "Explique de forma clara y breve el motivo de esta solicitud:", ln=1)
-        pdf.set_x(12)
-        pdf.set_font("Arial", "", 6.8)
-        pdf.multi_cell(138, 3.6, limpiar_texto_pdf(bol["observaciones"])[:290])
+        pdf.set_xy(X0 + 2.0, y5 + 1.5)
+        pdf.set_font("Arial", "B", 6.6)
+        pdf.cell(w_exp - 4, 3.8, "Explique de forma clara y breve el motivo de esta solicitud:", ln=1)
+        pdf.set_x(X0 + 2.0)
+        pdf.set_font("Arial", "", 7.0)
+        pdf.multi_cell(w_exp - 4, 3.8, limpiar_texto_pdf(bol["observaciones"])[:310])
 
-        pdf.set_xy(152, y5 + 17.5)
-        pdf.set_font("Arial", "B", 6.5)
-        pdf.cell(54, 3.5, "Firma del Solicitante", border="T", align="C")
+        # Línea y etiqueta de Firma del Solicitante en la parte inferior de su recuadro
+        x_firma_sol = X0 + w_exp
+        pdf.set_line_width(0.3)
+        pdf.line(x_firma_sol + 5, y5 + 17.8, x_firma_sol + w_fsol_box - 5, y5 + 17.8)
+        pdf.set_xy(x_firma_sol, y5 + 18.2)
+        pdf.set_font("Arial", "B", 6.6)
+        pdf.cell(w_fsol_box, 3.8, "Firma del Solicitante", align="C")
 
-        y6 = y5 + 22
+        # --- BLOQUE 6: SECCIÓN APROBÓ (4 COLUMNAS DE 49.5 mm = 198 mm) ---
+        y6 = y5 + h_body5
         pdf.set_fill_color(*gris_lbl)
-        pdf.set_font("Arial", "B", 7)
-        pdf.set_xy(10, y6)
-        pdf.cell(196, 4.5, "Aprobo", border=1, align="C", fill=True)
+        pdf.set_font("Arial", "B", 7.2)
+        pdf.set_xy(X0, y6)
+        pdf.cell(W_TOT, 4.6, "Aprobo", border=1, align="C", fill=True)
 
-        y6_hdr = y6 + 4.5
-        anchos_ap = [49, 49, 49, 49]
+        y6_hdr = y6 + 4.6
+        anchos_ap = [49.5, 49.5, 49.5, 49.5]
         titulos_ap = [
             "JEFE INMEDIATO",
             "PROFESIONAL DE GESTION HUMANA",
@@ -629,11 +684,12 @@ def generar_pdf_f_corp_gh_pla_25(bol: dict) -> bytes:
             "GERENTE DE RELACIONES LABORALES",
         ]
         pdf.set_font("Arial", "B", 5.6)
-        pdf.set_xy(10, y6_hdr)
+        pdf.set_xy(X0, y6_hdr)
         for w, t in zip(anchos_ap, titulos_ap):
-            pdf.cell(w, 4.2, t, border=1, align="C", fill=True)
+            pdf.cell(w, 4.4, t, border=1, align="C", fill=True)
 
-        y6_body = y6_hdr + 4.2
+        y6_body = y6_hdr + 4.4
+        h_body6 = 17.5
         nombres_ap = [
             bol["jefe_inmediato"],
             bol["prof_gh"],
@@ -647,30 +703,35 @@ def generar_pdf_f_corp_gh_pla_25(bol: dict) -> bytes:
             "",
         ]
         for i, w in enumerate(anchos_ap):
-            x_col = 10 + i * w
+            x_col = X0 + i * w
             pdf.set_xy(x_col, y6_body)
-            pdf.cell(w, 16.5, "", border=1)
+            pdf.cell(w, h_body6, "", border=1)
 
-            pdf.set_xy(x_col + 1.5, y6_body + 1)
-            pdf.set_font("Arial", "B", 6)
-            pdf.cell(w - 3, 3.5, limpiar_texto_pdf(f"Nombre: {nombres_ap[i]}"), ln=1)
+            pdf.set_xy(x_col + 1.5, y6_body + 1.2)
+            pdf.set_font("Arial", "B", 6.1)
+            pdf.cell(w - 3, 3.6, limpiar_texto_pdf(f"Nombre: {nombres_ap[i]}"), ln=1)
 
             if cargos_ap[i]:
                 pdf.set_x(x_col + 1.5)
                 pdf.set_font("Arial", "", 5.8)
                 pdf.cell(w - 3, 3.5, limpiar_texto_pdf(cargos_ap[i]))
 
-            pdf.set_xy(x_col + 1.5, y6_body + 12.2)
-            pdf.set_font("Arial", "B", 6)
-            pdf.cell(w - 3, 3.5, "Firma: _______________________")
+            pdf.set_xy(x_col + 1.5, y6_body + 13.0)
+            pdf.set_font("Arial", "B", 6.1)
+            pdf.cell(w - 3, 3.6, "Firma: ______________________")
 
-    dibujar_formulario(8)
+    # Renderizar ORIGINAL arriba (y = 7.0 mm hasta 132.5 mm)
+    dibujar_formulario(7.0, "ORIGINAL - GESTION HUMANA")
 
-    pdf.set_xy(10, 132.5)
-    pdf.set_font("Arial", "", 6.5)
-    pdf.cell(196, 3, "- " * 90, align="C")
+    # Línea punteada de corte centrada en y = 138.0 mm
+    pdf.set_xy(X0, 136.5)
+    pdf.set_font("Arial", "", 6.8)
+    pdf.set_text_color(100, 100, 100)
+    pdf.cell(W_TOT, 3.5, "- " * 92, align="C")
+    pdf.set_text_color(0, 0, 0)
 
-    dibujar_formulario(138)
+    # Renderizar COPIA abajo (y = 143.5 mm hasta 269.0 mm)
+    dibujar_formulario(143.5, "COPIA - COLABORADOR / OPERACIONES")
 
     out = pdf.output(dest="S")
     return out.encode("latin-1") if isinstance(out, str) else bytes(out)
@@ -813,8 +874,7 @@ with tab_reg_p:
     with c_sol2:
         motivo_solicitud = st.selectbox("Motivo Solicitud", MOTIVOS_SOLICITUD_BOLETA)
     with c_sol3:
-        lista_resp = st.session_state.get("lista_responsables", RESPONSABLES_DEFAULT)
-        hecho_por = st.selectbox("Hecho Por (Analista)", lista_resp)
+        hecho_por = st.selectbox("Hecho Por (Analista)", RESPONSABLES_PERMISOS)
 
     c_f1, c_f2, c_f3, c_f4 = st.columns([1, 1, 1, 0.9])
     with c_f1:
