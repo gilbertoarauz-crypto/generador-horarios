@@ -600,7 +600,7 @@ def generar_pdf_f_corp_gh_pla_25(bol: dict) -> bytes:
         pdf.cell(10.0, 4.8, f"{f_ing.month:02d}", border=1, align="C")
         pdf.cell(12.0, 4.8, f"{f_ing.year}", border=1, align="C")
 
-        # --- BLOQUE 4: MOTIVO SOLICITUD + EXPLICACIÓN CON UNA SOLA LÍNEA DE BASE ---
+        # --- BLOQUE 4: MOTIVO SOLICITUD + EXPLICACIÓN LIMPIA SIN LÍNEAS EN EL AIRE ---
         y4 = y3_body + h_body3
         h_hdr4 = 4.2
         pdf.set_fill_color(*gris_banda)
@@ -640,12 +640,12 @@ def generar_pdf_f_corp_gh_pla_25(bol: dict) -> bytes:
         if mot_sel in ["Permiso Sindical", "Compensatorio"]:
             dibujar_opcion_sombreada(X0 + 2.0, y4_body + 10.3, 30.0, 3.8, True, mot_sel)
 
-        # Etiqueta izquierda + Texto de explicación (1 o 2 líneas, con UNA sola línea base debajo)
+        # Etiqueta izquierda + Texto de explicación limpio (sin líneas flotantes)
         pdf.set_font("Arial", "", 6.4)
-        pdf.set_xy(X0 + 2.0, y4_body + 14.0)
+        pdf.set_xy(X0 + 2.0, y4_body + 13.8)
         pdf.cell(66.0, 4.0, "Explique de forma clara y breve el motivo de esta solicitud:", align="L")
 
-        obs_txt = " ".join(limpiar_texto_pdf(bol["observaciones"]).split())[:340]
+        obs_txt = " ".join(limpiar_texto_pdf(bol["observaciones"]).split())[:420]
         pdf.set_font("Arial", "B", 6.5)
 
         palabras = obs_txt.split(" ") if obs_txt else []
@@ -663,24 +663,32 @@ def generar_pdf_f_corp_gh_pla_25(bol: dict) -> bytes:
         x_obs1 = X0 + 69.0
         w_obs1 = W_TOT - 71.0
         pdf.set_xy(x_obs1, y4_body + 13.8)
-        pdf.cell(w_obs1, 3.8, linea_1, align="C")
+        pdf.cell(w_obs1, 4.0, linea_1, align="C")
 
-        pdf.set_line_width(0.25)
-        if not resto_palabras:
-            # Si cabe en 1 sola línea, dibuja una sola línea limpia debajo del renglón 1
-            pdf.line(x_obs1, y4_body + 17.8, X0 + W_TOT - 2.0, y4_body + 17.8)
-        else:
-            # Si ocupa 2 líneas, no pone línea en medio; escribe el renglón 2 a ancho completo
-            # y dibuja UNA única línea inferior bien separada del borde del cuadro
-            linea_2 = " ".join(resto_palabras)
-            pdf.set_xy(X0 + 2.5, y4_body + 18.2)
-            pdf.cell(W_TOT - 5.0, 3.8, linea_2, align="C")
-            pdf.line(X0 + 2.5, y4_body + 22.3, X0 + W_TOT - 2.5, y4_body + 22.3)
+        # Si hay más texto, dividir en Renglón 2 (dentro de este cuadro) y Renglón 3 (en la fila siguiente)
+        linea_2, linea_3 = "", ""
+        if resto_palabras:
+            resto_3 = []
+            for idx_r, pal in enumerate(resto_palabras):
+                prueba_r = f"{linea_2} {pal}".strip()
+                if pdf.get_string_width(prueba_r) <= (W_TOT - 8.0):
+                    linea_2 = prueba_r
+                else:
+                    resto_3 = resto_palabras[idx_r:]
+                    break
+            linea_3 = " ".join(resto_3)
 
-        # --- BLOQUE 5: FILA SEPARADORA + FIRMA DEL SOLICITANTE ---
+        if linea_2:
+            pdf.set_xy(X0 + 3.0, y4_body + 18.6)
+            pdf.cell(W_TOT - 6.0, 4.0, linea_2, align="C")
+
+        # --- BLOQUE 5: FILA ADICIONAL (Renglón 3 si el texto es muy largo) + FIRMA DEL SOLICITANTE ---
         y5_sep = y4_body + h_body4
         pdf.set_xy(X0, y5_sep)
         pdf.cell(W_TOT, 4.4, "", border=1)
+        if linea_3:
+            pdf.set_xy(X0 + 3.0, y5_sep + 0.3)
+            pdf.cell(W_TOT - 6.0, 3.8, linea_3, align="C")
 
         y5_sig = y5_sep + 4.4
         w_izq_sig = 134.0
@@ -1084,7 +1092,7 @@ with tab_bol_p:
                     <b>Ingreso:</b> {bol['fecha_ingreso_obj'].strftime('%d/%m/%Y')} (<b>{bol['total_dias']} día(s)</b>)
                 </p>
                 <p style="margin:6px 0; font-size:13px;">
-                    <b>Explicación:</b> <u><b>{bol['observaciones']}</b></u>
+                    <b>Explicación:</b> <b>{bol['observaciones']}</b>
                 </p>
             </div>
             """,
