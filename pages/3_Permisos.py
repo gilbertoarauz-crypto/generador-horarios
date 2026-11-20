@@ -447,7 +447,6 @@ def generar_pdf_f_corp_gh_pla_25(bol: dict) -> bytes:
     pdf.set_auto_page_break(auto=False)
     pdf.add_page()
 
-    # Colores exactos del documento original
     azul_hdr = (0, 112, 192)        # Banda "Aprobó"
     gris_banda = (231, 230, 230)    # Encabezados de tabla (#E7E6E6)
     amarillo_celda = (255, 255, 0)  # Código y Nombre (#FFFF00)
@@ -493,14 +492,12 @@ def generar_pdf_f_corp_gh_pla_25(bol: dict) -> bytes:
         pdf.cell(48, 4.5, "F-CORP-GH-PLA-25/V1-07-2013", align="R")
 
         # --- BLOQUE 1: Código Colaborador | Nombre | Cargo | Fecha Solicitud ---
-        # Anchos exactos: 26 + 58 + 74 + 40 = 198 mm
         w_cod, w_nom, w_car, w_fsol = 26.0, 58.0, 74.0, 40.0
         y1 = y_top + 12.0
         h_hdr1 = 5.4
         pdf.set_fill_color(*gris_banda)
         pdf.set_font("Arial", "B", 6.6)
 
-        # Celda doble línea "Código Colaborador"
         pdf.set_xy(X0, y1)
         pdf.cell(w_cod, h_hdr1, "", border=1, fill=True)
         pdf.set_xy(X0, y1 + 0.4)
@@ -523,7 +520,6 @@ def generar_pdf_f_corp_gh_pla_25(bol: dict) -> bytes:
         pdf.set_font("Arial", "", 7.4)
         pdf.cell(w_car, h_val1, limpiar_texto_pdf(bol["cargo"]), border=1, align="C")
 
-        # Subceldas DD | MM | AAAA para Fecha Solicitud (13 + 13 + 14 = 40 mm)
         x_fsol = X0 + w_cod + w_nom + w_car
         pdf.set_font("Arial", "B", 6.0)
         pdf.set_xy(x_fsol, y1_val)
@@ -539,7 +535,6 @@ def generar_pdf_f_corp_gh_pla_25(bol: dict) -> bytes:
         pdf.cell(14.0, 4.2, f"{f_sol.year}", border=1, align="C")
 
         # --- BLOQUE 2: Sucursal | Centro de Costo | Departamento ---
-        # Anchos: 64 + 70 + 64 = 198 mm
         w_suc, w_cc, w_dep = 64.0, 70.0, 64.0
         y2 = y1_val + h_val1
         h_hdr2 = 4.2
@@ -558,7 +553,7 @@ def generar_pdf_f_corp_gh_pla_25(bol: dict) -> bytes:
         pdf.cell(w_cc, h_val2, limpiar_texto_pdf(bol["centro_costo"]), border=1, align="C")
         pdf.cell(w_dep, h_val2, limpiar_texto_pdf(bol["departamento"]), border=1, align="C")
 
-        # --- BLOQUE 3: Tipo de Solicitud (134 mm) | Fecha Solicitud / Salida / Ingreso (64 mm) ---
+        # --- BLOQUE 3: Tipo de Solicitud | Fecha Solicitud / Salida / Ingreso ---
         w_tipo = 134.0
         w_per = 64.0
         y3 = y2_val + h_val2
@@ -574,7 +569,6 @@ def generar_pdf_f_corp_gh_pla_25(bol: dict) -> bytes:
         pdf.set_xy(X0, y3_body)
         pdf.cell(w_tipo, h_body3, "", border=1)
 
-        # Opciones de Tipo de Solicitud con sombreado gris (#BFBFBF) en la seleccionada
         tipo_sel = bol["tipo_solicitud"]
         dibujar_opcion_sombreada(X0 + 3.0, y3_body + 1.2, 31.0, 4.4, tipo_sel == "Permiso Remunerado", "Permiso Remunerado")
         dibujar_opcion_sombreada(X0 + 36.0, y3_body + 1.2, 31.0, 4.4, tipo_sel == "Permiso No Remunerado", "Permiso No Remunerado")
@@ -582,7 +576,6 @@ def generar_pdf_f_corp_gh_pla_25(bol: dict) -> bytes:
         dibujar_opcion_sombreada(X0 + 101.0, y3_body + 1.2, 31.0, 4.4, tipo_sel == "Licencia No Remunerada", "Licencia No Remunerada")
         dibujar_opcion_sombreada(X0 + 3.0, y3_body + 6.4, 31.0, 4.4, tipo_sel == "Compensatorio", "Compensatorio")
 
-        # Subcuadro derecho: Fecha de Salida (32 mm) | Fecha de Ingreso (32 mm)
         x_per = X0 + w_tipo
         pdf.set_font("Arial", "B", 6.4)
         pdf.set_xy(x_per, y3_body)
@@ -607,7 +600,7 @@ def generar_pdf_f_corp_gh_pla_25(bol: dict) -> bytes:
         pdf.cell(10.0, 4.8, f"{f_ing.month:02d}", border=1, align="C")
         pdf.cell(12.0, 4.8, f"{f_ing.year}", border=1, align="C")
 
-        # --- BLOQUE 4: MOTIVO SOLICITUD + EXPLICACIÓN ---
+        # --- BLOQUE 4: MOTIVO SOLICITUD + EXPLICACIÓN MULTIRENGLÓN ---
         y4 = y3_body + h_body3
         h_hdr4 = 4.2
         pdf.set_fill_color(*gris_banda)
@@ -621,55 +614,86 @@ def generar_pdf_f_corp_gh_pla_25(bol: dict) -> bytes:
         pdf.cell(W_TOT, h_body4, "", border=1)
 
         mot_sel = bol["motivo_solicitud"]
-        # Fila superior de motivos (las 7 categorías oficiales en horizontal)
-        dibujar_opcion_sombreada(X0 + 2.0, y4_body + 2.5, 24.0, 8.5, mot_sel == "Enfermedad", "Enfermedad")
-        dibujar_opcion_sombreada(X0 + 27.0, y4_body + 2.5, 24.0, 8.5, mot_sel == "Cita Médica", "Cita Medica")
-        dibujar_opcion_sombreada(X0 + 52.0, y4_body + 2.5, 24.0, 8.5, mot_sel == "Fallecimiento", "Fallecimiento")
+        dibujar_opcion_sombreada(X0 + 2.0, y4_body + 2.0, 24.0, 8.2, mot_sel == "Enfermedad", "Enfermedad")
+        dibujar_opcion_sombreada(X0 + 27.0, y4_body + 2.0, 24.0, 8.2, mot_sel == "Cita Médica", "Cita Medica")
+        dibujar_opcion_sombreada(X0 + 52.0, y4_body + 2.0, 24.0, 8.2, mot_sel == "Fallecimiento", "Fallecimiento")
 
-        # Nacimiento hijo (a) en negrita como en el formato original
         if mot_sel == "Nacimiento hijo (a)":
             pdf.set_fill_color(*gris_selec)
-            pdf.rect(X0 + 77.0, y4_body + 2.5, 31.0, 8.5, style="F")
+            pdf.rect(X0 + 77.0, y4_body + 2.0, 31.0, 8.2, style="F")
         pdf.set_font("Arial", "B", 6.3)
-        pdf.set_xy(X0 + 77.0, y4_body + 2.5)
-        pdf.cell(31.0, 8.5, "Nacimiento hijo (a)", align="C")
+        pdf.set_xy(X0 + 77.0, y4_body + 2.0)
+        pdf.cell(31.0, 8.2, "Nacimiento hijo (a)", align="C")
 
-        dibujar_opcion_sombreada(X0 + 109.0, y4_body + 2.5, 23.0, 8.5, mot_sel == "Matrimonio", "Matrimonio")
-        dibujar_opcion_sombreada(X0 + 133.5, y4_body + 2.5, 31.0, 8.5, mot_sel == "Asuntos Personales", "Asuntos Personales")
+        dibujar_opcion_sombreada(X0 + 109.0, y4_body + 2.0, 23.0, 8.2, mot_sel == "Matrimonio", "Matrimonio")
+        dibujar_opcion_sombreada(X0 + 133.5, y4_body + 2.0, 31.0, 8.2, mot_sel == "Asuntos Personales", "Asuntos Personales")
         dibujar_opcion_sombreada(
             X0 + 166.0,
-            y4_body + 1.8,
+            y4_body + 1.5,
             30.0,
-            9.5,
+            9.2,
             mot_sel == "Representar a la empresa, el Estado o el país",
             "Representar a la\nempresa, el Estado\no el pais",
             multilinea=True,
         )
 
-        # Opciones adicionales si eligieron Permiso Sindical o Compensatorio como motivo
         if mot_sel in ["Permiso Sindical", "Compensatorio"]:
-            dibujar_opcion_sombreada(X0 + 2.0, y4_body + 11.2, 30.0, 4.2, True, mot_sel)
+            dibujar_opcion_sombreada(X0 + 2.0, y4_body + 10.3, 30.0, 3.8, True, mot_sel)
 
-        # Etiqueta izquierda + Texto de explicación subrayado a la derecha
+        # Etiqueta izquierda + distribución del texto de explicación en 3 renglones subrayados
         pdf.set_font("Arial", "", 6.4)
-        pdf.set_xy(X0 + 2.0, y4_body + 15.2)
+        pdf.set_xy(X0 + 2.0, y4_body + 14.5)
         pdf.cell(66.0, 4.0, "Explique de forma clara y breve el motivo de esta solicitud:", align="L")
 
-        x_obs = X0 + 69.0
-        w_obs = W_TOT - 71.0
-        pdf.set_xy(x_obs, y4_body + 13.8)
+        obs_txt = " ".join(limpiar_texto_pdf(bol["observaciones"]).split())[:380]
         pdf.set_font("Arial", "B", 6.5)
-        pdf.multi_cell(w_obs, 3.4, limpiar_texto_pdf(bol["observaciones"])[:220], align="C")
-        # Línea inferior continua debajo de la explicación como en el original
-        pdf.set_line_width(0.25)
-        pdf.line(x_obs, y4_body + 20.8, X0 + W_TOT - 2.0, y4_body + 20.8)
 
-        # --- BLOQUE 5: FILA SEPARADORA + FIRMA DEL SOLICITANTE ---
+        palabras = obs_txt.split(" ") if obs_txt else []
+        linea_1 = ""
+        resto_palabras = []
+        for idx_p, pal in enumerate(palabras):
+            prueba = f"{linea_1} {pal}".strip()
+            if pdf.get_string_width(prueba) <= 125.0:
+                linea_1 = prueba
+            else:
+                resto_palabras = palabras[idx_p:]
+                break
+
+        # Renglón 1 (a la derecha de la etiqueta)
+        x_obs1 = X0 + 69.0
+        w_obs1 = W_TOT - 71.0
+        pdf.set_xy(x_obs1, y4_body + 14.2)
+        pdf.cell(w_obs1, 4.0, linea_1, align="C")
+        pdf.set_line_width(0.25)
+        pdf.line(x_obs1, y4_body + 18.3, X0 + W_TOT - 2.0, y4_body + 18.3)
+
+        # Dividir el resto del texto para Renglón 2 y Renglón 3 (a ancho completo de 194 mm)
+        linea_2, linea_3 = "", ""
+        if resto_palabras:
+            resto_3 = []
+            for idx_r, pal in enumerate(resto_palabras):
+                prueba_r = f"{linea_2} {pal}".strip()
+                if pdf.get_string_width(prueba_r) <= (W_TOT - 6.0):
+                    linea_2 = prueba_r
+                else:
+                    resto_3 = resto_palabras[idx_r:]
+                    break
+            linea_3 = " ".join(resto_3)
+
+        # Renglón 2 (ancho completo dentro de la caja de motivo)
+        pdf.set_xy(X0 + 2.0, y4_body + 19.2)
+        pdf.cell(W_TOT - 4.0, 4.0, linea_2, align="C")
+        pdf.line(X0 + 2.0, y4_body + 23.3, X0 + W_TOT - 2.0, y4_body + 23.3)
+
+        # --- BLOQUE 5: RENGLÓN ADICIONAL (Renglón 3) + FIRMA DEL SOLICITANTE ---
         y5_sep = y4_body + h_body4
         pdf.set_xy(X0, y5_sep)
-        pdf.cell(W_TOT, 4.2, "", border=1)
+        pdf.cell(W_TOT, 4.4, "", border=1)
+        if linea_3:
+            pdf.set_xy(X0 + 2.0, y5_sep + 0.4)
+            pdf.cell(W_TOT - 4.0, 3.8, linea_3, align="C")
 
-        y5_sig = y5_sep + 4.2
+        y5_sig = y5_sep + 4.4
         w_izq_sig = 134.0
         w_der_sig = 64.0
         pdf.set_xy(X0, y5_sig)
@@ -693,7 +717,6 @@ def generar_pdf_f_corp_gh_pla_25(bol: dict) -> bytes:
         pdf.set_text_color(0, 0, 0)
 
         y6_hdr = y6 + 4.4
-        # Anchos: 52 + 50 + 46 + 50 = 198 mm
         anchos_ap = [52.0, 50.0, 46.0, 50.0]
         titulos_ap = [
             "JEFE INMEDIATO",
@@ -733,7 +756,7 @@ def generar_pdf_f_corp_gh_pla_25(bol: dict) -> bytes:
         pdf.set_font("Arial", "B", 6.2)
         pdf.cell(15, 3.8, "Firma:", align="L")
 
-        # Columnas 2, 3 y 4: 2 filas cada una (Nombre arriba 5.4 mm, Firma abajo 10.8 mm)
+        # Columnas 2, 3 y 4: 2 filas cada una (Nombre arriba, Firma abajo)
         nombres_otros = [
             bol["prof_gh"],
             bol["director_area"],
@@ -742,7 +765,6 @@ def generar_pdf_f_corp_gh_pla_25(bol: dict) -> bytes:
         x_curr = X0 + anchos_ap[0]
         for idx_o, nom_o in enumerate(nombres_otros):
             w_o = anchos_ap[idx_o + 1]
-            # Fila Nombre
             pdf.set_xy(x_curr, y6_body)
             pdf.cell(w_o, h_fila_ap, "", border=1)
             pdf.set_xy(x_curr + 1.5, y6_body + 0.8)
@@ -751,7 +773,6 @@ def generar_pdf_f_corp_gh_pla_25(bol: dict) -> bytes:
             pdf.set_font("Arial", "", 6.2)
             pdf.cell(w_o - 15, 3.8, limpiar_texto_pdf(nom_o), align="C")
 
-            # Fila Firma (doble altura para igualar las 3 filas del Jefe Inmediato)
             pdf.set_xy(x_curr, y6_body + h_fila_ap)
             pdf.cell(w_o, 2 * h_fila_ap, "", border=1)
             pdf.set_xy(x_curr + 1.5, y6_body + h_fila_ap + 3.2)
@@ -763,7 +784,7 @@ def generar_pdf_f_corp_gh_pla_25(bol: dict) -> bytes:
     # Renderizar ORIGINAL arriba (y = 8.0 mm)
     dibujar_formulario(8.0)
 
-    # Línea punteada de separación en medio de la página Carta (y = 138.5 mm)
+    # Línea punteada de separación en medio de la página Carta (y = 137.0 mm)
     pdf.set_xy(X0, 137.0)
     pdf.set_font("Arial", "", 6.8)
     pdf.set_text_color(90, 90, 90)
