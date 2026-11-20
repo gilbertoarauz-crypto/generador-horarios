@@ -192,21 +192,24 @@ def crear_cliente_gspread():
 def obtener_hoja_permisos_gsheets():
     """Conecta con la pestaña HISTORIAL DE PERMISOS dentro del libro principal SHEET_ID."""
     client = crear_cliente_gspread()
-    if client is None or "SHEET_ID" not in st.secrets:
-        return None
-    spreadsheet = client.open_by_key(st.secrets["SHEET_ID"])
+    if client is None:
+        return None, "Falta [gcp_service_account] en Secrets."
+    if "SHEET_ID" not in st.secrets or not str(st.secrets["SHEET_ID"]).strip():
+        return None, "Falta SHEET_ID en Secrets."
+
+    spreadsheet = client.open_by_key(str(st.secrets["SHEET_ID"]).strip())
     nombres_hojas = [ws.title for ws in spreadsheet.worksheets()]
 
     if NOMBRE_HOJA_PERMISOS in nombres_hojas:
-        return spreadsheet.worksheet(NOMBRE_HOJA_PERMISOS)
+        return spreadsheet.worksheet(NOMBRE_HOJA_PERMISOS), "OK"
     if "Registro" in nombres_hojas:
-        return spreadsheet.worksheet("Registro")
+        return spreadsheet.worksheet("Registro"), "OK"
 
     ws_nueva = spreadsheet.add_worksheet(
         title=NOMBRE_HOJA_PERMISOS, rows=1000, cols=len(COLUMNAS_PERMISOS)
     )
     ws_nueva.append_row(COLUMNAS_PERMISOS)
-    return ws_nueva
+    return ws_nueva, "OK"
 
 
 @st.cache_data(ttl=600, show_spinner="Cargando directorio desde Google Drive...")
@@ -215,16 +218,17 @@ def cargar_directorio_desde_drive():
     Lee automáticamente el directorio de colaboradores desde Google Drive:
     1. Si existe SHEET_DIRECTORIO_ID en Secrets, abre ese Google Sheet.
     2. Si no, busca la pestaña 'DIRECTORIO' o 'Directorio Consolidado' en el mismo SHEET_ID.
-    Detecta automáticamente las columnas CODIGO y APELLIDO Y NOMBRE sin importar la fila de encabezado.
     """
     try:
         client = crear_cliente_gspread()
         if client is None:
             return {}, False, "Sin credenciales gcp_service_account"
 
-        sheet_key = st.secrets.get("SHEET_DIRECTORIO_ID") or st.secrets.get("SHEET_ID")
+        sheet_key = str(
+            st.secrets.get("SHEET_DIRECTORIO_ID") or st.secrets.get("SHEET_ID") or ""
+        ).strip()
         if not sheet_key:
-            return {}, False, "Sin SHEET_ID configurado"
+            return {}, False, "Sin SHEET_DIRECTORIO_ID o SHEET_ID configurado"
 
         spreadsheet = client.open_by_key(sheet_key)
         worksheets = spreadsheet.worksheets()
@@ -305,30 +309,41 @@ def cargar_directorio_desde_drive():
 
 
 def leer_permisos_desde_gsheets():
-    """Lee el historial acumulado de permisos desde Google Sheets."""
+    """Lee el historial acumulado de permisos sin fallar por columnas vacías o duplicadas."""
     try:
-        ws = obtener_hoja_permisos_gsheets()
+        ws, msg = obtener_hoja_permisos_gsheets()
         if ws is None:
-            return pd.DataFrame(columns=COLUMNAS_PERMISOS), False
-        records = ws.get_all_records()
-        if not records:
-            return pd.DataFrame(columns=COLUMNAS_PERMISOS), True
-        df_p = pd.DataFrame(records)
-        df_p.columns = [str(c).strip() for c in df_p.columns]
+            return pd.DataFrame(columns=COLUMNAS_PERMISOS), False, msg
+
+        valores = ws.get_all_values()
+        if not valores or len(valores) <= 1:
+            return (
+                pd.DataFrame(columns=COLUMNAS_PERMISOS),
+                True,
+                f"Pestaña '{ws.title}' lista (0 registros)",
+            )
+
+        encabezados = [str(c).strip() for c in valores[0]]
+        filas = valores[1:]
+        df_p = pd.DataFrame(filas, columns=encabezados)
+        # Eliminar columnas vacías en encabezado si existen
+        df_p = df_p.loc[:, df_p.columns != ""].copy()
+
         if "Codigo" in df_p.columns:
             df_p = df_p[df_p["Codigo"].astype(str).str.strip() != ""].copy()
             df_p["Codigo"] = df_p["Codigo"].apply(limpiar_codigo)
-        return df_p, True
-    except Exception:
-        return pd.DataFrame(columns=COLUMNAS_PERMISOS), False
+
+        return df_p, True, f"Pestaña '{ws.title}' conectada"
+    except Exception as e:
+        return pd.DataFrame(columns=COLUMNAS_PERMISOS), False, f"Detalle técnico: {e}"
 
 
 def agregar_permiso_en_gsheets(fila_dict: dict):
     """Inserta el nuevo permiso en la fila 2 de la pestaña HISTORIAL DE PERMISOS."""
     try:
-        ws = obtener_hoja_permisos_gsheets()
+        ws, msg = obtener_hoja_permisos_gsheets()
         if ws is None:
-            return False, "Faltan credenciales SHEET_ID o gcp_service_account en Secrets."
+            return False, msg
 
         encabezados = ws.row_values(1)
         if not encabezados:
@@ -669,9 +684,10 @@ if "directorio_drive" not in st.session_state:
     st.session_state.directorio_drive_msg = msg_dir_gs
 
 if "permisos_sincronizados_gs" not in st.session_state:
-    df_p_gs, ok_p_gs = leer_permisos_desde_gsheets()
+    df_p_gs, ok_p_gs, msg_p_gs = leer_permisos_desde_gsheets()
     st.session_state.historial_permisos = df_p_gs
     st.session_state.permisos_en_gsheets = ok_p_gs
+    st.session_state.permisos_msg_gs = msg_p_gs
     st.session_state.permisos_sincronizados_gs = True
 
 
@@ -687,13 +703,14 @@ if st.session_state.permisos_en_gsheets:
     )
 else:
     st.sidebar.warning(
-        "⚠️ Verifica `SHEET_ID` y `gcp_service_account` en Secrets de Streamlit Cloud."
+        f"⚠️ No se pudo leer `SHEET_ID`:\n\n{st.session_state.get('permisos_msg_gs', '')}"
     )
 
 if st.sidebar.button("🔄 Recargar Permisos", use_container_width=True):
-    df_p_gs, ok_p_gs = leer_permisos_desde_gsheets()
+    df_p_gs, ok_p_gs, msg_p_gs = leer_permisos_desde_gsheets()
     st.session_state.historial_permisos = df_p_gs
     st.session_state.permisos_en_gsheets = ok_p_gs
+    st.session_state.permisos_msg_gs = msg_p_gs
     st.rerun()
 
 st.sidebar.markdown("---")
