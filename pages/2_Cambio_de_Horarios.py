@@ -444,7 +444,6 @@ def parsear_texto_pegado_excel(texto_tsv: str) -> pd.DataFrame:
         return normalizar_tabla_programacion(df_tsv)
 
     ncols = df_tsv.shape[1]
-    # Estructura exacta Columna B (Fecha) a Columna M (Jornada) = 12 columnas
     if ncols == 12:
         df_tsv.columns = [
             "Fecha",
@@ -460,7 +459,6 @@ def parsear_texto_pegado_excel(texto_tsv: str) -> pd.DataFrame:
             "TIPO",
             "Jornada",
         ]
-    # Si copiaron desde Columna A (REF) hasta Columna M (Jornada) = 13 columnas
     elif ncols >= 13:
         df_tsv.columns = [
             "Ref",
@@ -477,7 +475,6 @@ def parsear_texto_pegado_excel(texto_tsv: str) -> pd.DataFrame:
             "TIPO",
             "Jornada",
         ] + [f"Extra_{i}" for i in range(ncols - 13)]
-    # Compatibilidad con pegados parciales hasta PADMIN (10 u 11 cols)
     elif ncols == 11:
         df_tsv.columns = [
             "Ref",
@@ -863,7 +860,7 @@ def generar_pdf_f_zen_go_07(bol: dict) -> bytes:
 
     dibujar_bloque_firmas(112, bol["responsable"])
 
-    def dibujar_seccion_copia(y_base, titulo_tabla, filas_cambio):
+    def dibujar_seccion_copia(y_base, titulo_tabla, filas_cambio, cod_cubierto=""):
         pdf.set_xy(10, y_base)
         pdf.set_font("Arial", "", 6)
         pdf.cell(196, 2.5, "- " * 88, align="C", ln=1)
@@ -873,11 +870,15 @@ def generar_pdf_f_zen_go_07(bol: dict) -> bytes:
         pdf.set_font("Arial", "B", 10)
         pdf.cell(168, 4.5, "CAMBIO DE HORARIO", align="C", ln=1)
 
+        motivo_copia = bol["motivo"]
+        if bol["es_intercambio"] and cod_cubierto:
+            motivo_copia = f"{bol['motivo']}  -  CUBRE AL OP. {cod_cubierto}"
+
         pdf.set_x(28)
         pdf.set_font("Arial", "B", 6.8)
-        pdf.cell(95, 4, limpiar_texto_pdf(bol["motivo"]), align="L")
+        pdf.cell(112, 4, limpiar_texto_pdf(motivo_copia), align="L")
         pdf.cell(
-            73,
+            56,
             4,
             limpiar_texto_pdf(f"Fecha de Autorizacion:   {bol['fecha_sol']}"),
             align="R",
@@ -922,11 +923,19 @@ def generar_pdf_f_zen_go_07(bol: dict) -> bytes:
         pdf.set_font("Arial", "B", 5.8)
         pdf.cell(196, 3, "COPIA NO CONTROLADA", align="C")
 
-    dibujar_seccion_copia(126, "HORARIO DE CAMBIO OPERADOR 1", bol["cambio_op1"])
+    # Copia Operador 1 -> indica "CUBRE AL OP. {cod_2}"
+    dibujar_seccion_copia(
+        126,
+        "HORARIO DE CAMBIO OPERADOR 1",
+        bol["cambio_op1"],
+        cod_cubierto=bol.get("cod_2", ""),
+    )
+    # Copia Operador 2 -> indica "CUBRE AL OP. {cod_1}"
     dibujar_seccion_copia(
         190,
         "HORARIO DE CAMBIO OPERADOR 2",
         bol["cambio_op2"] if bol["es_intercambio"] else [],
+        cod_cubierto=bol.get("cod_1", ""),
     )
 
     pdf.set_draw_color(0, 112, 192)
@@ -1226,14 +1235,14 @@ with tab_registro:
                         sel_hh = r_cols[3].selectbox(
                             f"HH{idx+1}",
                             HORAS_CATALOGO,
-                            index=12,  # 12 por defecto
+                            index=12,
                             key=f"brt_ind_hh_{idx}",
                             label_visibility="collapsed",
                         )
                         sel_mm = r_cols[4].selectbox(
                             f"MM{idx+1}",
                             MINUTOS_CATALOGO,
-                            index=0,  # 00 por defecto
+                            index=0,
                             key=f"brt_ind_mm_{idx}",
                             label_visibility="collapsed",
                         )
