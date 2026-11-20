@@ -326,7 +326,6 @@ def leer_permisos_desde_gsheets():
         encabezados = [str(c).strip() for c in valores[0]]
         filas = valores[1:]
         df_p = pd.DataFrame(filas, columns=encabezados)
-        # Eliminar columnas vacías en encabezado si existen
         df_p = df_p.loc[:, df_p.columns != ""].copy()
 
         if "Codigo" in df_p.columns:
@@ -367,6 +366,9 @@ def agregar_permiso_en_gsheets(fila_dict: dict):
 
 def buscar_colaborador_permiso(codigo: str):
     cod = limpiar_codigo(codigo)
+    if not cod:
+        return "", "PATIO LOS PUEBLOS", False
+
     # 1. Buscar en el Directorio cargado automáticamente desde Google Drive
     if "directorio_drive" in st.session_state and cod in st.session_state.directorio_drive:
         info = st.session_state.directorio_drive[cod]
@@ -761,11 +763,15 @@ with tab_reg_p:
     )
     c1, c2, c3 = st.columns([1, 1.8, 1.8])
     with c1:
-        cod_colab = limpiar_codigo(st.text_input("Código Colaborador", value="81085"))
+        cod_colab = limpiar_codigo(
+            st.text_input("Código Colaborador", value="", placeholder="Ej. 81085")
+        )
     with c2:
         nom_colab, suc_default, ok_colab = buscar_colaborador_permiso(cod_colab)
         st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-        if ok_colab:
+        if not cod_colab:
+            st.info("👤 Escribe un código para buscar el colaborador.")
+        elif ok_colab:
             st.success(f"👤 **{nom_colab}**")
         else:
             st.warning(f"👤 **{nom_colab}**")
@@ -776,7 +782,7 @@ with tab_reg_p:
             date.today().year,
         )
 
-    if not ok_colab:
+    if cod_colab and not ok_colab:
         nom_colab = st.text_input(
             "Ingresa manualmente Nombre y Apellido del Colaborador:",
             placeholder="APELLIDO, NOMBRE",
