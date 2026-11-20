@@ -90,6 +90,17 @@ st.markdown(
         text-align: center;
         font-family: monospace;
     }
+    .horario-libre-box {
+        background-color: #1e293b;
+        border: 1px solid #475569;
+        color: #94a3b8;
+        padding: 6px 8px;
+        border-radius: 5px;
+        font-weight: bold;
+        font-size: 12.5px;
+        text-align: center;
+        font-family: monospace;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -923,14 +934,12 @@ def generar_pdf_f_zen_go_07(bol: dict) -> bytes:
         pdf.set_font("Arial", "B", 5.8)
         pdf.cell(196, 3, "COPIA NO CONTROLADA", align="C")
 
-    # Copia Operador 1 -> indica "CUBRE AL OP. {cod_2}"
     dibujar_seccion_copia(
         126,
         "HORARIO DE CAMBIO OPERADOR 1",
         bol["cambio_op1"],
         cod_cubierto=bol.get("cod_2", ""),
     )
-    # Copia Operador 2 -> indica "CUBRE AL OP. {cod_1}"
     dibujar_seccion_copia(
         190,
         "HORARIO DE CAMBIO OPERADOR 2",
@@ -1194,19 +1203,19 @@ with tab_registro:
                     anio_consulta,
                 )
 
-            h_cols = st.columns([0.3, 1.35, 1.25, 0.72, 0.72, 1.15, 1.15, 1.2, 1.2])
+            h_cols = st.columns([0.3, 1.35, 1.25, 1.25, 0.7, 0.7, 1.15, 1.15, 1.15])
             h_cols[0].markdown("**#**")
             h_cols[1].markdown("**Fecha**")
             h_cols[2].markdown("**Turno Actual**")
-            h_cols[3].markdown("**Hora Ini**")
-            h_cols[4].markdown("**Min Ini**")
-            h_cols[5].markdown("**Horario Calculado**")
-            h_cols[6].markdown("**Nueva Tarea**")
+            h_cols[3].markdown("**Nueva Tarea**")
+            h_cols[4].markdown("**Hora Ini**")
+            h_cols[5].markdown("**Min Ini**")
+            h_cols[6].markdown("**Horario Calculado**")
             h_cols[7].markdown("**P. Inicio**")
             h_cols[8].markdown("**P. Final**")
 
             for idx in range(7):
-                r_cols = st.columns([0.3, 1.35, 1.25, 0.72, 0.72, 1.15, 1.15, 1.2, 1.2])
+                r_cols = st.columns([0.3, 1.35, 1.25, 1.25, 0.7, 0.7, 1.15, 1.15, 1.15])
                 r_cols[0].markdown(f"**{idx + 1}**")
                 default_idx = 1 if (idx == 0 and len(opciones_fecha_sel) > 1) else 0
                 sel_f_str = r_cols[1].selectbox(
@@ -1223,23 +1232,36 @@ with tab_registro:
                     jornada_dia = prog1.get("jornada", jornada_op1)
                     r_cols[2].info(f"`{prog1['horario']}` · {prog1['sercon']}")
 
-                    if modalidad == "Cambio de día libre":
-                        r_cols[3].caption("Libre")
-                        r_cols[4].caption("—")
+                    # En Cambio de día libre, fila 1 arranca sugerida en DESCANSO (idx 6) y fila 2+ en DISPONIBILIDAD (idx 0)
+                    default_tarea_idx = (
+                        6 if (modalidad == "Cambio de día libre" and idx == 0) else 0
+                    )
+                    nueva_tar = r_cols[3].selectbox(
+                        f"T{idx+1}",
+                        TAREAS_CATALOGO,
+                        index=default_tarea_idx,
+                        key=f"brt_ind_tar_{idx}",
+                        label_visibility="collapsed",
+                    )
+
+                    # Si Nueva Tarea es DESCANSO, el horario es "-" (LIBRE); para DISPONIBILIDAD o cualquier otra tarea, deja elegir Hora y Minutos
+                    if nueva_tar == "DESCANSO":
+                        r_cols[4].caption("Libre")
+                        r_cols[5].caption("—")
                         nuevo_hor = "-"
-                        r_cols[5].markdown(
-                            '<div class="horario-calc-box">- (LIBRE)</div>',
+                        r_cols[6].markdown(
+                            '<div class="horario-libre-box">- (LIBRE)</div>',
                             unsafe_allow_html=True,
                         )
                     else:
-                        sel_hh = r_cols[3].selectbox(
+                        sel_hh = r_cols[4].selectbox(
                             f"HH{idx+1}",
                             HORAS_CATALOGO,
                             index=12,
                             key=f"brt_ind_hh_{idx}",
                             label_visibility="collapsed",
                         )
-                        sel_mm = r_cols[4].selectbox(
+                        sel_mm = r_cols[5].selectbox(
                             f"MM{idx+1}",
                             MINUTOS_CATALOGO,
                             index=0,
@@ -1249,18 +1271,11 @@ with tab_registro:
                         nuevo_hor = calcular_rango_horario_por_jornada(
                             sel_hh, sel_mm, jornada_dia
                         )
-                        r_cols[5].markdown(
+                        r_cols[6].markdown(
                             f'<div class="horario-calc-box">{nuevo_hor}</div>',
                             unsafe_allow_html=True,
                         )
 
-                    nueva_tar = r_cols[6].selectbox(
-                        f"T{idx+1}",
-                        TAREAS_CATALOGO,
-                        index=6 if modalidad == "Cambio de día libre" else 0,
-                        key=f"brt_ind_tar_{idx}",
-                        label_visibility="collapsed",
-                    )
                     nuevo_pi = r_cols[7].selectbox(
                         f"PI{idx+1}",
                         PATIOS_CATALOGO,
