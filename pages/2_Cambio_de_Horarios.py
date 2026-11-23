@@ -234,7 +234,7 @@ COLUMNAS_HISTORIAL = [
 
 
 # ==========================================
-# UTILIDADES DE LIMPIEZA, HORAS Y DETECCIÓN "A ORDEN"
+# UTILIDADES DE LIMPIEZA, FECHAS, HORAS Y "A ORDEN"
 # ==========================================
 def limpiar_codigo(val):
     if pd.isna(val) or val is None:
@@ -300,8 +300,62 @@ def formatear_hora_celda(val):
     return s
 
 
-def parsear_fecha_segura(val):
-    """Convierte fechas YYYY-MM-DD, DD/MM/YYYY o dd-mmm-yy a date sin invertir mes/día."""
+def detectar_dayfirst(valores) -> bool:
+    """Detecta automáticamente si una columna de fechas en texto usa DD/MM/YYYY (True) o MM/DD/YYYY (False)."""
+    only_dmy = 0
+    only_mdy = 0
+    pares = []
+
+    for val in valores:
+        if pd.isna(val) or val is None or isinstance(val, (datetime, date, pd.Timestamp)):
+            continue
+        s = str(val).strip()
+        m = re.match(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})(?:\s|T|$)", s)
+        if not m:
+            continue
+        p1, p2, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if y < 100:
+            y += 2000
+        if p1 > 12 and 1 <= p2 <= 12:
+            only_dmy += 1
+        elif p2 > 12 and 1 <= p1 <= 12:
+            only_mdy += 1
+        pares.append((p1, p2, y))
+
+    if only_mdy > 0 and only_dmy == 0:
+        return False
+    if only_dmy > 0 and only_mdy == 0:
+        return True
+    if not pares:
+        return True
+
+    fechas_dmy = set()
+    fechas_mdy = set()
+    for p1, p2, y in pares:
+        if 1 <= p2 <= 12 and 1 <= p1 <= 31:
+            try:
+                fechas_dmy.add(date(y, p2, p1))
+            except ValueError:
+                pass
+        if 1 <= p1 <= 12 and 1 <= p2 <= 31:
+            try:
+                fechas_mdy.add(date(y, p1, p2))
+            except ValueError:
+                pass
+
+    if len(fechas_dmy) >= 2 and len(fechas_mdy) >= 2:
+        span_dmy = (max(fechas_dmy) - min(fechas_dmy)).days
+        span_mdy = (max(fechas_mdy) - min(fechas_mdy)).days
+        if span_mdy < span_dmy:
+            return False
+        if span_dmy < span_mdy:
+            return True
+
+    return True
+
+
+def parsear_fecha_segura(val, dayfirst: bool = True):
+    """Convierte fechas YYYY-MM-DD, DD/MM/YYYY, MM/DD/YYYY o dd-mmm-yy a date."""
     if pd.isna(val) or val is None or str(val).strip() == "":
         return None
     if isinstance(val, pd.Timestamp):
@@ -310,23 +364,42 @@ def parsear_fecha_segura(val):
         return val.date()
     if isinstance(val, date):
         return val
+
+    if isinstance(val, (int, float)) and not isinstance(val, bool) and val > 20000:
+        try:
+            return (datetime(1899, 12, 30) + timedelta(days=int(val))).date()
+        except Exception:
+            pass
+
     s = str(val).strip()
-    m_iso = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})", s)
+    m_iso = re.match(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})", s)
     if m_iso:
         try:
             return date(int(m_iso.group(1)), int(m_iso.group(2)), int(m_iso.group(3)))
         except ValueError:
             return None
-    m_dmy = re.match(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})", s)
-    if m_dmy:
-        d, m, y = int(m_dmy.group(1)), int(m_dmy.group(2)), int(m_dmy.group(3))
+
+    m_slash = re.match(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})", s)
+    if m_slash:
+        p1, p2, y = int(m_slash.group(1)), int(m_slash.group(2)), int(m_slash.group(3))
         if y < 100:
             y += 2000
+
+        if p1 > 12 and 1 <= p2 <= 12:
+            d, m = p1, p2
+        elif p2 > 12 and 1 <= p1 <= 12:
+            m, d = p1, p2
+        elif dayfirst:
+            d, m = p1, p2
+        else:
+            m, d = p1, p2
+
         try:
             return date(y, m, d)
         except ValueError:
             return None
-    m_es = re.match(r"^(\d{1,2})[-/\s]([a-zA-ZáéíóúÁÉÍÓÚ]{3,})[-/\s](\d{2,4})$", s)
+
+    m_es = re.match(r"^(\d{1,2})[-/\s]([a-zA-ZáéíóúÁÉÍÓÚ]{3,})[-/\s](\d{2,4})", s)
     if m_es:
         d = int(m_es.group(1))
         mes_txt = m_es.group(2).lower()[:3]
@@ -339,13 +412,46 @@ def parsear_fecha_segura(val):
                 return date(y, m, d)
             except ValueError:
                 return None
+
     try:
-        dt = pd.to_datetime(s, dayfirst=True, errors="coerce")
+        dt = pd.to_datetime(s, dayfirst=dayfirst, errors="coerce")
         if pd.notna(dt):
             return dt.date()
     except Exception:
         pass
     return None
+
+
+def parsear_serie_fechas(serie: pd.Series) -> pd.Series:
+    dayfirst_col = detectar_dayfirst(serie.tolist())
+    return serie.apply(lambda v: parsear_fecha_segura(v, dayfirst=dayfirst_col))
+
+
+def reparar_fechas_invertidas_excel(serie_dates: pd.Series) -> pd.Series:
+    """Detecta si Excel guardó 01/12..06/12 como fechas reales 2026-01-12..2026-06-12 (rango > 35 días)
+    e intercambia mes <-> día cuando al corregir la programación queda compacta (<= 35 días)."""
+    fechas_unicas = sorted({d for d in serie_dates.dropna() if isinstance(d, date)})
+    if len(fechas_unicas) < 2:
+        return serie_dates
+
+    span_orig = (max(fechas_unicas) - min(fechas_unicas)).days
+
+    def swap_date(d):
+        if not isinstance(d, date):
+            return d
+        if 1 <= d.day <= 12 and 1 <= d.month <= 12:
+            try:
+                return date(d.year, d.day, d.month)
+            except ValueError:
+                return d
+        return d
+
+    fechas_swap = sorted({swap_date(d) for d in fechas_unicas})
+    span_swap = (max(fechas_swap) - min(fechas_swap)).days
+
+    if span_orig > 35 and span_swap <= 35 and span_swap < span_orig:
+        return serie_dates.apply(swap_date)
+    return serie_dates
 
 
 def clasificar_tipo_cambio_row(row) -> str:
@@ -480,7 +586,7 @@ def normalizar_tabla_programacion(df_raw: pd.DataFrame, excluir_a_orden: bool = 
     df = df_raw.copy()
     cols_upper = [str(c).strip().upper() for c in df.columns]
     if not any(k in cols_upper for k in ["CODIGO", "CÓDIGO"]):
-        for idx in range(min(10, len(df))):
+        for idx in range(min(12, len(df))):
             row_vals = [str(x).strip().upper() for x in df.iloc[idx].tolist()]
             if "CODIGO" in row_vals or "CÓDIGO" in row_vals:
                 df.columns = [str(x).strip() for x in df.iloc[idx].tolist()]
@@ -492,21 +598,21 @@ def normalizar_tabla_programacion(df_raw: pd.DataFrame, excluir_a_orden: bool = 
     for c in df.columns:
         cu = str(c).strip().upper()
         destino = None
-        if cu in ["FECHA"]:
+        if cu in ["FECHA", "FECHA PROGRAMADA"]:
             destino = "Fecha"
-        elif cu in ["TAREA", "CODIGO SERCON", "CÓDIGO SERCON"]:
+        elif cu in ["TAREA", "CODIGO SERCON", "CÓDIGO SERCON", "COD. SERCON"]:
             destino = "Tarea"
         elif cu in ["CODIGO", "CÓDIGO"]:
             destino = "CODIGO"
         elif cu in ["NOMBRE", "NOMBRE Y APELLIDO", "OPERADOR"]:
             destino = "NOMBRE"
-        elif cu in ["H.INICIAL", "HORA INICIAL", "HORA I"]:
+        elif cu in ["H.INICIAL", "H. INICIAL", "H INICIAL", "HORA INICIAL", "HORA I"]:
             destino = "H.Inicial"
-        elif cu in ["ORIGEN", "PATIO ORIGEN", "P. INICIO"]:
+        elif cu in ["ORIGEN", "PATIO ORIGEN", "P. INICIO", "P INICIO"]:
             destino = "origen"
-        elif cu in ["H. FINAL", "H.FINAL", "HORA FIN", "HORA FINAL"]:
+        elif cu in ["H. FINAL", "H.FINAL", "H FINAL", "HORA FIN", "HORA FINAL"]:
             destino = "H. Final"
-        elif cu in ["PATIO FINAL", "P. FINAL"]:
+        elif cu in ["PATIO FINAL", "P. FINAL", "P FINAL"]:
             destino = "Patio Final"
         elif cu in ["PADMIN", "PATIO"]:
             destino = "PADMIN"
@@ -523,14 +629,27 @@ def normalizar_tabla_programacion(df_raw: pd.DataFrame, excluir_a_orden: bool = 
 
     df["CODIGO_STR"] = df["CODIGO"].apply(limpiar_codigo)
     df = df[df["CODIGO_STR"] != ""].copy()
-    df["FECHA_DATE"] = df["Fecha"].apply(parsear_fecha_segura)
+
+    # Detección automática DD/MM/YYYY vs MM/DD/YYYY y reparación de fechas invertidas de Excel
+    df["FECHA_DATE"] = parsear_serie_fechas(df["Fecha"])
     df = df[df["FECHA_DATE"].notna()].copy()
+    df["FECHA_DATE"] = reparar_fechas_invertidas_excel(df["FECHA_DATE"])
 
     if "HORARIO_RAW" in df.columns:
         df["HORARIO_STR"] = df["HORARIO_RAW"].fillna("-").astype(str).str.strip()
+        if "H.Inicial" not in df.columns:
+            df["H.Inicial"] = df["HORARIO_STR"].apply(
+                lambda x: x.split("-")[0].strip() if "-" in x and x != "-" else "-"
+            )
+        if "H. Final" not in df.columns:
+            df["H. Final"] = df["HORARIO_STR"].apply(
+                lambda x: x.split("-")[1].strip() if "-" in x and len(x.split("-")) > 1 else "-"
+            )
     else:
-        hi = df["H.Inicial"].apply(formatear_hora_celda) if "H.Inicial" in df.columns else [""] * len(df)
-        hf = df["H. Final"].apply(formatear_hora_celda) if "H. Final" in df.columns else [""] * len(df)
+        hi = df["H.Inicial"].apply(formatear_hora_celda) if "H.Inicial" in df.columns else pd.Series([""] * len(df), index=df.index)
+        hf = df["H. Final"].apply(formatear_hora_celda) if "H. Final" in df.columns else pd.Series([""] * len(df), index=df.index)
+        df["H.Inicial"] = hi
+        df["H. Final"] = hf
         df["HORARIO_STR"] = [
             f"{a}-{b}" if (a and b and a != "-" and b != "-") else "-"
             for a, b in zip(hi, hf)
@@ -714,8 +833,16 @@ def obtener_resumen_anual_operador(df_hist: pd.DataFrame, codigo: str, anio_obje
     if sub.empty:
         return 0, 0, []
 
-    f_cambio = sub["FECHA DE CAMBIO"].apply(parsear_fecha_segura) if "FECHA DE CAMBIO" in sub.columns else pd.Series([None] * len(sub))
-    f_sol = sub["FECHA DE SOLICITUD"].apply(parsear_fecha_segura) if "FECHA DE SOLICITUD" in sub.columns else pd.Series([None] * len(sub))
+    f_cambio = (
+        parsear_serie_fechas(df_hist["FECHA DE CAMBIO"]).loc[sub.index]
+        if "FECHA DE CAMBIO" in df_hist.columns
+        else pd.Series([None] * len(sub), index=sub.index)
+    )
+    f_sol = (
+        parsear_serie_fechas(df_hist["FECHA DE SOLICITUD"]).loc[sub.index]
+        if "FECHA DE SOLICITUD" in df_hist.columns
+        else pd.Series([None] * len(sub), index=sub.index)
+    )
     fecha_ref = f_cambio.fillna(f_sol)
 
     sub["FECHA_REF"] = pd.to_datetime(fecha_ref, errors="coerce")
@@ -1671,8 +1798,12 @@ with tab_registro:
                 df_h_actual = st.session_state.historial_cambios
                 ya_existe = False
                 if not df_h_actual.empty and "COGIDO" in df_h_actual.columns:
-                    fecha_cmp_date = parsear_fecha_segura(fecha_cambio_principal)
-                    fechas_hist = df_h_actual["FECHA DE CAMBIO"].apply(parsear_fecha_segura)
+                    fecha_cmp_date = parsear_fecha_segura(fecha_cambio_principal, dayfirst=True)
+                    fechas_hist = (
+                        parsear_serie_fechas(df_h_actual["FECHA DE CAMBIO"])
+                        if "FECHA DE CAMBIO" in df_h_actual.columns
+                        else pd.Series([None] * len(df_h_actual), index=df_h_actual.index)
+                    )
                     dups = df_h_actual[
                         (df_h_actual["COGIDO"].astype(str).str.strip() == codigo_registro)
                         & (fechas_hist == fecha_cmp_date)
@@ -1686,7 +1817,7 @@ with tab_registro:
                     )
                 else:
                     ref_num = (fecha_solicitud - date(1899, 12, 30)).days
-                    fecha_cambio_obj = parsear_fecha_segura(fecha_cambio_principal)
+                    fecha_cambio_obj = parsear_fecha_segura(fecha_cambio_principal, dayfirst=True)
                     nuevo_registro = {
                         "REF": ref_num,
                         "COGIDO": codigo_registro,
@@ -1909,14 +2040,14 @@ with tab_estadisticas:
         st.info("No hay registros en el historial para generar estadísticas.")
     else:
         f_cam_s = (
-            df_stats_raw["FECHA DE CAMBIO"].apply(parsear_fecha_segura)
+            parsear_serie_fechas(df_stats_raw["FECHA DE CAMBIO"])
             if "FECHA DE CAMBIO" in df_stats_raw.columns
-            else pd.Series([None] * len(df_stats_raw))
+            else pd.Series([None] * len(df_stats_raw), index=df_stats_raw.index)
         )
         f_sol_s = (
-            df_stats_raw["FECHA DE SOLICITUD"].apply(parsear_fecha_segura)
+            parsear_serie_fechas(df_stats_raw["FECHA DE SOLICITUD"])
             if "FECHA DE SOLICITUD" in df_stats_raw.columns
-            else pd.Series([None] * len(df_stats_raw))
+            else pd.Series([None] * len(df_stats_raw), index=df_stats_raw.index)
         )
         df_stats_raw["_fecha_dt"] = pd.to_datetime(f_cam_s.fillna(f_sol_s), errors="coerce")
         df_stats_valid = df_stats_raw[df_stats_raw["_fecha_dt"].notna()].copy()
@@ -2058,9 +2189,21 @@ with tab_pegar_tabla:
     )
 
     if not st.session_state.df_programacion_raw.empty:
-        df_base_editor = st.session_state.df_programacion_raw[
-            ["Fecha", "Tarea", "CODIGO", "NOMBRE", "H.Inicial", "origen", "H. Final", "Patio Final", "PADMIN"]
-        ].copy()
+        df_base_editor = pd.DataFrame(
+            {
+                "Fecha": st.session_state.df_programacion_raw["FECHA_DATE"].apply(
+                    lambda d: d.strftime("%d/%m/%Y") if pd.notna(d) else ""
+                ),
+                "Tarea": st.session_state.df_programacion_raw["Tarea"],
+                "CODIGO": st.session_state.df_programacion_raw["CODIGO_STR"],
+                "NOMBRE": st.session_state.df_programacion_raw["NOMBRE"],
+                "H.Inicial": st.session_state.df_programacion_raw["H.Inicial"],
+                "origen": st.session_state.df_programacion_raw["origen"],
+                "H. Final": st.session_state.df_programacion_raw["H. Final"],
+                "Patio Final": st.session_state.df_programacion_raw["Patio Final"],
+                "PADMIN": st.session_state.df_programacion_raw["PADMIN"],
+            }
+        ).head(500)
     else:
         df_base_editor = pd.DataFrame(
             [
