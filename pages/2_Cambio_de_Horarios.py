@@ -153,6 +153,13 @@ JORNADAS_CATALOGO = [
     "23:00-31:00",
 ]
 
+TIPOS_JORNADA = [
+    "Full Time (8:40)",
+    "Part Time (6:30)",
+    "Catálogo",
+    "Libre (-)",
+]
+
 MOTIVOS_ESTANDAR = [
     "CAMBIO AUT POR JOP",
     "AUTORIZA JEOP",
@@ -217,6 +224,21 @@ def limpiar_codigo(val):
     return s
 
 
+def calcular_horario_jornada(hora_inicio_obj: time, tipo_jornada: str, horario_cat: str = "-") -> str:
+    """Calcula el rango HH:MM-HH:MM sumando 8:40 (Full Time) o 6:30 (Part Time) a la hora de inicio."""
+    if tipo_jornada == "Libre (-)":
+        return "-"
+    if tipo_jornada == "Catálogo":
+        return horario_cat or "-"
+    if hora_inicio_obj is None:
+        return "-"
+
+    inicio_min = hora_inicio_obj.hour * 60 + hora_inicio_obj.minute
+    duracion_min = (6 * 60 + 30) if tipo_jornada == "Part Time (6:30)" else (8 * 60 + 40)
+    fin_min = inicio_min + duracion_min
+    return f"{hora_inicio_obj.hour:02d}:{hora_inicio_obj.minute:02d}-{fin_min // 60:02d}:{fin_min % 60:02d}"
+
+
 def normalizar_texto_plano(texto: str) -> str:
     s = unicodedata.normalize("NFD", str(texto or ""))
     s = "".join(c for c in s if unicodedata.category(c) != "Mn")
@@ -267,7 +289,6 @@ def parsear_fecha_segura(val):
             dt = pd.to_datetime(s, errors="coerce")
         return dt.date() if pd.notna(dt) else None
 
-    # Soporte para abreviaturas de meses en español (ej. 23-nov-26)
     reemplazos_mes = {
         "ene": "jan",
         "abr": "apr",
@@ -318,11 +339,9 @@ def leer_historial_desde_gsheets():
         df_h = pd.DataFrame(records)
         df_h.columns = [str(c).strip() for c in df_h.columns]
 
-        # Compatibilidad si la hoja usa CODIGO en vez de COGIDO
         if "COGIDO" not in df_h.columns and "CODIGO" in df_h.columns:
             df_h["COGIDO"] = df_h["CODIGO"]
 
-        # Guardamos el número de fila real en Google Sheets (fila 2 en adelante)
         df_h["_GS_ROW"] = range(2, len(df_h) + 2)
 
         if "COGIDO" in df_h.columns:
@@ -454,7 +473,6 @@ def normalizar_tabla_programacion(df_raw: pd.DataFrame) -> pd.DataFrame:
         elif cu == "HORARIO":
             destino = "HORARIO_RAW"
 
-        # Evitar colisión de nombres duplicados si existen varias columnas Unnamed
         if destino and destino not in ya_asignadas:
             col_map[c] = destino
             ya_asignadas.add(destino)
@@ -1033,6 +1051,7 @@ if "prog_cargada" not in st.session_state:
     st.session_state.lista_responsables = list(RESPONSABLES_DEFAULT)
     st.session_state.mostrar_cargador = True
     st.session_state.num_filas_cambio = 1
+    st.session_state.brt_jornada_base = "Full Time (8:40)"
 
 if "historial_sincronizado_gs" not in st.session_state:
     df_gs, ok_gs = leer_historial_desde_gsheets()
@@ -1043,17 +1062,26 @@ if "historial_sincronizado_gs" not in st.session_state:
 
 def on_cambio_modalidad():
     mod = st.session_state.get("brt_modalidad", "Cambio de horario")
+    j_base = st.session_state.get("brt_jornada_base", "Full Time (8:40)")
     for i in range(7):
-        k_hor = f"brt_ind_hor_{i}"
+        k_tipo = f"brt_ind_tipo_{i}"
         k_tar = f"brt_ind_tar_{i}"
         if mod == "Cambio de día libre":
-            st.session_state[k_hor] = "-"
+            st.session_state[k_tipo] = "Libre (-)"
             st.session_state[k_tar] = "DESCANSO"
         else:
-            if st.session_state.get(k_hor) == "-":
-                st.session_state[k_hor] = "04:00-12:00"
+            if st.session_state.get(k_tipo) == "Libre (-)":
+                st.session_state[k_tipo] = j_base
             if st.session_state.get(k_tar) == "DESCANSO":
                 st.session_state[k_tar] = "DISPONIBILIDAD"
+
+
+def on_cambio_jornada_base():
+    j_base = st.session_state.get("brt_jornada_base", "Full Time (8:40)")
+    for i in range(7):
+        k_tipo = f"brt_ind_tipo_{i}"
+        if st.session_state.get(k_tipo) in ("Full Time (8:40)", "Part Time (6:30)", None):
+            st.session_state[k_tipo] = j_base
 
 
 def eliminar_fila_formulario(idx_eliminar: int):
@@ -1062,7 +1090,16 @@ def eliminar_fila_formulario(idx_eliminar: int):
         st.session_state["brt_ind_fecha_0"] = "— Sin cambio —"
         st.session_state["brt_int_fecha_0"] = "— Sin cambio —"
         return
-    prefijos = ["brt_ind_fecha_", "brt_ind_hor_", "brt_ind_tar_", "brt_ind_pi_", "brt_ind_pf_", "brt_int_fecha_"]
+    prefijos = [
+        "brt_ind_fecha_",
+        "brt_ind_tipo_",
+        "brt_ind_hini_",
+        "brt_ind_hor_cat_",
+        "brt_ind_tar_",
+        "brt_ind_pi_",
+        "brt_ind_pf_",
+        "brt_int_fecha_",
+    ]
     for pos in range(idx_eliminar, n - 1):
         for p in prefijos:
             st.session_state[f"{p}{pos}"] = st.session_state.get(f"{p}{pos + 1}")
@@ -1290,7 +1327,16 @@ with tab_registro:
         cod_op1, nom_op1, patio_op1 = "", "", "LOS PUEBLOS"
         cod_op2, nom_op2 = "", ""
 
-        c_add1, c_add2 = st.columns([3, 1])
+        c_add1, c_add2 = st.columns([2.8, 1.2])
+        if not es_intercambio and modalidad != "Cambio de día libre":
+            with c_add1:
+                st.radio(
+                    "Jornada base predeterminada:",
+                    ["Full Time (8:40)", "Part Time (6:30)"],
+                    horizontal=True,
+                    key="brt_jornada_base",
+                    on_change=on_cambio_jornada_base,
+                )
         with c_add2:
             if st.button(
                 f"➕ Agregar fila ({st.session_state.num_filas_cambio}/7)",
@@ -1322,18 +1368,18 @@ with tab_registro:
                     anio_consulta,
                 )
 
-            h_cols = st.columns([0.35, 1.45, 1.35, 1.25, 1.25, 1.3, 1.3, 0.45])
+            h_cols = st.columns([0.35, 1.4, 1.25, 1.75, 1.2, 1.25, 1.25, 0.45])
             h_cols[0].markdown("**#**")
             h_cols[1].markdown("**Fecha (Programada)**")
             h_cols[2].markdown("**Turno Actual (Auto)**")
-            h_cols[3].markdown("**Nuevo Horario**")
-            h_cols[4].markdown("**Nueva Tarea / Sercon**")
+            h_cols[3].markdown("**Nuevo Horario (Inicio + Jornada)**")
+            h_cols[4].markdown("**Nueva Tarea**")
             h_cols[5].markdown("**P. Inicio**")
             h_cols[6].markdown("**P. Final**")
             h_cols[7].markdown("**Quitar**")
 
             for idx in range(st.session_state.num_filas_cambio):
-                r_cols = st.columns([0.35, 1.45, 1.35, 1.25, 1.25, 1.3, 1.3, 0.45])
+                r_cols = st.columns([0.35, 1.4, 1.25, 1.75, 1.2, 1.25, 1.25, 0.45])
                 r_cols[0].markdown(f"**{idx + 1}**")
                 default_idx = 1 if (idx == 0 and len(opciones_fecha_sel) > 1) else 0
                 sel_f_str = r_cols[1].selectbox(
@@ -1349,17 +1395,45 @@ with tab_registro:
                     prog1 = buscar_turno_rapido(cod_op1, f_obj)
                     r_cols[2].info(f"`{prog1['horario']}` · {prog1['sercon']}")
 
-                    nuevo_hor = r_cols[3].selectbox(
-                        f"H{idx+1}",
-                        JORNADAS_CATALOGO,
-                        index=0 if modalidad == "Cambio de día libre" else 3,
-                        key=f"brt_ind_hor_{idx}",
-                        label_visibility="collapsed",
-                    )
+                    with r_cols[3]:
+                        default_tipo = (
+                            "Libre (-)"
+                            if modalidad == "Cambio de día libre"
+                            else st.session_state.get("brt_jornada_base", "Full Time (8:40)")
+                        )
+                        tipo_sel = st.selectbox(
+                            f"TJ{idx+1}",
+                            TIPOS_JORNADA,
+                            index=TIPOS_JORNADA.index(default_tipo),
+                            key=f"brt_ind_tipo_{idx}",
+                            label_visibility="collapsed",
+                        )
+                        if tipo_sel in ("Full Time (8:40)", "Part Time (6:30)"):
+                            hora_ini = st.time_input(
+                                f"HI{idx+1}",
+                                value=time(5, 0),
+                                step=timedelta(minutes=1),
+                                key=f"brt_ind_hini_{idx}",
+                                label_visibility="collapsed",
+                            )
+                            nuevo_hor = calcular_horario_jornada(hora_ini, tipo_sel)
+                            st.caption(f"⏱️ **{nuevo_hor}**")
+                        elif tipo_sel == "Catálogo":
+                            nuevo_hor = st.selectbox(
+                                f"HC{idx+1}",
+                                JORNADAS_CATALOGO,
+                                index=3,
+                                key=f"brt_ind_hor_cat_{idx}",
+                                label_visibility="collapsed",
+                            )
+                        else:
+                            nuevo_hor = "-"
+                            st.caption("⏱️ **-**")
+
                     nueva_tar = r_cols[4].selectbox(
                         f"T{idx+1}",
                         TAREAS_CATALOGO,
-                        index=6 if modalidad == "Cambio de día libre" else 0,
+                        index=6 if (modalidad == "Cambio de día libre" or tipo_sel == "Libre (-)") else 0,
                         key=f"brt_ind_tar_{idx}",
                         label_visibility="collapsed",
                     )
@@ -1744,7 +1818,6 @@ with tab_historial:
 
     st.caption(f"Mostrando **{len(df_filtrado)}** de **{len(df_h_show)}** registros acumulados.")
 
-    # Tabla con columna de selección para eliminar registros erróneos
     df_vista_hist = df_filtrado.drop(columns=["_GS_ROW"], errors="ignore").copy()
     df_vista_hist.insert(0, "Eliminar", False)
 
@@ -1903,7 +1976,6 @@ with tab_stats:
         k4.metric(f"Cambios en {MESES_ES[date.today().month]}", len(df_mes_actual))
 
         st.markdown("---")
-        # Gráfica mensual en orden cronológico (01. Ene ... 12. Dic)
         st.markdown(f"#### 📅 Cambios Registrados por Mes ({anio_sel})")
         conteo_mes = {m: 0 for m in range(1, 13)}
         for d in df_anio["_FECHA_REF"]:
