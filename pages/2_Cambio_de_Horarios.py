@@ -1,11 +1,18 @@
 from datetime import datetime, date, time, timedelta
 import io
-import altair as alt
+import re
+import unicodedata
 import gspread
 from google.oauth2.service_account import Credentials
 import pandas as pd
 import streamlit as st
 from fpdf import FPDF
+
+st.set_page_config(
+    page_title="Módulo Cambio de Horario — F-ZEN-GO-07",
+    page_icon="🚌",
+    layout="wide",
+)
 
 # Estilo CSS para impresión directa limpia y apariencia compacta tipo módulo BRT
 st.markdown(
@@ -79,28 +86,6 @@ st.markdown(
         font-size: 13.5px;
         margin-bottom: 12px;
     }
-    .horario-calc-box {
-        background-color: #0f2952;
-        border: 1px solid #0070c0;
-        color: #38bdf8;
-        padding: 6px 8px;
-        border-radius: 5px;
-        font-weight: bold;
-        font-size: 13px;
-        text-align: center;
-        font-family: monospace;
-    }
-    .horario-libre-box {
-        background-color: #1e293b;
-        border: 1px solid #475569;
-        color: #94a3b8;
-        padding: 6px 8px;
-        border-radius: 5px;
-        font-weight: bold;
-        font-size: 12.5px;
-        text-align: center;
-        font-family: monospace;
-    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -116,6 +101,7 @@ RESPONSABLES_DEFAULT = [
     "Kathleen Batista",
     "Alexis Mojica",
     "Gilberto Arauz",
+    "Mayrim Fraguela",
 ]
 
 PATIOS_CATALOGO = [
@@ -140,8 +126,32 @@ TAREAS_CATALOGO = [
     "CAPACITACIÓN",
 ]
 
-HORAS_CATALOGO = [f"{h:02d}" for h in range(24)]
-MINUTOS_CATALOGO = [f"{m:02d}" for m in range(60)]
+JORNADAS_CATALOGO = [
+    "-",
+    "02:00-10:00",
+    "03:00-11:00",
+    "04:00-12:00",
+    "05:00-11:40",
+    "05:00-13:00",
+    "06:00-14:40",
+    "07:00-15:40",
+    "08:00-16:40",
+    "09:00-17:40",
+    "10:00-18:00",
+    "11:00-19:00",
+    "12:00-20:00",
+    "13:00-21:00",
+    "14:00-21:40",
+    "15:00-22:40",
+    "16:00-23:40",
+    "17:00-24:40",
+    "18:00-25:40",
+    "19:00-27:00",
+    "20:00-28:00",
+    "21:00-29:00",
+    "22:00-30:00",
+    "23:00-31:00",
+]
 
 MOTIVOS_ESTANDAR = [
     "CAMBIO AUT POR JOP",
@@ -207,33 +217,69 @@ def limpiar_codigo(val):
     return s
 
 
-def normalizar_tipo_jornada(val) -> str:
-    """Normaliza el valor de la columna M (Jornada) a FULL TIME o PART TIME 6."""
-    if pd.isna(val) or val is None:
-        return "FULL TIME"
-    s = " ".join(str(val).upper().strip().split())
-    if "PART" in s or "PT" in s or "6" in s:
-        return "PART TIME 6"
-    if "FULL" in s or "FT" in s or "8" in s:
-        return "FULL TIME"
-    return s if s and s != "-" else "FULL TIME"
+def normalizar_texto_plano(texto: str) -> str:
+    s = unicodedata.normalize("NFD", str(texto or ""))
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    s = re.sub(r"[_-]+", " ", s.upper())
+    return re.sub(r"\s+", " ", s).strip()
 
 
-def calcular_rango_horario_por_jornada(hh_str: str, mm_str: str, tipo_jornada: str) -> str:
-    """
-    Calcula la hora de fin automáticamente según el tipo de jornada del operador:
-    - PART TIME 6: 6 horas de trabajo + 30 min de descanso (+390 minutos). Ej: 12:30 -> 12:30-19:00
-    - FULL TIME: 8 horas de trabajo + 40 min de descanso (+520 minutos). Ej: 12:00 -> 12:00-20:40
-    """
-    hh = int(hh_str)
-    mm = int(mm_str)
-    inicio_min = hh * 60 + mm
-    es_pt6 = "PART TIME" in str(tipo_jornada).upper()
-    duracion_min = 390 if es_pt6 else 520  # 6h30m vs 8h40m
-    fin_min = inicio_min + duracion_min
-    fin_hh = fin_min // 60
-    fin_mm = fin_min % 60
-    return f"{hh:02d}:{mm:02d}-{fin_hh:02d}:{fin_mm:02d}"
+def es_turno_a_orden_fila(row) -> bool:
+    """Detecta si una fila de programación pertenece a 'A ORDEN' / 'A LA ORDEN'."""
+    campos = [
+        row.get("Tarea", ""),
+        row.get("HORARIO_STR", ""),
+        row.get("origen", ""),
+        row.get("Patio Final", ""),
+        row.get("H.Inicial", ""),
+        row.get("H. Final", ""),
+    ]
+    for val in campos:
+        norm = normalizar_texto_plano(val)
+        if not norm:
+            continue
+        if (
+            norm == "A ORDEN"
+            or norm == "A LA ORDEN"
+            or "A ORDEN" in norm
+            or "A LA ORDEN" in norm
+            or norm == "ORDEN"
+        ):
+            return True
+    return False
+
+
+def parsear_fecha_segura(val):
+    """Convierte fechas en formato ISO, DD/MM/YYYY, dd-mmm-yy o Timestamp a date."""
+    if pd.isna(val) or val is None or str(val).strip() == "":
+        return None
+    if isinstance(val, pd.Timestamp):
+        return val.date()
+    if isinstance(val, datetime):
+        return val.date()
+    if isinstance(val, date):
+        return val
+
+    s = str(val).strip()
+    if re.match(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}", s):
+        dt = pd.to_datetime(s[:10], format="%Y-%m-%d", errors="coerce")
+        if pd.isna(dt):
+            dt = pd.to_datetime(s, errors="coerce")
+        return dt.date() if pd.notna(dt) else None
+
+    # Soporte para abreviaturas de meses en español (ej. 23-nov-26)
+    reemplazos_mes = {
+        "ene": "jan",
+        "abr": "apr",
+        "ago": "aug",
+        "dic": "dec",
+    }
+    s_low = s.lower()
+    for es_m, en_m in reemplazos_mes.items():
+        s_low = re.sub(rf"\b{es_m}\b", en_m, s_low)
+
+    dt = pd.to_datetime(s_low, dayfirst=True, errors="coerce")
+    return dt.date() if pd.notna(dt) else None
 
 
 # ==========================================
@@ -251,7 +297,7 @@ def obtener_hoja_google_sheets():
         dict(st.secrets["gcp_service_account"]), scopes=scopes
     )
     client = gspread.authorize(creds)
-    spreadsheet = client.open_by_key(str(st.secrets["SHEET_ID"]).strip())
+    spreadsheet = client.open_by_key(st.secrets["SHEET_ID"])
     nombres_hojas = [ws.title for ws in spreadsheet.worksheets()]
     if "HISTORIAL DE CAMBIOS (2)" in nombres_hojas:
         return spreadsheet.worksheet("HISTORIAL DE CAMBIOS (2)")
@@ -261,17 +307,24 @@ def obtener_hoja_google_sheets():
 
 
 def leer_historial_desde_gsheets():
-    """Lee todos los registros acumulados desde Google Sheets de forma segura."""
+    """Lee todos los registros acumulados desde Google Sheets."""
     try:
         ws = obtener_hoja_google_sheets()
         if ws is None:
             return pd.DataFrame(columns=COLUMNAS_HISTORIAL), False
-        valores = ws.get_all_values()
-        if not valores or len(valores) <= 1:
+        records = ws.get_all_records()
+        if not records:
             return pd.DataFrame(columns=COLUMNAS_HISTORIAL), True
-        encabezados = [str(c).strip() for c in valores[0]]
-        df_h = pd.DataFrame(valores[1:], columns=encabezados)
-        df_h = df_h.loc[:, df_h.columns != ""].copy()
+        df_h = pd.DataFrame(records)
+        df_h.columns = [str(c).strip() for c in df_h.columns]
+
+        # Compatibilidad si la hoja usa CODIGO en vez de COGIDO
+        if "COGIDO" not in df_h.columns and "CODIGO" in df_h.columns:
+            df_h["COGIDO"] = df_h["CODIGO"]
+
+        # Guardamos el número de fila real en Google Sheets (fila 2 en adelante)
+        df_h["_GS_ROW"] = range(2, len(df_h) + 2)
+
         if "COGIDO" in df_h.columns:
             df_h = df_h[df_h["COGIDO"].astype(str).str.strip() != ""].copy()
             df_h["COGIDO"] = df_h["COGIDO"].apply(limpiar_codigo)
@@ -294,7 +347,8 @@ def agregar_fila_en_gsheets(fila_dict: dict):
 
         nueva_fila_lista = []
         for col in encabezados:
-            val = fila_dict.get(col, "")
+            key_lookup = "COGIDO" if col.strip().upper() in ["CODIGO", "CÓDIGO"] else col
+            val = fila_dict.get(key_lookup, fila_dict.get(col, ""))
             if isinstance(val, (pd.Timestamp, datetime)):
                 val = val.strftime("%Y-%m-%d %H:%M:%S")
             elif isinstance(val, date):
@@ -307,10 +361,30 @@ def agregar_fila_en_gsheets(fila_dict: dict):
         return False, f"Error al escribir en Google Sheets: {e}"
 
 
+def eliminar_filas_en_gsheets(gs_rows: list):
+    """Elimina filas específicas en Google Sheets ordenando de mayor a menor."""
+    try:
+        ws = obtener_hoja_google_sheets()
+        if ws is None:
+            return False, "No hay conexión a Google Sheets."
+        filas_validas = sorted(
+            {int(r) for r in gs_rows if pd.notna(r) and int(r) >= 2},
+            reverse=True,
+        )
+        if not filas_validas:
+            return False, "No se encontraron filas válidas en Google Sheets para eliminar."
+        for r_idx in filas_validas:
+            ws.delete_rows(r_idx)
+        return True, f"Se eliminaron {len(filas_validas)} fila(s) en Google Sheets."
+    except Exception as e:
+        return False, f"Error al eliminar en Google Sheets: {e}"
+
+
 # ==========================================
-# UTILIDADES DE LIMPIEZA Y LECTURA UNIVERSAL (COLUMNAS B A M)
+# UTILIDADES DE LIMPIEZA Y LECTURA UNIVERSAL
 # ==========================================
 def formatear_hora_celda(val):
+    """Formatea horas incluyendo jornadas BRT mayores a 24:00 (25:40, 27:00, etc.)."""
     if pd.isna(val) or val == "":
         return ""
     if isinstance(val, timedelta):
@@ -321,8 +395,21 @@ def formatear_hora_celda(val):
     if isinstance(val, time):
         return val.strftime("%H:%M")
     if isinstance(val, datetime):
+        if val.year in (1899, 1900):
+            base = datetime(1899, 12, 30)
+            diff_sec = int((val - base).total_seconds())
+            if 0 <= diff_sec < 5 * 86400:
+                hh = diff_sec // 3600
+                mm = (diff_sec % 3600) // 60
+                return f"{hh:02d}:{mm:02d}"
         return val.strftime("%H:%M")
     s = str(val).strip()
+    m_1900 = re.search(r"1900-01-0(\d)[T\s](\d{1,2}):(\d{2})", s)
+    if m_1900:
+        dias = int(m_1900.group(1))
+        hh = dias * 24 + int(m_1900.group(2))
+        mm = int(m_1900.group(3))
+        return f"{hh:02d}:{mm:02d}"
     if "1900-01-01" in s:
         return "24:00"
     if len(s) >= 5 and ":" in s:
@@ -334,7 +421,7 @@ def normalizar_tabla_programacion(df_raw: pd.DataFrame) -> pd.DataFrame:
     df = df_raw.copy()
     cols_upper = [str(c).strip().upper() for c in df.columns]
     if not any(k in cols_upper for k in ["CODIGO", "CÓDIGO"]):
-        for idx in range(min(12, len(df))):
+        for idx in range(min(10, len(df))):
             row_vals = [str(x).strip().upper() for x in df.iloc[idx].tolist()]
             if "CODIGO" in row_vals or "CÓDIGO" in row_vals:
                 df.columns = [str(x).strip() for x in df.iloc[idx].tolist()]
@@ -342,30 +429,35 @@ def normalizar_tabla_programacion(df_raw: pd.DataFrame) -> pd.DataFrame:
                 break
 
     col_map = {}
+    ya_asignadas = set()
     for c in df.columns:
         cu = str(c).strip().upper()
+        destino = None
         if cu in ["FECHA"]:
-            col_map[c] = "Fecha"
+            destino = "Fecha"
         elif cu in ["TAREA", "CODIGO SERCON", "CÓDIGO SERCON"]:
-            col_map[c] = "Tarea"
+            destino = "Tarea"
         elif cu in ["CODIGO", "CÓDIGO"]:
-            col_map[c] = "CODIGO"
+            destino = "CODIGO"
         elif cu in ["NOMBRE", "NOMBRE Y APELLIDO", "OPERADOR"]:
-            col_map[c] = "NOMBRE"
-        elif cu in ["H.INICIAL", "HORA INICIAL", "HORA I"]:
-            col_map[c] = "H.Inicial"
-        elif cu in ["ORIGEN", "PATIO ORIGEN", "P. INICIO"]:
-            col_map[c] = "origen"
-        elif cu in ["H. FINAL", "H.FINAL", "HORA FIN", "HORA FINAL"]:
-            col_map[c] = "H. Final"
-        elif cu in ["PATIO FINAL", "P. FINAL"]:
-            col_map[c] = "Patio Final"
+            destino = "NOMBRE"
+        elif cu in ["H.INICIAL", "HORA INICIAL", "HORA I", "H INICIAL"]:
+            destino = "H.Inicial"
+        elif cu in ["ORIGEN", "PATIO ORIGEN", "P. INICIO", "P INICIO"]:
+            destino = "origen"
+        elif cu in ["H. FINAL", "H.FINAL", "HORA FIN", "HORA FINAL", "H FINAL"]:
+            destino = "H. Final"
+        elif cu in ["PATIO FINAL", "P. FINAL", "P FINAL"]:
+            destino = "Patio Final"
         elif cu in ["PADMIN", "PATIO"]:
-            col_map[c] = "PADMIN"
-        elif cu in ["JORNADA", "TIPO JORNADA", "JORNADA LABORAL"]:
-            col_map[c] = "Jornada"
-        elif "UNNAMED" in cu or "HORARIO" in cu:
-            col_map[c] = "HORARIO_RAW"
+            destino = "PADMIN"
+        elif cu == "HORARIO":
+            destino = "HORARIO_RAW"
+
+        # Evitar colisión de nombres duplicados si existen varias columnas Unnamed
+        if destino and destino not in ya_asignadas:
+            col_map[c] = destino
+            ya_asignadas.add(destino)
 
     df = df.rename(columns=col_map)
     if "CODIGO" not in df.columns or "Fecha" not in df.columns:
@@ -373,14 +465,14 @@ def normalizar_tabla_programacion(df_raw: pd.DataFrame) -> pd.DataFrame:
 
     df["CODIGO_STR"] = df["CODIGO"].apply(limpiar_codigo)
     df = df[df["CODIGO_STR"] != ""].copy()
-    df["FECHA_DATE"] = pd.to_datetime(df["Fecha"], errors="coerce").dt.date
+    df["FECHA_DATE"] = df["Fecha"].apply(parsear_fecha_segura)
     df = df[df["FECHA_DATE"].notna()].copy()
 
     if "HORARIO_RAW" in df.columns:
         df["HORARIO_STR"] = df["HORARIO_RAW"].fillna("-").astype(str).str.strip()
     else:
-        hi = df["H.Inicial"].apply(formatear_hora_celda) if "H.Inicial" in df.columns else ""
-        hf = df["H. Final"].apply(formatear_hora_celda) if "H. Final" in df.columns else ""
+        hi = df["H.Inicial"].apply(formatear_hora_celda) if "H.Inicial" in df.columns else [""] * len(df)
+        hf = df["H. Final"].apply(formatear_hora_celda) if "H. Final" in df.columns else [""] * len(df)
         df["HORARIO_STR"] = [
             f"{a}-{b}" if (a and b and a != "-" and b != "-") else "-"
             for a, b in zip(hi, hf)
@@ -392,18 +484,41 @@ def normalizar_tabla_programacion(df_raw: pd.DataFrame) -> pd.DataFrame:
         ("origen", "-"),
         ("Patio Final", "-"),
         ("PADMIN", "LOS PUEBLOS"),
-        ("Jornada", "FULL TIME"),
     ]:
         if col_req not in df.columns:
             df[col_req] = default_val
         else:
             df[col_req] = df[col_req].fillna(default_val).astype(str).str.strip()
 
-    df["JORNADA_NORM"] = df["Jornada"].apply(normalizar_tipo_jornada)
+    df["ES_A_ORDEN"] = df.apply(es_turno_a_orden_fila, axis=1)
     return df
 
 
 def indexar_programacion_en_sesion(df_norm: pd.DataFrame, nombre_fuente: str):
+    st.session_state.prog_df_completa = df_norm.copy()
+    st.session_state.prog_nombre_archivo = nombre_fuente
+    reaplicar_indice_programacion()
+    st.session_state.mostrar_cargador = False
+
+
+def reaplicar_indice_programacion():
+    """Reconstruye el índice activo aplicando o no la exclusión de turnos 'A ORDEN'."""
+    df_full = st.session_state.get("prog_df_completa", pd.DataFrame())
+    if df_full.empty:
+        st.session_state.operadores_dict = {}
+        st.session_state.turnos_dict = {}
+        st.session_state.fechas_disponibles = []
+        st.session_state.fecha_min = None
+        st.session_state.fecha_max = None
+        st.session_state.prog_total_filas = 0
+        st.session_state.prog_a_orden_excluidos = 0
+        st.session_state.prog_cargada = False
+        return
+
+    excluir = st.session_state.get("excluir_a_orden", True)
+    total_a_orden = int(df_full["ES_A_ORDEN"].sum()) if "ES_A_ORDEN" in df_full.columns else 0
+    df_norm = df_full[~df_full["ES_A_ORDEN"]].copy() if (excluir and "ES_A_ORDEN" in df_full.columns) else df_full.copy()
+
     operadores_dict = {}
     turnos_dict = {}
     fechas_unicas = []
@@ -414,7 +529,6 @@ def indexar_programacion_en_sesion(df_norm: pd.DataFrame, nombre_fuente: str):
             operadores_dict[r["CODIGO_STR"]] = {
                 "nombre": r["NOMBRE"],
                 "patio": r["PADMIN"].upper() if r["PADMIN"] else "LOS PUEBLOS",
-                "jornada": r["JORNADA_NORM"],
             }
         for _, r in df_norm.iterrows():
             turnos_dict[(r["CODIGO_STR"], r["FECHA_DATE"])] = {
@@ -422,7 +536,6 @@ def indexar_programacion_en_sesion(df_norm: pd.DataFrame, nombre_fuente: str):
                 "sercon": r["Tarea"] if r["Tarea"] else "-",
                 "p_inicio": r["origen"] if r["origen"] else "-",
                 "p_fin": r["Patio Final"] if r["Patio Final"] else "-",
-                "jornada": r["JORNADA_NORM"],
             }
         fechas_unicas = sorted(df_norm["FECHA_DATE"].dropna().unique().tolist())
 
@@ -432,15 +545,11 @@ def indexar_programacion_en_sesion(df_norm: pd.DataFrame, nombre_fuente: str):
     st.session_state.fecha_min = fechas_unicas[0] if fechas_unicas else None
     st.session_state.fecha_max = fechas_unicas[-1] if fechas_unicas else None
     st.session_state.prog_total_filas = len(df_norm)
-    st.session_state.prog_nombre_archivo = nombre_fuente
+    st.session_state.prog_a_orden_excluidos = total_a_orden if excluir else 0
     st.session_state.prog_cargada = len(df_norm) > 0
-    st.session_state.mostrar_cargador = False
 
 
 def parsear_texto_pegado_excel(texto_tsv: str) -> pd.DataFrame:
-    """
-    Parsea datos copiados de Excel desde Columna B (Fecha) hasta Columna M (Jornada).
-    """
     lineas = [l for l in texto_tsv.splitlines() if l.strip()]
     if not lineas:
         return pd.DataFrame()
@@ -453,67 +562,38 @@ def parsear_texto_pegado_excel(texto_tsv: str) -> pd.DataFrame:
         return normalizar_tabla_programacion(df_tsv)
 
     ncols = df_tsv.shape[1]
-    if ncols == 12:
-        df_tsv.columns = [
-            "Fecha",
-            "Tarea",
-            "CODIGO",
-            "NOMBRE",
-            "Tiempo Trabajado",
-            "H.Inicial",
-            "origen",
-            "H. Final",
-            "Patio Final",
-            "PADMIN",
-            "TIPO",
-            "Jornada",
-        ]
-    elif ncols >= 13:
-        df_tsv.columns = [
+    if ncols >= 11:
+        cols_std = [
             "Ref",
             "Fecha",
             "Tarea",
             "CODIGO",
             "NOMBRE",
-            "Tiempo Trabajado",
+            "W.T.",
             "H.Inicial",
             "origen",
             "H. Final",
             "Patio Final",
             "PADMIN",
-            "TIPO",
-            "Jornada",
-        ] + [f"Extra_{i}" for i in range(ncols - 13)]
-    elif ncols == 11:
-        df_tsv.columns = [
-            "Ref",
-            "Fecha",
-            "Tarea",
-            "CODIGO",
-            "NOMBRE",
-            "Tiempo Trabajado",
-            "H.Inicial",
-            "origen",
-            "H. Final",
-            "Patio Final",
-            "PADMIN",
-        ]
+        ] + [f"Extra_{i}" for i in range(ncols - 11)]
+        df_tsv.columns = cols_std
     elif ncols >= 9:
-        df_tsv.columns = [
+        cols_std = [
             "Fecha",
             "Tarea",
             "CODIGO",
             "NOMBRE",
-            "Tiempo Trabajado",
+            "W.T.",
             "H.Inicial",
             "origen",
             "H. Final",
             "Patio Final",
-        ] + (["PADMIN"] if ncols == 10 else [])
+        ] + (["PADMIN"] if ncols >= 10 else [])
+        df_tsv.columns = cols_std
     return normalizar_tabla_programacion(df_tsv)
 
 
-@st.cache_data(show_spinner="Indexando asignación de operadores...")
+@st.cache_data(show_spinner="Indexando programación completa...")
 def procesar_archivo_excel(file_bytes: bytes):
     xls = pd.ExcelFile(io.BytesIO(file_bytes))
     sheets = xls.sheet_names
@@ -528,6 +608,9 @@ def procesar_archivo_excel(file_bytes: bytes):
                 if str(x).strip() != ""
             ]
             if vals:
+                for extra_resp in RESPONSABLES_DEFAULT:
+                    if extra_resp not in vals:
+                        vals.append(extra_resp)
                 lista_resp = vals
 
     df_prog = pd.DataFrame()
@@ -562,66 +645,14 @@ def procesar_archivo_excel(file_bytes: bytes):
         df_h = pd.read_excel(xls, sheet_name=hist_sheet)
         df_h.columns = [str(c).strip() for c in df_h.columns]
         df_h = df_h.dropna(how="all")
+        if "COGIDO" not in df_h.columns and "CODIGO" in df_h.columns:
+            df_h["COGIDO"] = df_h["CODIGO"]
         if "COGIDO" in df_h.columns:
             df_h = df_h[df_h["COGIDO"].notna()].copy()
             df_h["COGIDO"] = df_h["COGIDO"].apply(limpiar_codigo)
         df_hist = df_h
 
     return df_prog, df_hist, lista_resp
-
-
-def parsear_columna_fecha_es(serie: pd.Series) -> pd.Series:
-    """Convierte fechas en español (ej. 15-ene-26), DD/MM/YYYY, YYYY-MM-DD o serial Excel."""
-    if serie is None:
-        return pd.Series(dtype="datetime64[ns]")
-
-    meses_reemplazo = {
-        "ene": "jan",
-        "feb": "feb",
-        "mar": "mar",
-        "abr": "apr",
-        "may": "may",
-        "jun": "jun",
-        "jul": "jul",
-        "ago": "aug",
-        "sep": "sep",
-        "set": "sep",
-        "oct": "oct",
-        "nov": "nov",
-        "dic": "dec",
-    }
-
-    def limpiar_fecha_str(val):
-        if pd.isna(val) or val is None:
-            return None
-        if isinstance(val, (datetime, date, pd.Timestamp)):
-            return pd.Timestamp(val)
-        s = str(val).strip().lower()
-        if not s or s in ["nan", "nat", "none", "-"]:
-            return None
-        # Serial numérico de Excel (ej. 46050)
-        if s.isdigit() and 30000 <= int(s) <= 60000:
-            return pd.Timestamp("1899-12-30") + pd.to_timedelta(int(s), unit="D")
-        for es_m, en_m in meses_reemplazo.items():
-            s = (
-                s.replace(f"-{es_m}-", f"-{en_m}-")
-                .replace(f"/{es_m}/", f"/{en_m}/")
-                .replace(f" {es_m} ", f" {en_m} ")
-            )
-        return s
-
-    serie_limpia = serie.apply(limpiar_fecha_str)
-    dt_dayfirst = pd.to_datetime(serie_limpia, errors="coerce", dayfirst=True)
-    dt_iso = pd.to_datetime(serie_limpia, errors="coerce", format="mixed")
-    dt_final = dt_dayfirst.fillna(dt_iso)
-    return dt_final.where(dt_final.dt.year > 1900)
-
-
-def obtener_fechas_validas_serie(df_h: pd.DataFrame) -> pd.Series:
-    """Extrae fecha válida desde FECHA DE CAMBIO o FECHA DE SOLICITUD."""
-    f_cambio = parsear_columna_fecha_es(df_h.get("FECHA DE CAMBIO"))
-    f_sol = parsear_columna_fecha_es(df_h.get("FECHA DE SOLICITUD"))
-    return f_cambio.fillna(f_sol)
 
 
 def obtener_resumen_anual_operador(df_hist: pd.DataFrame, codigo: str, anio_objetivo: int):
@@ -637,21 +668,25 @@ def obtener_resumen_anual_operador(df_hist: pd.DataFrame, codigo: str, anio_obje
     if sub.empty:
         return 0, 0, []
 
-    sub["FECHA_REF"] = obtener_fechas_validas_serie(sub)
+    f_cambio = sub["FECHA DE CAMBIO"].apply(parsear_fecha_segura) if "FECHA DE CAMBIO" in sub.columns else pd.Series([None] * len(sub), index=sub.index)
+    f_sol = sub["FECHA DE SOLICITUD"].apply(parsear_fecha_segura) if "FECHA DE SOLICITUD" in sub.columns else pd.Series([None] * len(sub), index=sub.index)
+    fecha_ref = f_cambio.fillna(f_sol)
+
+    sub["FECHA_REF"] = fecha_ref
     total_historico = len(sub)
 
-    sub_anio = sub[sub["FECHA_REF"].dt.year == anio_objetivo].copy()
+    sub_anio = sub[sub["FECHA_REF"].apply(lambda d: d is not None and d.year == anio_objetivo)].copy()
     total_anio = len(sub_anio)
 
     if sub_anio.empty:
         return total_anio, total_historico, []
 
-    sub_anio["MES_NUM"] = sub_anio["FECHA_REF"].dt.month
+    sub_anio["MES_NUM"] = sub_anio["FECHA_REF"].apply(lambda d: d.month)
     conteo = (
         sub_anio.groupby("MES_NUM")
         .size()
         .reset_index(name="cant")
-        .sort_values("MES_NUM", ascending=True)
+        .sort_values("MES_NUM", ascending=False)
     )
     detalle_meses = [
         f"{int(r['cant'])} en {MESES_ES.get(int(r['MES_NUM']), str(r['MES_NUM']))}"
@@ -697,17 +732,6 @@ def renderizar_tarjeta_lateral_anual(codigo: str, df_hist: pd.DataFrame, anio_re
         )
 
 
-def clasificar_tipo_cambio(row):
-    cod = str(row.get("COGIDO", "")).strip()
-    hora = str(row.get("HORA DE CAMBIO", "")).upper().strip()
-    obs = str(row.get("OBSERVACIONES", "")).upper().strip()
-    if "_" in cod:
-        return "Cambio con otro operador"
-    if "DESCANSO" in hora or "LIBRE" in hora or "LIBRE" in obs:
-        return "Cambio de día libre"
-    return "Cambio de horario"
-
-
 def limpiar_texto_pdf(texto):
     if texto is None:
         return ""
@@ -735,9 +759,9 @@ def fecha_corta_es(fecha_obj: date) -> str:
 
 
 # ==========================================
-# GENERADOR PDF IDÉNTICO AL FORMATO F-ZEN-GO-07
+# GENERADOR PDF FORMATO OFICIAL F-ZEN-GO-07
 # ==========================================
-def generar_pdf_f_zen_go_07(bol: dict) -> bytes:
+def generar_pdf_f_zen_go_07(bol: dict, incluir_copia_op2_individual: bool = False) -> bytes:
     pdf = FPDF(orientation="P", unit="mm", format="Letter")
     pdf.set_auto_page_break(auto=False)
     pdf.add_page()
@@ -794,7 +818,7 @@ def generar_pdf_f_zen_go_07(bol: dict) -> bytes:
         pdf.cell(62, 4, limpiar_texto_pdf(resp_nombre), border="B", align="C")
         pdf.set_font("Arial", "B", 6.2)
         pdf.cell(34, 4, "Firma Profesional de Op.:", align="R")
-        pdf.cell(66, 4, limpiar_texto_pdf(resp_nombre), border="B", ln=1)
+        pdf.cell(66, 4, "", border="B", ln=1)
 
     dibujar_logo_mibus(11, 8)
     pdf.set_xy(28, 8)
@@ -914,7 +938,7 @@ def generar_pdf_f_zen_go_07(bol: dict) -> bytes:
 
     dibujar_bloque_firmas(112, bol["responsable"])
 
-    def dibujar_seccion_copia(y_base, titulo_tabla, filas_cambio, cod_cubierto=""):
+    def dibujar_seccion_copia(y_base, titulo_tabla, filas_cambio):
         pdf.set_xy(10, y_base)
         pdf.set_font("Arial", "", 6)
         pdf.cell(196, 2.5, "- " * 88, align="C", ln=1)
@@ -924,15 +948,11 @@ def generar_pdf_f_zen_go_07(bol: dict) -> bytes:
         pdf.set_font("Arial", "B", 10)
         pdf.cell(168, 4.5, "CAMBIO DE HORARIO", align="C", ln=1)
 
-        motivo_copia = bol["motivo"]
-        if bol["es_intercambio"] and cod_cubierto:
-            motivo_copia = f"{bol['motivo']}  -  CUBRE AL OP. {cod_cubierto}"
-
         pdf.set_x(28)
         pdf.set_font("Arial", "B", 6.8)
-        pdf.cell(112, 4, limpiar_texto_pdf(motivo_copia), align="L")
+        pdf.cell(95, 4, limpiar_texto_pdf(bol["motivo"]), align="L")
         pdf.cell(
-            56,
+            73,
             4,
             limpiar_texto_pdf(f"Fecha de Autorizacion:   {bol['fecha_sol']}"),
             align="R",
@@ -977,22 +997,19 @@ def generar_pdf_f_zen_go_07(bol: dict) -> bytes:
         pdf.set_font("Arial", "B", 5.8)
         pdf.cell(196, 3, "COPIA NO CONTROLADA", align="C")
 
-    dibujar_seccion_copia(
-        126,
-        "HORARIO DE CAMBIO OPERADOR 1",
-        bol["cambio_op1"],
-        cod_cubierto=bol.get("cod_2", ""),
-    )
-    dibujar_seccion_copia(
-        190,
-        "HORARIO DE CAMBIO OPERADOR 2",
-        bol["cambio_op2"] if bol["es_intercambio"] else [],
-        cod_cubierto=bol.get("cod_1", ""),
-    )
+    dibujar_seccion_copia(126, "HORARIO DE CAMBIO OPERADOR 1", bol["cambio_op1"])
+
+    mostrar_copia_2 = bol["es_intercambio"] or incluir_copia_op2_individual
+    if mostrar_copia_2:
+        dibujar_seccion_copia(
+            190,
+            "HORARIO DE CAMBIO OPERADOR 2",
+            bol["cambio_op2"] if bol["es_intercambio"] else [],
+        )
 
     pdf.set_draw_color(0, 112, 192)
     pdf.set_line_width(0.5)
-    pdf.rect(9, 7, 198, 247)
+    pdf.rect(9, 7, 198, 247 if mostrar_copia_2 else 183)
 
     out = pdf.output(dest="S")
     return out.encode("latin-1") if isinstance(out, str) else bytes(out)
@@ -1003,6 +1020,7 @@ def generar_pdf_f_zen_go_07(bol: dict) -> bytes:
 # ==========================================
 if "prog_cargada" not in st.session_state:
     st.session_state.prog_cargada = False
+    st.session_state.prog_df_completa = pd.DataFrame()
     st.session_state.prog_nombre_archivo = ""
     st.session_state.operadores_dict = {}
     st.session_state.turnos_dict = {}
@@ -1010,8 +1028,11 @@ if "prog_cargada" not in st.session_state:
     st.session_state.fecha_min = None
     st.session_state.fecha_max = None
     st.session_state.prog_total_filas = 0
+    st.session_state.prog_a_orden_excluidos = 0
+    st.session_state.excluir_a_orden = True
     st.session_state.lista_responsables = list(RESPONSABLES_DEFAULT)
     st.session_state.mostrar_cargador = True
+    st.session_state.num_filas_cambio = 1
 
 if "historial_sincronizado_gs" not in st.session_state:
     df_gs, ok_gs = leer_historial_desde_gsheets()
@@ -1020,35 +1041,74 @@ if "historial_sincronizado_gs" not in st.session_state:
     st.session_state.historial_sincronizado_gs = True
 
 
+def on_cambio_modalidad():
+    mod = st.session_state.get("brt_modalidad", "Cambio de horario")
+    for i in range(7):
+        k_hor = f"brt_ind_hor_{i}"
+        k_tar = f"brt_ind_tar_{i}"
+        if mod == "Cambio de día libre":
+            st.session_state[k_hor] = "-"
+            st.session_state[k_tar] = "DESCANSO"
+        else:
+            if st.session_state.get(k_hor) == "-":
+                st.session_state[k_hor] = "04:00-12:00"
+            if st.session_state.get(k_tar) == "DESCANSO":
+                st.session_state[k_tar] = "DISPONIBILIDAD"
+
+
+def eliminar_fila_formulario(idx_eliminar: int):
+    n = st.session_state.num_filas_cambio
+    if n <= 1:
+        st.session_state["brt_ind_fecha_0"] = "— Sin cambio —"
+        st.session_state["brt_int_fecha_0"] = "— Sin cambio —"
+        return
+    prefijos = ["brt_ind_fecha_", "brt_ind_hor_", "brt_ind_tar_", "brt_ind_pi_", "brt_ind_pf_", "brt_int_fecha_"]
+    for pos in range(idx_eliminar, n - 1):
+        for p in prefijos:
+            st.session_state[f"{p}{pos}"] = st.session_state.get(f"{p}{pos + 1}")
+    for p in prefijos:
+        st.session_state.pop(f"{p}{n - 1}", None)
+    st.session_state.num_filas_cambio = n - 1
+
+
 # ==========================================
-# SIDEBAR: CARGA PERSISTENTE (COLUMNA B A M) + GOOGLE SHEETS
+# SIDEBAR: CARGA PERSISTENTE + FILTRO A ORDEN + GOOGLE SHEETS
 # ==========================================
-st.sidebar.header("📂 1. Asignación de Operadores")
+st.sidebar.header("📂 1. Programación Activa")
+
+st.sidebar.checkbox(
+    "🧹 Excluir turnos 'A ORDEN' automáticamente",
+    key="excluir_a_orden",
+    on_change=reaplicar_indice_programacion,
+    help="Filtra filas cuya Tarea, Horario o Patio sea 'A ORDEN' / 'A LA ORDEN'.",
+)
 
 if st.session_state.prog_cargada and not st.session_state.mostrar_cargador:
     f_ini_txt = st.session_state.fecha_min.strftime("%d/%m/%Y")
     f_fin_txt = st.session_state.fecha_max.strftime("%d/%m/%Y")
+    excl_txt = (
+        f"\n• **{st.session_state.prog_a_orden_excluidos:,}** turnos 'A ORDEN' excluidos"
+        if st.session_state.prog_a_orden_excluidos > 0
+        else ""
+    )
     st.sidebar.success(
         f"📌 **Fuente activa:**\n{st.session_state.prog_nombre_archivo}\n\n"
         f"📅 **Fecha Inicial:** {f_ini_txt}\n"
         f"📅 **Fecha Final:** {f_fin_txt}\n\n"
-        f"• **{st.session_state.prog_total_filas:,}** turnos indexados"
+        f"• **{st.session_state.prog_total_filas:,}** turnos válidos{excl_txt}"
     )
-    if st.sidebar.button("🔄 Cambiar / Pegar nueva asignación", use_container_width=True):
+    if st.sidebar.button("🔄 Cambiar / Pegar nueva programación", use_container_width=True):
         st.session_state.mostrar_cargador = True
         st.rerun()
 else:
-    st.sidebar.info(
-        "📌 **Importante:** Carga el archivo de **Asignación para Operadores** o pega desde la **Columna B (`Fecha`) hasta la Columna M (`Jornada`)** para detectar automáticamente si el operador es `FULL TIME` o `PART TIME 6`."
-    )
     metodo_carga = st.sidebar.radio(
-        "¿Cómo deseas cargar la asignación?",
-        ["📁 Subir archivo Excel", "📋 Pegar desde Excel (Columna B a M)"],
+        "¿Cómo deseas cargar los horarios?",
+        ["📁 Subir archivo Excel", "📋 Pegar desde Excel (Ctrl + V)"],
     )
 
     if metodo_carga == "📁 Subir archivo Excel":
         archivo_subido = st.sidebar.file_uploader(
-            "Sube Asignación para Operadores (.xlsx / .xlsm) con columnas B (Fecha) a M (Jornada)",
+            "Sube CAMBIO DE HORARIOS 2026 o ASIGNACIÓN (.xlsx / .xlsm)",
             type=["xlsx", "xlsm"],
             key="uploader_prog_persistente",
         )
@@ -1063,16 +1123,16 @@ else:
             st.rerun()
     else:
         st.sidebar.caption(
-            "Copia en Excel (`Ctrl + C`) exactamente desde la **Columna B (`Fecha`) hasta la Columna M (`Jornada`)** y pégalo aquí:"
+            "Copia las filas en Excel (`Ctrl + C`) desde **Fecha** hasta **PADMIN** (o toda la tabla de ASIGNACIÓN) y pégalas aquí:"
         )
         texto_pegado = st.sidebar.text_area(
-            "Pega aquí con Ctrl + V (Columna B Fecha → Columna M Jornada)",
+            "Pega aquí con Ctrl + V",
             height=160,
-            placeholder="Pega las celdas copiadas de Excel desde Columna B (Fecha) hasta Columna M (Jornada)...",
+            placeholder="Pega las celdas copiadas de Excel...",
             key="area_pegar_excel",
         )
         if st.sidebar.button(
-            "✅ Cargar asignación pegada",
+            "✅ Cargar programación pegada",
             type="primary",
             use_container_width=True,
         ):
@@ -1081,12 +1141,12 @@ else:
                 if not df_pegado.empty:
                     indexar_programacion_en_sesion(
                         df_pegado,
-                        f"Pegado B→M ({datetime.now().strftime('%H:%M')})",
+                        f"Pegado desde Excel ({datetime.now().strftime('%H:%M')})",
                     )
                     st.rerun()
                 else:
                     st.sidebar.error(
-                        "⚠️ No se reconocieron las columnas. Asegúrate de copiar desde la Columna B (Fecha) hasta la Columna M (Jornada)."
+                        "⚠️ No se reconocieron las columnas. Asegúrate de copiar desde la columna Fecha hasta Patio Final/PADMIN."
                     )
             else:
                 st.sidebar.warning("⚠️ Pega primero los datos copiados de Excel.")
@@ -1120,8 +1180,8 @@ def buscar_operador_rapido(codigo: str):
     cod = limpiar_codigo(codigo)
     info = st.session_state.operadores_dict.get(cod)
     if info:
-        return info["nombre"], info["patio"], info.get("jornada", "FULL TIME"), True
-    return "OPERADOR NO ENCONTRADO EN ASIGNACIÓN", "LOS PUEBLOS", "FULL TIME", False
+        return info["nombre"], info["patio"], True
+    return "OPERADOR NO ENCONTRADO EN PROGRAMACIÓN", "LOS PUEBLOS", False
 
 
 def buscar_turno_rapido(codigo: str, fecha_obj: date):
@@ -1129,7 +1189,7 @@ def buscar_turno_rapido(codigo: str, fecha_obj: date):
     turno = st.session_state.turnos_dict.get((cod, fecha_obj))
     if turno:
         return turno
-    return {"horario": "-", "sercon": "-", "p_inicio": "-", "p_fin": "-", "jornada": "FULL TIME"}
+    return {"horario": "-", "sercon": "-", "p_inicio": "-", "p_fin": "-"}
 
 
 # ==========================================
@@ -1144,27 +1204,33 @@ if st.session_state.prog_cargada:
     f_ini_b = st.session_state.fecha_min.strftime("%d/%m/%Y")
     f_fin_b = st.session_state.fecha_max.strftime("%d/%m/%Y")
     n_dias_prog = len(st.session_state.fechas_disponibles)
+    excl_banner = (
+        f" &nbsp;|&nbsp; 🧹 <b>{st.session_state.prog_a_orden_excluidos:,}</b> turnos 'A ORDEN' excluidos"
+        if st.session_state.prog_a_orden_excluidos > 0
+        else ""
+    )
     st.markdown(
         f'<div class="rango-banner">'
-        f'📅 <b>Asignación Cargada:</b> Desde el <b>{f_ini_b}</b> hasta el <b>{f_fin_b}</b> '
-        f'({n_dias_prog} días operativos disponibles · {st.session_state.prog_total_filas:,} turnos) &nbsp;|&nbsp; '
-        f'<i>Cálculo automático activo: FULL TIME (+8h 40m) · PART TIME 6 (+6h 30m).</i>'
+        f'📅 <b>Programación Cargada:</b> Desde el <b>{f_ini_b}</b> hasta el <b>{f_fin_b}</b> '
+        f'({n_dias_prog} días operativos disponibles · {st.session_state.prog_total_filas:,} turnos){excl_banner}'
         f'</div>',
         unsafe_allow_html=True,
     )
 else:
     st.warning(
-        "⚠️ **Aún no has cargado la asignación.** Sube el archivo Excel o pega desde la **Columna B (Fecha) hasta la Columna M (Jornada)** en el panel izquierdo."
+        "⚠️ **Aún no has cargado ninguna programación.** Sube el archivo Excel o pega los horarios en la barra lateral izquierda (o en la pestaña 4) para habilitar el calendario de fechas válidas."
     )
 
 # ==========================================
-# PESTAÑAS PRINCIPALES (3 PESTAÑAS)
+# PESTAÑAS PRINCIPALES
 # ==========================================
-tab_registro, tab_boleta, tab_historial = st.tabs(
+tab_registro, tab_boleta, tab_historial, tab_pegar_tabla, tab_stats = st.tabs(
     [
         "📝 1. Módulo Cambio de Horario (BRT)",
         "🖨️ 2. Boleta Oficial F-ZEN-GO-07 (PDF)",
-        "📊 3. Historial Acumulado y Estadísticas",
+        "📊 3. Historial Acumulado y Descarga Excel",
+        "📋 4. Tabla Tipo Excel (Pegar / Depurar)",
+        "📈 5. Estadísticas Anuales",
     ]
 )
 
@@ -1181,6 +1247,8 @@ with tab_registro:
                 "Cambio con otro operador",
                 "Cambio de día libre",
             ],
+            key="brt_modalidad",
+            on_change=on_cambio_modalidad,
         )
     with c_top2:
         fecha_solicitud = st.date_input("Fecha de Solicitud", value=date.today())
@@ -1209,7 +1277,7 @@ with tab_registro:
     )
 
     if not st.session_state.prog_cargada:
-        st.info("👈 Carga primero la asignación de operadores (Columna B a M) en el panel izquierdo.")
+        st.info("👈 Carga primero la programación en el panel izquierdo para comenzar.")
     else:
         fechas_disp = st.session_state.fechas_disponibles
         mapa_fechas_label = {
@@ -1219,23 +1287,32 @@ with tab_registro:
 
         filas_prog_op1, filas_cambio_op1 = [], []
         filas_prog_op2, filas_cambio_op2 = [], []
-        cod_op1, nom_op1, patio_op1, jornada_op1 = "", "", "LOS PUEBLOS", "FULL TIME"
-        cod_op2, nom_op2, jornada_op2 = "", "", "FULL TIME"
+        cod_op1, nom_op1, patio_op1 = "", "", "LOS PUEBLOS"
+        cod_op2, nom_op2 = "", ""
+
+        c_add1, c_add2 = st.columns([3, 1])
+        with c_add2:
+            if st.button(
+                f"➕ Agregar fila ({st.session_state.num_filas_cambio}/7)",
+                disabled=st.session_state.num_filas_cambio >= 7,
+                use_container_width=True,
+            ):
+                st.session_state.num_filas_cambio = min(7, st.session_state.num_filas_cambio + 1)
+                st.rerun()
 
         if not es_intercambio:
             st.markdown(
-                '<div class="sub-header-brt">1. DATOS DEL OPERADOR Y DETALLE DE CAMBIO (FILAS 1 A 7)</div>',
+                '<div class="sub-header-brt">1. DATOS DEL OPERADOR Y DETALLE DE CAMBIO (HASTA 7 FILAS)</div>',
                 unsafe_allow_html=True,
             )
             col_op_cod, col_op_nom, col_op_lat = st.columns([1, 1.8, 1.8])
             with col_op_cod:
                 cod_op1 = limpiar_codigo(st.text_input("Código Operador", value="82601"))
             with col_op_nom:
-                nom_op1, patio_op1, jornada_op1, ok1 = buscar_operador_rapido(cod_op1)
+                nom_op1, patio_op1, ok1 = buscar_operador_rapido(cod_op1)
                 st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
                 if ok1:
-                    badge_j = "🟦 PART TIME 6 (6h + 30m)" if jornada_op1 == "PART TIME 6" else "🟩 FULL TIME (8h + 40m)"
-                    st.success(f"👤 **{nom_op1}** · Patio: **{patio_op1}** · **{badge_j}**")
+                    st.success(f"👤 **{nom_op1}** · Patio: **{patio_op1}**")
                 else:
                     st.warning(f"👤 **{nom_op1}**")
             with col_op_lat:
@@ -1245,19 +1322,18 @@ with tab_registro:
                     anio_consulta,
                 )
 
-            h_cols = st.columns([0.3, 1.35, 1.25, 1.25, 0.7, 0.7, 1.15, 1.15, 1.15])
+            h_cols = st.columns([0.35, 1.45, 1.35, 1.25, 1.25, 1.3, 1.3, 0.45])
             h_cols[0].markdown("**#**")
-            h_cols[1].markdown("**Fecha**")
-            h_cols[2].markdown("**Turno Actual**")
-            h_cols[3].markdown("**Nueva Tarea**")
-            h_cols[4].markdown("**Hora Ini**")
-            h_cols[5].markdown("**Min Ini**")
-            h_cols[6].markdown("**Horario Calculado**")
-            h_cols[7].markdown("**P. Inicio**")
-            h_cols[8].markdown("**P. Final**")
+            h_cols[1].markdown("**Fecha (Programada)**")
+            h_cols[2].markdown("**Turno Actual (Auto)**")
+            h_cols[3].markdown("**Nuevo Horario**")
+            h_cols[4].markdown("**Nueva Tarea / Sercon**")
+            h_cols[5].markdown("**P. Inicio**")
+            h_cols[6].markdown("**P. Final**")
+            h_cols[7].markdown("**Quitar**")
 
-            for idx in range(7):
-                r_cols = st.columns([0.3, 1.35, 1.25, 1.25, 0.7, 0.7, 1.15, 1.15, 1.15])
+            for idx in range(st.session_state.num_filas_cambio):
+                r_cols = st.columns([0.35, 1.45, 1.35, 1.25, 1.25, 1.3, 1.3, 0.45])
                 r_cols[0].markdown(f"**{idx + 1}**")
                 default_idx = 1 if (idx == 0 and len(opciones_fecha_sel) > 1) else 0
                 sel_f_str = r_cols[1].selectbox(
@@ -1271,58 +1347,29 @@ with tab_registro:
                 if sel_f_str != "— Sin cambio —":
                     f_obj = mapa_fechas_label[sel_f_str]
                     prog1 = buscar_turno_rapido(cod_op1, f_obj)
-                    jornada_dia = prog1.get("jornada", jornada_op1)
                     r_cols[2].info(f"`{prog1['horario']}` · {prog1['sercon']}")
 
-                    default_tarea_idx = (
-                        6 if (modalidad == "Cambio de día libre" and idx == 0) else 0
+                    nuevo_hor = r_cols[3].selectbox(
+                        f"H{idx+1}",
+                        JORNADAS_CATALOGO,
+                        index=0 if modalidad == "Cambio de día libre" else 3,
+                        key=f"brt_ind_hor_{idx}",
+                        label_visibility="collapsed",
                     )
-                    nueva_tar = r_cols[3].selectbox(
+                    nueva_tar = r_cols[4].selectbox(
                         f"T{idx+1}",
                         TAREAS_CATALOGO,
-                        index=default_tarea_idx,
+                        index=6 if modalidad == "Cambio de día libre" else 0,
                         key=f"brt_ind_tar_{idx}",
                         label_visibility="collapsed",
                     )
-
-                    if nueva_tar == "DESCANSO":
-                        r_cols[4].caption("Libre")
-                        r_cols[5].caption("—")
-                        nuevo_hor = "-"
-                        r_cols[6].markdown(
-                            '<div class="horario-libre-box">- (LIBRE)</div>',
-                            unsafe_allow_html=True,
-                        )
-                    else:
-                        sel_hh = r_cols[4].selectbox(
-                            f"HH{idx+1}",
-                            HORAS_CATALOGO,
-                            index=12,
-                            key=f"brt_ind_hh_{idx}",
-                            label_visibility="collapsed",
-                        )
-                        sel_mm = r_cols[5].selectbox(
-                            f"MM{idx+1}",
-                            MINUTOS_CATALOGO,
-                            index=0,
-                            key=f"brt_ind_mm_{idx}",
-                            label_visibility="collapsed",
-                        )
-                        nuevo_hor = calcular_rango_horario_por_jornada(
-                            sel_hh, sel_mm, jornada_dia
-                        )
-                        r_cols[6].markdown(
-                            f'<div class="horario-calc-box">{nuevo_hor}</div>',
-                            unsafe_allow_html=True,
-                        )
-
-                    nuevo_pi = r_cols[7].selectbox(
+                    nuevo_pi = r_cols[5].selectbox(
                         f"PI{idx+1}",
                         PATIOS_CATALOGO,
                         key=f"brt_ind_pi_{idx}",
                         label_visibility="collapsed",
                     )
-                    nuevo_pf = r_cols[8].selectbox(
+                    nuevo_pf = r_cols[6].selectbox(
                         f"PF{idx+1}",
                         PATIOS_CATALOGO,
                         key=f"brt_ind_pf_{idx}",
@@ -1354,22 +1401,24 @@ with tab_registro:
                     r_cols[4].caption("—")
                     r_cols[5].caption("—")
                     r_cols[6].caption("—")
-                    r_cols[7].caption("—")
-                    r_cols[8].caption("—")
+
+                if r_cols[7].button("🗑️", key=f"del_ind_{idx}", help="Quitar esta fila"):
+                    eliminar_fila_formulario(idx)
+                    st.rerun()
 
         else:
             st.markdown(
-                '<div class="sub-header-brt">2. INTERCAMBIO ENTRE OPERADORES (FILAS 1 A 7)</div>',
+                '<div class="sub-header-brt">2. INTERCAMBIO ENTRE OPERADORES (HASTA 7 FILAS)</div>',
                 unsafe_allow_html=True,
             )
             c1_cod, c1_nom, c1_lat = st.columns([0.9, 1.8, 1.8])
             with c1_cod:
                 cod_op1 = limpiar_codigo(st.text_input("Operador 1 (Código)", value="82601"))
             with c1_nom:
-                nom_op1, patio_op1, jornada_op1, ok1 = buscar_operador_rapido(cod_op1)
+                nom_op1, patio_op1, ok1 = buscar_operador_rapido(cod_op1)
                 st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
                 if ok1:
-                    st.success(f"👤 **Op. 1:** {nom_op1} · **{patio_op1}** · **{jornada_op1}**")
+                    st.success(f"👤 **Op. 1:** {nom_op1} · Patio: **{patio_op1}**")
                 else:
                     st.warning(f"👤 **Op. 1:** {nom_op1}")
             with c1_lat:
@@ -1383,10 +1432,10 @@ with tab_registro:
             with c2_cod:
                 cod_op2 = limpiar_codigo(st.text_input("Operador 2 (Código)", value="82602"))
             with c2_nom:
-                nom_op2, _, jornada_op2, ok2 = buscar_operador_rapido(cod_op2)
+                nom_op2, _, ok2 = buscar_operador_rapido(cod_op2)
                 st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
                 if ok2:
-                    st.success(f"👤 **Op. 2:** {nom_op2} · **{jornada_op2}**")
+                    st.success(f"👤 **Op. 2:** {nom_op2}")
                 else:
                     st.warning(f"👤 **Op. 2:** {nom_op2}")
             with c2_lat:
@@ -1396,14 +1445,15 @@ with tab_registro:
                     anio_consulta,
                 )
 
-            hi_cols = st.columns([0.35, 1.5, 2.2, 2.2])
+            hi_cols = st.columns([0.35, 1.5, 2.1, 2.1, 0.45])
             hi_cols[0].markdown("**#**")
             hi_cols[1].markdown("**Fecha del Intercambio**")
             hi_cols[2].markdown(f"**Programado Operador 1 ({cod_op1})**")
             hi_cols[3].markdown(f"**Programado Operador 2 ({cod_op2})**")
+            hi_cols[4].markdown("**Quitar**")
 
-            for idx in range(7):
-                ri_cols = st.columns([0.35, 1.5, 2.2, 2.2])
+            for idx in range(st.session_state.num_filas_cambio):
+                ri_cols = st.columns([0.35, 1.5, 2.1, 2.1, 0.45])
                 ri_cols[0].markdown(f"**{idx + 1}**")
                 default_idx = 1 if (idx == 0 and len(opciones_fecha_sel) > 1) else 0
                 sel_f_str = ri_cols[1].selectbox(
@@ -1468,6 +1518,10 @@ with tab_registro:
                     ri_cols[2].caption("—")
                     ri_cols[3].caption("—")
 
+                if ri_cols[4].button("🗑️", key=f"del_int_{idx}", help="Quitar esta fila"):
+                    eliminar_fila_formulario(idx)
+                    st.rerun()
+
         st.markdown("---")
         if st.button(
             "✅ Guardar en Google Sheets y Generar Boleta F-ZEN-GO-07",
@@ -1476,6 +1530,8 @@ with tab_registro:
         ):
             if not cod_op1 or (es_intercambio and not cod_op2):
                 st.error("⚠️ Debes ingresar el código del operador antes de guardar.")
+            elif es_intercambio and cod_op1 == cod_op2:
+                st.error("⚠️ En un intercambio, el Operador 1 y el Operador 2 deben ser distintos.")
             elif not filas_cambio_op1:
                 st.error("⚠️ Selecciona al menos 1 fecha válida en la tabla para registrar el cambio.")
             else:
@@ -1483,24 +1539,23 @@ with tab_registro:
                     f"{cod_op1}_{cod_op2}" if es_intercambio else str(cod_op1)
                 )
                 fecha_cambio_principal = filas_cambio_op1[0]["fecha"]
+                extra_dias = (
+                    f" (+{len(filas_cambio_op1) - 1} día{'s' if len(filas_cambio_op1) > 2 else ''})"
+                    if len(filas_cambio_op1) > 1
+                    else ""
+                )
                 hora_cambio_resumen = (
-                    f"{filas_prog_op1[0]['horario']}/{filas_cambio_op1[0]['horario']}"
+                    f"{filas_prog_op1[0]['horario']}/{filas_cambio_op1[0]['horario']}{extra_dias}"
                 )
 
                 df_h_actual = st.session_state.historial_cambios
                 ya_existe = False
-                if not df_h_actual.empty:
-                    fecha_cmp_str = str(
-                        datetime.strptime(fecha_cambio_principal, "%d/%m/%Y").date()
-                    )
+                if not df_h_actual.empty and "COGIDO" in df_h_actual.columns:
+                    fecha_cmp_date = datetime.strptime(fecha_cambio_principal, "%d/%m/%Y").date()
+                    fechas_h = df_h_actual["FECHA DE CAMBIO"].apply(parsear_fecha_segura)
                     dups = df_h_actual[
                         (df_h_actual["COGIDO"].astype(str).str.strip() == codigo_registro)
-                        & (
-                            df_h_actual["FECHA DE CAMBIO"]
-                            .astype(str)
-                            .str.slice(0, 10)
-                            == fecha_cmp_str
-                        )
+                        & (fechas_h == fecha_cmp_date)
                         & (
                             df_h_actual["HORA DE CAMBIO"].astype(str).str.strip()
                             == hora_cambio_resumen
@@ -1519,26 +1574,30 @@ with tab_registro:
                         "COGIDO": codigo_registro,
                         "FECHA DE SOLICITUD": pd.Timestamp(fecha_solicitud),
                         "FECHA DE CAMBIO": pd.Timestamp(
-                            datetime.strptime(
-                                fecha_cambio_principal, "%d/%m/%Y"
-                            ).date()
+                            datetime.strptime(fecha_cambio_principal, "%d/%m/%Y").date()
                         ),
                         "HORA DE CAMBIO": hora_cambio_resumen,
                         "RESPONSABLE DEL CAMBIO": responsable,
                         "OBSERVACIONES": motivo_final,
                         "Stamp": datetime.now().replace(microsecond=0),
                     }
-                    df_actualizado = pd.concat(
-                        [pd.DataFrame([nuevo_registro]), df_h_actual], ignore_index=True
-                    )
-                    st.session_state.historial_cambios = df_actualizado
-
                     ok_gs, msg_gs = agregar_fila_en_gsheets(nuevo_registro)
                     if ok_gs:
+                        df_gs_refrescado, ok_r = leer_historial_desde_gsheets()
+                        if ok_r:
+                            st.session_state.historial_cambios = df_gs_refrescado
+                        else:
+                            st.session_state.historial_cambios = pd.concat(
+                                [pd.DataFrame([nuevo_registro]), df_h_actual], ignore_index=True
+                            )
                         st.success(
-                            f"✅ Registro guardado en Google Sheets ({len(df_actualizado)} registros totales). Ve a la pestaña **2. Boleta Oficial F-ZEN-GO-07 (PDF)** para descargar."
+                            f"✅ Registro guardado en Google Sheets ({len(st.session_state.historial_cambios)} registros totales). Ve a la pestaña **2. Boleta Oficial F-ZEN-GO-07 (PDF)** para descargar."
                         )
                     else:
+                        df_actualizado = pd.concat(
+                            [pd.DataFrame([nuevo_registro]), df_h_actual], ignore_index=True
+                        )
+                        st.session_state.historial_cambios = df_actualizado
                         st.warning(
                             f"✅ Registro añadido en pantalla ({len(df_actualizado)} registros), pero no se sincronizó con Google Sheets: {msg_gs}"
                         )
@@ -1553,10 +1612,8 @@ with tab_registro:
                     "motivo": motivo_final,
                     "cod_1": cod_op1,
                     "nombre_1": nom_op1,
-                    "jornada_1": jornada_op1,
                     "cod_2": cod_op2,
                     "nombre_2": nom_op2,
-                    "jornada_2": jornada_op2,
                     "prog_op1": filas_prog_op1,
                     "cambio_op1": filas_cambio_op1,
                     "prog_op2": filas_prog_op2,
@@ -1575,7 +1632,13 @@ with tab_boleta:
         )
     else:
         bol = st.session_state.boleta_activa
-        pdf_bytes = generar_pdf_f_zen_go_07(bol)
+        incluir_op2_vac = False
+        if not bol["es_intercambio"]:
+            incluir_op2_vac = st.checkbox(
+                "Incluir sección vacía de Operador 2 en el PDF", value=False
+            )
+
+        pdf_bytes = generar_pdf_f_zen_go_07(bol, incluir_copia_op2_individual=incluir_op2_vac)
 
         c_btn1, c_btn2 = st.columns([1.6, 2])
         with c_btn1:
@@ -1589,7 +1652,7 @@ with tab_boleta:
             )
         with c_btn2:
             st.info(
-                "💡 El PDF incluye las **3 secciones en una sola página** (Original Planilla, Copia Operador 1 y Copia Operador 2)."
+                "💡 El PDF genera la Planilla Original y las copias correspondientes en una sola página tamaño Carta."
             )
 
         st.markdown("---")
@@ -1598,7 +1661,7 @@ with tab_boleta:
             <div class="boleta-preview">
                 <h4 style="margin:0; text-align:center; color:#0070c0;">CAMBIO DE HORARIO — F-ZEN-GO-07 / V1-12-2023</h4>
                 <p style="margin:4px 0; font-size:13px;">
-                    <b>Operador 1:</b> {bol['nombre_1']} (<span style="background:#ffff00; padding:1px 4px;"><b>{bol['cod_1']}</b></span> · {bol.get('jornada_1', 'FULL TIME')}) &nbsp;|&nbsp;
+                    <b>Operador 1:</b> {bol['nombre_1']} (<span style="background:#ffff00; padding:1px 4px;"><b>{bol['cod_1']}</b></span>) &nbsp;|&nbsp;
                     <b>Patio:</b> {bol['patio']} &nbsp;|&nbsp;
                     <b>Fecha Solicitud:</b> {bol['fecha_sol_larga']}
                 </p>
@@ -1650,270 +1713,15 @@ with tab_boleta:
                 )
 
 # ------------------------------------------
-# TAB 3: HISTORIAL ACUMULADO, 12 MESES DEL AÑO Y DRILL-DOWN POR MES
+# TAB 3: HISTORIAL ACUMULADO, ELIMINACIÓN Y DESCARGA EXCEL
 # ------------------------------------------
 with tab_historial:
-    st.subheader("📊 Panel Estadístico e Historial Acumulado")
+    st.subheader("📊 Historial Acumulado de Cambios")
     df_h_show = st.session_state.historial_cambios.copy()
 
-    if df_h_show.empty:
-        st.info("ℹ️ Aún no hay registros en el historial para graficar.")
-    else:
-        df_h_show["FECHA_ANALISIS"] = obtener_fechas_validas_serie(df_h_show)
-        df_h_show["TIPO_MOVIMIENTO"] = df_h_show.apply(clasificar_tipo_cambio, axis=1)
-
-        k1, k2, k3 = st.columns(3)
-        k1.metric("Total de Cambios Registrados", f"{len(df_h_show):,}")
-        k2.metric(
-            "Intercambios entre Operadores",
-            f"{(df_h_show['TIPO_MOVIMIENTO'] == 'Cambio con otro operador').sum():,}",
-        )
-        k3.metric(
-            "Cambios de Horario / Día Libre",
-            f"{(df_h_show['TIPO_MOVIMIENTO'] != 'Cambio con otro operador').sum():,}",
-        )
-
-        st.markdown("---")
-
-        # Selector de Año y Mes para filtrar la distribución
-        df_valid_dates = df_h_show[df_h_show["FECHA_ANALISIS"].notna()].copy()
-        anios_disponibles = sorted(
-            df_valid_dates["FECHA_ANALISIS"].dt.year.dropna().astype(int).unique().tolist(),
-            reverse=True,
-        )
-        if not anios_disponibles:
-            anios_disponibles = [date.today().year]
-
-        c_filt_anio, c_filt_mes = st.columns([1, 1.5])
-        with c_filt_anio:
-            anio_sel = st.selectbox(
-                "📆 Seleccionar Año:",
-                options=anios_disponibles,
-                index=0,
-                key="filtro_anio_estadisticas",
-            )
-
-        opciones_meses_filtro = ["Todos los meses (Año completo)"] + [
-            f"{MESES_ES[m]} {anio_sel}" for m in range(1, 13)
-        ]
-        with c_filt_mes:
-            mes_sel_label = st.selectbox(
-                "🔍 Seleccionar Mes para ver detalle en Distribución:",
-                options=opciones_meses_filtro,
-                index=0,
-                key="filtro_mes_estadisticas",
-            )
-
-        col_g1, col_g2 = st.columns([1.4, 1])
-
-        with col_g1:
-            st.markdown(f"##### 📅 Cambios Totales por Mes — Año {anio_sel} (12 Meses)")
-            df_anio_sel = df_valid_dates[
-                df_valid_dates["FECHA_ANALISIS"].dt.year == anio_sel
-            ].copy()
-
-            # Construir los 12 meses completos del año (Ene a Dic), rellenando con 0 si no hay datos
-            conteo_por_mes = (
-                df_anio_sel.groupby(df_anio_sel["FECHA_ANALISIS"].dt.month)
-                .size()
-                .to_dict()
-            )
-            filas_12_meses = []
-            for m_num in range(1, 13):
-                etiqueta_m = f"{MESES_ES[m_num]} {anio_sel}"
-                filas_12_meses.append(
-                    {
-                        "MES_NUM": m_num,
-                        "Mes": etiqueta_m,
-                        "MesCorto": MESES_ES[m_num],
-                        "Cambios": int(conteo_por_mes.get(m_num, 0)),
-                        "Seleccionado": (
-                            "Seleccionado"
-                            if mes_sel_label == etiqueta_m
-                            else "Normal"
-                        ),
-                    }
-                )
-            res_mes = pd.DataFrame(filas_12_meses)
-            orden_12_meses = res_mes["MesCorto"].tolist()
-
-            base_mes = alt.Chart(res_mes).encode(
-                x=alt.X(
-                    "MesCorto:N",
-                    sort=orden_12_meses,
-                    title=f"Meses del Año {anio_sel}",
-                    axis=alt.Axis(labelAngle=0),
-                ),
-                y=alt.Y("Cambios:Q", title="Total de Cambios"),
-                tooltip=[
-                    alt.Tooltip("Mes:N", title="Mes"),
-                    alt.Tooltip("Cambios:Q", title="Total Cambios"),
-                ],
-            )
-            barras_mes = base_mes.mark_bar(
-                cornerRadiusTopLeft=4, cornerRadiusTopRight=4
-            ).encode(
-                color=alt.condition(
-                    alt.datum.Seleccionado == "Seleccionado",
-                    alt.value("#f59e0b"),
-                    alt.value("#0070c0"),
-                )
-            )
-            etiquetas_mes = base_mes.mark_text(
-                align="center",
-                baseline="bottom",
-                dy=-4,
-                color="#f8fafc",
-                fontWeight="bold",
-                fontSize=12,
-            ).encode(text="Cambios:Q")
-
-            st.altair_chart(
-                (barras_mes + etiquetas_mes).properties(height=310),
-                use_container_width=True,
-            )
-            st.dataframe(
-                res_mes[["MesCorto", "Cambios"]].set_index("MesCorto").T,
-                use_container_width=True,
-            )
-
-        with col_g2:
-            if mes_sel_label == "Todos los meses (Año completo)":
-                df_dist = df_anio_sel.copy()
-                titulo_dist = f"🔀 Distribución por Tipo — Todo {anio_sel}"
-            else:
-                mes_num_filtro = [
-                    m for m in range(1, 13) if f"{MESES_ES[m]} {anio_sel}" == mes_sel_label
-                ][0]
-                df_dist = df_anio_sel[
-                    df_anio_sel["FECHA_ANALISIS"].dt.month == mes_num_filtro
-                ].copy()
-                titulo_dist = f"🔀 Distribución por Tipo — {mes_sel_label}"
-
-            st.markdown(f"##### {titulo_dist}")
-
-            categorias_base = [
-                "Cambio de horario",
-                "Cambio con otro operador",
-                "Cambio de día libre",
-            ]
-            conteo_tipos = df_dist["TIPO_MOVIMIENTO"].value_counts().to_dict()
-            res_tipo = pd.DataFrame(
-                [
-                    {"Tipo de Cambio": cat, "Cantidad": int(conteo_tipos.get(cat, 0))}
-                    for cat in categorias_base
-                ]
-            )
-
-            base_tipo = alt.Chart(res_tipo).encode(
-                x=alt.X(
-                    "Tipo de Cambio:N",
-                    sort=categorias_base,
-                    title="Tipo de Movimiento",
-                    axis=alt.Axis(labelAngle=-12),
-                ),
-                y=alt.Y("Cantidad:Q", title="Cantidad"),
-                tooltip=["Tipo de Cambio", "Cantidad"],
-            )
-            barras_tipo = base_tipo.mark_bar(
-                color="#00b050", cornerRadiusTopLeft=4, cornerRadiusTopRight=4
-            )
-            etiquetas_tipo = base_tipo.mark_text(
-                align="center",
-                baseline="bottom",
-                dy=-4,
-                color="#f8fafc",
-                fontWeight="bold",
-                fontSize=12,
-            ).encode(text="Cantidad:Q")
-
-            st.altair_chart(
-                (barras_tipo + etiquetas_tipo).properties(height=310),
-                use_container_width=True,
-            )
-            st.dataframe(res_tipo, use_container_width=True, hide_index=True)
-
-        st.markdown("---")
-        col_top, col_det = st.columns([1.15, 1.35])
-
-        with col_top:
-            st.markdown("##### 🏆 Top 10 Operadores con Más Cambios")
-            conteo_ops = {}
-            for val in df_h_show["COGIDO"].dropna().astype(str):
-                for parte in val.split("_"):
-                    c_clean = limpiar_codigo(parte)
-                    if c_clean:
-                        conteo_ops[c_clean] = conteo_ops.get(c_clean, 0) + 1
-
-            if conteo_ops:
-                df_top10 = (
-                    pd.DataFrame(
-                        list(conteo_ops.items()), columns=["Código", "Total Cambios"]
-                    )
-                    .sort_values("Total Cambios", ascending=False)
-                    .head(10)
-                    .reset_index(drop=True)
-                )
-                df_top10.index = df_top10.index + 1
-                df_top10["Nombre Operador"] = df_top10["Código"].apply(
-                    lambda c: st.session_state.operadores_dict.get(c, {}).get(
-                        "nombre", "—"
-                    )
-                )
-                df_top10 = df_top10[["Código", "Nombre Operador", "Total Cambios"]]
-                st.dataframe(df_top10, use_container_width=True)
-            else:
-                st.caption("No hay códigos de operador registrados.")
-
-        with col_det:
-            st.markdown("##### 🔍 Consultar Detalle por Código de Operador")
-            cod_consulta = limpiar_codigo(
-                st.text_input(
-                    "Escribe el código del operador para ver su historial completo:",
-                    placeholder="Ej. 82601",
-                    key="consulta_detalle_op_tab3",
-                )
-            )
-            if cod_consulta:
-                mask_op = df_h_show["COGIDO"].astype(str).apply(
-                    lambda v: cod_consulta in [p.strip() for p in v.split("_")]
-                )
-                df_op_det = df_h_show[mask_op].copy()
-                nom_c, patio_c, jornada_c, ok_c = buscar_operador_rapido(cod_consulta)
-                titulo_op = f"{nom_c} ({patio_c} · {jornada_c})" if ok_c else f"Operador {cod_consulta}"
-
-                if df_op_det.empty:
-                    st.info(f"El operador **{cod_consulta}** no tiene cambios registrados.")
-                else:
-                    st.success(
-                        f"👤 **{titulo_op}** — Total: **{len(df_op_det)}** cambio(s) registrado(s)"
-                    )
-                    cols_ver = [
-                        c
-                        for c in [
-                            "FECHA DE CAMBIO",
-                            "FECHA DE SOLICITUD",
-                            "TIPO_MOVIMIENTO",
-                            "COGIDO",
-                            "HORA DE CAMBIO",
-                            "RESPONSABLE DEL CAMBIO",
-                            "OBSERVACIONES",
-                        ]
-                        if c in df_op_det.columns
-                    ]
-                    st.dataframe(
-                        df_op_det[cols_ver], use_container_width=True, hide_index=True
-                    )
-            else:
-                st.caption(
-                    "Ingresa un código arriba para ver todos sus cambios, fechas, horarios y responsables."
-                )
-
-    st.markdown("---")
-    st.markdown("##### 📋 Tabla General de Registros y Descarga Excel")
     col_f1, col_f2 = st.columns(2)
     with col_f1:
-        filtro_op = st.text_input("Filtrar tabla general por Código:", "")
+        filtro_op = st.text_input("Buscar por Código de Operador:", "")
     with col_f2:
         filtro_resp = st.multiselect(
             "Filtrar por Responsable:",
@@ -1924,24 +1732,53 @@ with tab_historial:
             else [],
         )
 
-    df_filtrado = df_h_show.drop(
-        columns=["FECHA_ANALISIS", "TIPO_MOVIMIENTO"], errors="ignore"
-    ).copy()
-    if filtro_op.strip():
+    df_filtrado = df_h_show.copy()
+    if filtro_op.strip() and "COGIDO" in df_filtrado.columns:
         df_filtrado = df_filtrado[
             df_filtrado["COGIDO"].astype(str).str.contains(filtro_op.strip(), case=False)
         ]
-    if filtro_resp:
+    if filtro_resp and "RESPONSABLE DEL CAMBIO" in df_filtrado.columns:
         df_filtrado = df_filtrado[
             df_filtrado["RESPONSABLE DEL CAMBIO"].astype(str).isin(filtro_resp)
         ]
 
     st.caption(f"Mostrando **{len(df_filtrado)}** de **{len(df_h_show)}** registros acumulados.")
-    st.dataframe(df_filtrado, use_container_width=True, hide_index=True)
 
-    df_export = st.session_state.historial_cambios.drop(
-        columns=["FECHA_ANALISIS", "TIPO_MOVIMIENTO"], errors="ignore"
+    # Tabla con columna de selección para eliminar registros erróneos
+    df_vista_hist = df_filtrado.drop(columns=["_GS_ROW"], errors="ignore").copy()
+    df_vista_hist.insert(0, "Eliminar", False)
+
+    df_edit_hist = st.data_editor(
+        df_vista_hist,
+        use_container_width=True,
+        hide_index=True,
+        disabled=[c for c in df_vista_hist.columns if c != "Eliminar"],
+        key="editor_historial_eliminar",
     )
+
+    indices_a_borrar = df_edit_hist[df_edit_hist["Eliminar"] == True].index.tolist()
+    if indices_a_borrar:
+        st.warning(f"⚠️ Has marcado **{len(indices_a_borrar)}** registro(s) para eliminar.")
+        if st.button("🗑️ Confirmar eliminación de registros seleccionados", type="primary"):
+            gs_rows_borrar = []
+            if "_GS_ROW" in df_filtrado.columns:
+                gs_rows_borrar = df_filtrado.loc[indices_a_borrar, "_GS_ROW"].dropna().tolist()
+
+            if gs_rows_borrar and st.session_state.historial_en_gsheets:
+                ok_del, msg_del = eliminar_filas_en_gsheets(gs_rows_borrar)
+                if ok_del:
+                    df_gs_nuevo, _ = leer_historial_desde_gsheets()
+                    st.session_state.historial_cambios = df_gs_nuevo
+                    st.success(f"✅ {msg_del}")
+                    st.rerun()
+                else:
+                    st.error(msg_del)
+            else:
+                st.session_state.historial_cambios = df_h_show.drop(index=indices_a_borrar).reset_index(drop=True)
+                st.success("✅ Registros eliminados de la sesión.")
+                st.rerun()
+
+    df_export = df_h_show.drop(columns=["_GS_ROW"], errors="ignore")
     buffer_xlsx = io.BytesIO()
     with pd.ExcelWriter(buffer_xlsx, engine="openpyxl") as writer:
         df_export.to_excel(
@@ -1959,3 +1796,168 @@ with tab_historial:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         type="primary",
     )
+
+# ------------------------------------------
+# TAB 4: CUADRÍCULA INTERACTIVA TIPO EXCEL (CTRL + V) + DEPURACIÓN A ORDEN
+# ------------------------------------------
+with tab_pegar_tabla:
+    st.subheader("📋 Cuadrícula Tipo Excel — Pega, Edita o Depura 'A ORDEN'")
+    st.markdown(
+        "Haz clic en la primera celda (`Fecha`), presiona **`Ctrl + V`** para pegar las filas copiadas desde Excel y luego pulsa **Fijar programación de esta cuadrícula en sesión**."
+    )
+
+    if st.session_state.prog_cargada and not st.session_state.prog_df_completa.empty:
+        df_full_cur = st.session_state.prog_df_completa
+        cnt_a_orden = int(df_full_cur["ES_A_ORDEN"].sum()) if "ES_A_ORDEN" in df_full_cur.columns else 0
+        if cnt_a_orden > 0:
+            c_ao1, c_ao2 = st.columns([2.5, 1.5])
+            c_ao1.info(
+                f"🧹 Se detectaron **{cnt_a_orden}** fila(s) con **'A ORDEN'** en la programación cargada."
+            )
+            if c_ao2.button("🗑️ Eliminar todos los 'A ORDEN' definitivamente", use_container_width=True):
+                st.session_state.prog_df_completa = df_full_cur[~df_full_cur["ES_A_ORDEN"]].reset_index(drop=True)
+                reaplicar_indice_programacion()
+                st.success(f"✅ Se eliminaron {cnt_a_orden} filas 'A ORDEN'.")
+                st.rerun()
+
+    plantilla_excel = pd.DataFrame(
+        [
+            {
+                "Fecha": "",
+                "Tarea": "",
+                "CODIGO": "",
+                "NOMBRE": "",
+                "H.Inicial": "",
+                "origen": "",
+                "H. Final": "",
+                "Patio Final": "",
+                "PADMIN": "",
+            }
+            for _ in range(15)
+        ]
+    )
+
+    df_editor = st.data_editor(
+        plantilla_excel,
+        num_rows="dynamic",
+        use_container_width=True,
+        key="editor_excel_grid",
+    )
+
+    if st.button(
+        "💾 Fijar programación de esta cuadrícula en sesión",
+        type="primary",
+    ):
+        df_norm_grid = normalizar_tabla_programacion(df_editor)
+        if not df_norm_grid.empty:
+            indexar_programacion_en_sesion(
+                df_norm_grid,
+                f"Cuadrícula Excel ({len(df_norm_grid)} turnos - {datetime.now().strftime('%H:%M')})",
+            )
+            st.success(
+                f"✅ Se cargaron **{len(df_norm_grid)}** turnos desde la cuadrícula. Ya puedes ir a la pestaña 1."
+            )
+            st.rerun()
+        else:
+            st.warning(
+                "⚠️ Asegúrate de que al menos las columnas **Fecha** y **CODIGO** tengan datos válidos antes de guardar."
+            )
+
+# ------------------------------------------
+# TAB 5: ESTADÍSTICAS ANUALES Y DISTRIBUCIONES
+# ------------------------------------------
+with tab_stats:
+    st.subheader("📈 Historial Acumulado y Estadísticas Anuales")
+    df_stats_src = st.session_state.historial_cambios.copy()
+
+    if df_stats_src.empty:
+        st.info("ℹ️ Aún no hay registros en el historial para generar estadísticas.")
+    else:
+        f_cam_s = df_stats_src["FECHA DE CAMBIO"].apply(parsear_fecha_segura) if "FECHA DE CAMBIO" in df_stats_src.columns else pd.Series([None] * len(df_stats_src))
+        f_sol_s = df_stats_src["FECHA DE SOLICITUD"].apply(parsear_fecha_segura) if "FECHA DE SOLICITUD" in df_stats_src.columns else pd.Series([None] * len(df_stats_src))
+        df_stats_src["_FECHA_REF"] = f_cam_s.fillna(f_sol_s)
+        df_stats_valid = df_stats_src[df_stats_src["_FECHA_REF"].notna()].copy()
+
+        anios_disp = sorted(
+            {d.year for d in df_stats_valid["_FECHA_REF"]} | {date.today().year},
+            reverse=True,
+        )
+        anio_sel = st.selectbox("Año de análisis:", anios_disp, index=0)
+
+        df_anio = df_stats_valid[df_stats_valid["_FECHA_REF"].apply(lambda d: d.year == anio_sel)].copy()
+        df_mes_actual = df_anio[df_anio["_FECHA_REF"].apply(lambda d: d.month == date.today().month)]
+
+        ops_unicos = set()
+        conteo_ops = {}
+        for val in df_anio.get("COGIDO", []):
+            for p in str(val).split("_"):
+                c = p.strip()
+                if c:
+                    ops_unicos.add(c)
+                    conteo_ops[c] = conteo_ops.get(c, 0) + 1
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric(f"Total Cambios ({anio_sel})", len(df_anio))
+        k2.metric("Total Acumulado Histórico", len(df_stats_src))
+        k3.metric(f"Operadores con Cambios ({anio_sel})", len(ops_unicos))
+        k4.metric(f"Cambios en {MESES_ES[date.today().month]}", len(df_mes_actual))
+
+        st.markdown("---")
+        # Gráfica mensual en orden cronológico (01. Ene ... 12. Dic)
+        st.markdown(f"#### 📅 Cambios Registrados por Mes ({anio_sel})")
+        conteo_mes = {m: 0 for m in range(1, 13)}
+        for d in df_anio["_FECHA_REF"]:
+            conteo_mes[d.month] += 1
+        df_graf_mes = pd.DataFrame(
+            {
+                "Mes": [f"{m:02d}. {MESES_ES[m]}" for m in range(1, 13)],
+                "Cambios": [conteo_mes[m] for m in range(1, 13)],
+            }
+        ).set_index("Mes")
+        st.bar_chart(df_graf_mes, color="#0070c0")
+
+        c_g1, c_g2 = st.columns(2)
+        with c_g1:
+            st.markdown(f"#### 📌 Distribución por Motivo ({anio_sel})")
+            if "OBSERVACIONES" in df_anio.columns and not df_anio.empty:
+                motivos_base = (
+                    df_anio["OBSERVACIONES"]
+                    .fillna("SIN ESPECIFICAR")
+                    .astype(str)
+                    .apply(lambda x: x.split(" - ")[0].strip().upper())
+                )
+                df_graf_mot = (
+                    motivos_base.value_counts()
+                    .head(10)
+                    .rename_axis("Motivo")
+                    .to_frame("Cantidad")
+                )
+                st.bar_chart(df_graf_mot, color="#00b050")
+            else:
+                st.caption("Sin datos para este año.")
+
+        with c_g2:
+            st.markdown(f"#### 👤 Distribución por Responsable ({anio_sel})")
+            if "RESPONSABLE DEL CAMBIO" in df_anio.columns and not df_anio.empty:
+                df_graf_resp = (
+                    df_anio["RESPONSABLE DEL CAMBIO"]
+                    .fillna("Sin asignar")
+                    .astype(str)
+                    .value_counts()
+                    .rename_axis("Responsable")
+                    .to_frame("Cantidad")
+                )
+                st.bar_chart(df_graf_resp, color="#0070c0")
+            else:
+                st.caption("Sin datos para este año.")
+
+        if conteo_ops:
+            st.markdown(f"#### 🏅 Operadores con Más Cambios en {anio_sel}")
+            df_top_ops = (
+                pd.DataFrame(
+                    sorted(conteo_ops.items(), key=lambda x: x[1], reverse=True),
+                    columns=["Código Operador", f"Cambios en {anio_sel}"],
+                )
+                .head(20)
+            )
+            st.dataframe(df_top_ops, use_container_width=True, hide_index=True)
