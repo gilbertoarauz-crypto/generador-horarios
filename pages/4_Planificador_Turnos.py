@@ -722,7 +722,7 @@ def export_excel_bytes(week: dict, employees: list) -> bytes:
         for col in range(1, 11):
             c = ws.cell(row=r_idx, column=col)
             c.font = Font(name="Calibri", size=11, bold=True, color="0F172A")
-            c.alignment = Alignment(horizontal="center", vertical="middle")
+            c.alignment = Alignment(horizontal="center", vertical="center")
             c.border = border
             c.fill = PatternFill(start_color=fill_hex, end_color=fill_hex, fill_type="solid")
 
@@ -735,14 +735,14 @@ def export_excel_bytes(week: dict, employees: list) -> bytes:
         for col in range(1, 4):
             c = ws.cell(row=r_num, column=col)
             c.font = Font(name="Calibri", size=11, color="0F172A")
-            c.alignment = Alignment(horizontal="center", vertical="middle")
+            c.alignment = Alignment(horizontal="center", vertical="center")
             c.border = border
         for d in range(7):
             fill_hex, font_hex = get_cell_colors(cells[d])
             c = ws.cell(row=r_num, column=4 + d)
             c.font = Font(name="Calibri", size=10, bold=True, color=font_hex)
             c.fill = PatternFill(start_color=fill_hex, end_color=fill_hex, fill_type="solid")
-            c.alignment = Alignment(horizontal="center", vertical="middle")
+            c.alignment = Alignment(horizontal="center", vertical="center")
             c.border = border
 
     widths = [11, 25, 25] + [16] * 7
@@ -946,7 +946,10 @@ with tab1:
             styles.append(cell_style_map.get((cod, col_name), ""))
         return styles
 
-    st.dataframe(df_view.style.apply(style_matrix_row, axis=1), use_container_width=True, height=520, hide_index=True)
+    if df_view.empty:
+        st.info("No hay colaboradores para el filtro seleccionado.")
+    else:
+        st.dataframe(df_view.style.apply(style_matrix_row, axis=1), use_container_width=True, height=520, hide_index=True)
 
     with st.expander("Editar turno de un colaborador"):
         ec1, ec2, ec3, ec4 = st.columns([2, 1.2, 1.5, 1])
@@ -957,11 +960,11 @@ with tab1:
             sel_d = ec2.selectbox("Día", DIAS_SEMANA)
             d_idx = DIAS_SEMANA.index(sel_d)
             curr_c = active_week["assignments"][sel_e["id"]][d_idx]
-            opts = TURNOS_CATALOGO + ESTADOS_ESPECIALES
+            opts = [""] + TURNOS_CATALOGO + ESTADOS_ESPECIALES
             idx_base = opts.index(curr_c["base"]) if curr_c["base"] in opts else 0
             new_base = ec3.selectbox("Turno / Estado", opts, index=idx_base)
-            new_at = ec4.checkbox("AT (Cubre Técnico)", value=curr_c["is_at"], disabled=(new_base in ESTADOS_ESPECIALES))
-            new_cap = st.checkbox("CAP (Capacitación)", value=curr_c["is_cap"], disabled=(new_base in ESTADOS_ESPECIALES))
+            new_at = ec4.checkbox("AT (Cubre Técnico)", value=curr_c["is_at"], disabled=(new_base in ESTADOS_ESPECIALES or not new_base))
+            new_cap = st.checkbox("CAP (Capacitación)", value=curr_c["is_cap"], disabled=(new_base in ESTADOS_ESPECIALES or not new_base))
             if st.button("Guardar cambio en celda"):
                 active_week["assignments"][sel_e["id"]][d_idx] = parse_raw_cell(format_cell_raw(new_base, new_at, new_cap), locked=True)
                 st.success("Turno actualizado.")
@@ -1018,8 +1021,21 @@ with tab3:
     for sh, tgt in tech_targets.items():
         row_c = {"Turno Técnico": sh, "Meta": tgt}
         for d in range(7):
-            directs = [e["nombre"] for e in employees if e["activo"] and e["cargo"] == "Técnico de Operaciones" and covers_shift_window(active_week["assignments"][e["id"]][d]["base"], sh)]
-            ats = [f"AT: {e['nombre']}" for e in employees if e["activo"] and e["cargo"] != "Técnico de Operaciones" and active_week["assignments"][e["id"]][d]["is_at"] and covers_shift_window(active_week["assignments"][e["id"]][d]["base"], sh)]
+            directs = [
+                e["nombre"]
+                for e in employees
+                if e["activo"]
+                and e["cargo"] == "Técnico de Operaciones"
+                and covers_shift_window(active_week["assignments"].get(e["id"], [parse_raw_cell("") for _ in range(7)])[d]["base"], sh)
+            ]
+            ats = [
+                f"AT: {e['nombre']}"
+                for e in employees
+                if e["activo"]
+                and e["cargo"] != "Técnico de Operaciones"
+                and active_week["assignments"].get(e["id"], [parse_raw_cell("") for _ in range(7)])[d]["is_at"]
+                and covers_shift_window(active_week["assignments"].get(e["id"], [parse_raw_cell("") for _ in range(7)])[d]["base"], sh)
+            ]
             tot = len(directs) + len(ats)
             row_c[DIAS_SEMANA[d][:3]] = f"{tot}/{tgt} (" + (", ".join(directs + ats) or "Sin cubrir") + ")"
         cov_rows.append(row_c)
