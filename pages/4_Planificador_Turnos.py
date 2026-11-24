@@ -1,5 +1,6 @@
 import io
 import re
+import unicodedata
 import datetime as dt
 import pandas as pd
 import streamlit as st
@@ -88,6 +89,23 @@ SEED_ROWS = [
     ("13618", "Isidro Concepcion", "Conductor de Operaciones", False, True, ["11:00-18:00", "11:00-18:00", "11:00-18:00", "11:00-18:00", "11:00-18:00", "11:00-18:00", "L"]),
     ("13635", "Ricardo Palacio", "Conductor de Operaciones", False, True, ["03:00-10:00", "03:00-10:00", "03:00-10:00", "03:00-10:00", "03:00-10:00", "L", "11:00-18:00"]),
 ]
+
+
+def normalize_cargo(raw: str) -> str:
+    s = unicodedata.normalize("NFKD", str(raw or "")).encode("ascii", "ignore").decode("ascii").upper().strip()
+    if "ANALISTA" in s:
+        return "Analista de Operaciones"
+    if "AUXILIAR" in s and "ALISTAMIENTO" in s:
+        return "Auxiliar de Alistamiento"
+    if "AUXILIAR" in s:
+        return "Auxiliar de Operaciones"
+    if "LIDER" in s:
+        return "Operador Líder"
+    if "TECNICO" in s:
+        return "Técnico de Operaciones"
+    if "CONDUCTOR" in s:
+        return "Conductor de Operaciones"
+    return "Auxiliar de Operaciones"
 
 
 def parse_raw_cell(raw_text: str, locked: bool = False) -> dict:
@@ -201,10 +219,92 @@ def get_week_day_headers(start_date: dt.date) -> list:
     return [f"{DIAS_SEMANA[i]} {format_date_es(start_date + dt.timedelta(days=i))}" for i in range(7)]
 
 
+def import_matrix_to_week(matrix: list, start_date: dt.date, employees: list, weeks: list):
+    if not matrix:
+        raise ValueError("No se encontraron filas válidas para importar.")
+
+    header_idx = -1
+    for i in range(min(12, len(matrix))):
+        row_up = [str(c or "").strip().upper() for c in matrix[i]]
+        if any(c in {"CODIGO", "CÓDIGO"} for c in row_up) and any(c == "NOMBRE" for c in row_up):
+            header_idx = i
+            break
+
+    has_header = header_idx != -1
+    hdr_row = [str(c or "").strip().upper() for c in matrix[header_idx]] if has_header else []
+    idx_cod = next((i for i, c in enumerate(hdr_row) if c in {"CODIGO", "CÓDIGO"}), 0) if has_header else 0
+    idx_nom = next((i for i, c in enumerate(hdr_row) if c == "NOMBRE"), 1) if has_header else 1
+    idx_car = next((i for i, c in enumerate(hdr_row) if c == "CARGO"), 2) if has_header else 2
+    day_start = max(idx_car, idx_nom) + 1
+
+    data_start = header_idx + 1 if has_header else 0
+    if has_header and data_start < len(matrix):
+        nxt = matrix[data_start]
+        c_val = str(nxt[idx_cod] if len(nxt) > idx_cod else "").strip()
+        d_val = str(nxt[day_start] if len(nxt) > day_start else "").strip()
+        if not c_val and d_val:
+            data_start += 1
+
+    emp_by_code = {e["codigo"]: e for e in employees}
+    imp_assign = {e["id"]: [parse_raw_cell("") for _ in range(7)] for e in employees}
+    imported_count = 0
+
+    for r_i in range(data_start, len(matrix)):
+        r = matrix[r_i]
+        cod = str(r[idx_cod] if len(r) > idx_cod else "").strip()
+        if cod.endswith(".0"):
+            cod = cod[:-2]
+        nom = str(r[idx_nom] if len(r) > idx_nom else "").strip()
+        if not cod and not nom:
+            continue
+        if cod.upper() in {"CODIGO", "CÓDIGO"}:
+            continue
+
+        car_raw = str(r[idx_car] if len(r) > idx_car else "").strip()
+        cells = [parse_raw_cell(r[day_start + d] if len(r) > day_start + d else "") for d in range(7)]
+        has_work = any(c["base"] for c in cells)
+        has_at = any(c["is_at"] for c in cells)
+
+        if cod in emp_by_code:
+            emp = emp_by_code[cod]
+            if car_raw:
+                emp["cargo"] = normalize_cargo(car_raw)
+            if has_at:
+                emp["puede_at"] = True
+            emp["activo"] = has_work or emp["activo"]
+            imp_assign[emp["id"]] = cells
+        else:
+            eid = f"emp_{cod or r_i}_{len(employees)+1}"
+            new_emp = {
+                "id": eid,
+                "codigo": cod or str(r_i),
+                "nombre": nom or f"Colaborador {cod}",
+                "cargo": normalize_cargo(car_raw),
+                "puede_at": has_at,
+                "activo": has_work,
+            }
+            employees.append(new_emp)
+            emp_by_code[new_emp["codigo"]] = new_emp
+            for w in weeks:
+                w["assignments"][eid] = [parse_raw_cell("") for _ in range(7)]
+            imp_assign[eid] = cells
+
+        imported_count += 1
+
+    if imported_count == 0:
+        raise ValueError("No se detectaron colaboradores. Verifica columnas CODIGO, NOMBRE, CARGO y los 7 días.")
+
+    return {
+        "id": f"week_{start_date.isoformat()}",
+        "label": build_week_label(start_date),
+        "start_date": start_date,
+        "assignments": imp_assign,
+    }, imported_count
+
+
 def auto_assign_tecnico_at(week: dict, employees: list, role_configs: dict, rules: dict, prev_week=None):
     assignments = {eid: [dict(c) for c in row] for eid, row in week["assignments"].items()}
 
-    # Limpiar AT automáticos previos que no estén bloqueados manualmente
     for emp in employees:
         if not emp["activo"] or emp["cargo"] == "Técnico de Operaciones":
             continue
@@ -227,7 +327,7 @@ def auto_assign_tecnico_at(week: dict, employees: list, role_configs: dict, rule
                 for e in employees:
                     if not e["activo"]:
                         continue
-                    cell = assignments.get(e["id"], [{}]*7)[d]
+                    cell = assignments.get(e["id"], [{}] * 7)[d]
                     if e["cargo"] == "Técnico de Operaciones" and covers_shift_window(cell.get("base", ""), shift_code):
                         cnt += 1
                     elif cell.get("is_at") and covers_shift_window(cell.get("base", ""), shift_code):
@@ -236,7 +336,6 @@ def auto_assign_tecnico_at(week: dict, employees: list, role_configs: dict, rule
 
             covered = count_covered()
             while covered < target:
-                # Paso 1: habilitado AT ya en ese mismo turno
                 same_cands = [
                     e for e in employees
                     if e["activo"]
@@ -257,7 +356,6 @@ def auto_assign_tecnico_at(week: dict, employees: list, role_configs: dict, rule
                     covered += 1
                     continue
 
-                # Paso 2: mover a alguien habilitado desde otro turno respetando 12h/24h (priorizando turnos con excedente)
                 flex_cands = []
                 for e in employees:
                     if not (e["activo"] and e["puede_at"] and e["cargo"] in {"Auxiliar de Operaciones", "Analista de Operaciones"}):
@@ -393,7 +491,6 @@ def generate_next_week(
 
         return best_shift if best_score != float("-inf") else ideal_next
 
-    # Paso 1: Asignar L y turnos respetando Noche -> Tarde -> Mañana + Meta diaria + 12h/24h
     for emp_idx, emp in enumerate(employees):
         prev_cells = prev_week["assignments"].get(emp["id"], [])
         existing_cells = (preserve_locked_from or {}).get("assignments", {}).get(emp["id"], [])
@@ -521,7 +618,6 @@ def generate_next_week(
                 counts_by_day[d][post_shift] = counts_by_day[d].get(post_shift, 0) + 1
         new_assignments[emp["id"]] = row
 
-    # Paso 2: Ajuste fino diario por cargo para cumplir la Meta Diaria moviendo excedentes (respetando 12h/24h)
     cargos_presentes = []
     for e in employees:
         if e["activo"] and e["cargo"] not in cargos_presentes:
@@ -862,7 +958,6 @@ if st.session_state.get("roster_toast"):
     st.success(st.session_state.roster_toast)
     st.session_state.roster_toast = ""
 
-# Barra superior
 c1, c2, c3, c4 = st.columns([3, 1.1, 1.9, 1.9])
 with c1:
     week_options = [f"{i+1}. {w['label']}" for i, w in enumerate(weeks)]
@@ -906,7 +1001,6 @@ with c4:
         use_container_width=True,
     )
 
-# Métricas
 active_emps = [e for e in employees if e["activo"]]
 nov_count = sum(
     1 for e in active_emps for c in active_week["assignments"].get(e["id"], [])
@@ -1180,30 +1274,64 @@ with tab4:
         emp["activo"] = d5.checkbox("Activo", value=emp["activo"], key=f"eact_{emp['id']}_{idx_e}")
 
 with tab5:
-    st.subheader("Importar desde Excel (.xlsx)")
-    up = st.file_uploader("Sube un archivo Excel con columnas CODIGO, NOMBRE, CARGO y los 7 días", type=["xlsx"])
-    imp_date = st.date_input("Lunes de inicio de la semana importada", value=active_week["start_date"] + dt.timedelta(days=7))
-    if up is not None and st.button("Importar horario como nueva semana", type="primary"):
-        wb_in = load_workbook(up, data_only=True)
-        ws_in = wb_in.active
-        rows_in = list(ws_in.iter_rows(values_only=True))
-        if len(rows_in) > 1:
-            emp_by_code = {e["codigo"]: e for e in employees}
-            imp_assign = {e["id"]: [parse_raw_cell("") for _ in range(7)] for e in employees}
-            for r in rows_in[1:]:
-                if not r or r[0] is None:
-                    continue
-                code_str = str(r[0]).strip()
-                if code_str in emp_by_code:
-                    eid = emp_by_code[code_str]["id"]
-                    imp_assign[eid] = [parse_raw_cell(r[3 + i] if len(r) > 3 + i else "") for i in range(7)]
-            new_w = {
-                "id": f"week_{imp_date.isoformat()}",
-                "label": build_week_label(imp_date),
-                "start_date": imp_date,
-                "assignments": imp_assign,
-            }
-            st.session_state.weeks.append(new_w)
-            st.session_state.active_week_idx = len(st.session_state.weeks) - 1
-            st.session_state.roster_toast = f"Semana '{new_w['label']}' importada correctamente."
-            st.rerun()
+    st.subheader("Importar Semana Base desde Excel o Pegado Directo")
+    st.caption("Compatible con columnas: CODIGO, NOMBRE, CARGO y los 7 días (LUN a DOM).")
+
+    c_imp1, c_imp2 = st.columns([1.4, 2])
+    with c_imp1:
+        imp_date = st.date_input("Lunes de inicio de la semana importada", value=active_week["start_date"] + dt.timedelta(days=7))
+    with c_imp2:
+        imp_mode = st.radio(
+            "¿Cómo cargar los datos?",
+            ["Crear como nueva semana", "Reemplazar la semana activa"],
+            horizontal=True,
+        )
+
+    col_up, col_paste = st.columns(2)
+    with col_up:
+        with st.container(border=True):
+            st.markdown("**Opción 1: Subir archivo Excel (.xlsx)**")
+            up = st.file_uploader("Sube un archivo Excel con CODIGO, NOMBRE, CARGO y 7 días", type=["xlsx"])
+            if up is not None and st.button("Cargar archivo Excel", key="btn_imp_xlsx", type="primary", use_container_width=True):
+                try:
+                    wb_in = load_workbook(up, data_only=True)
+                    ws_in = wb_in.active
+                    matrix = [list(r) for r in ws_in.iter_rows(values_only=True)]
+                    new_w, cnt = import_matrix_to_week(matrix, imp_date, employees, weeks)
+                    if imp_mode == "Reemplazar la semana activa":
+                        st.session_state.weeks[week_idx] = new_w
+                    else:
+                        st.session_state.weeks.append(new_w)
+                        st.session_state.active_week_idx = len(st.session_state.weeks) - 1
+                    st.session_state.roster_toast = f"Semana '{new_w['label']}' cargada desde Excel ({cnt} colaboradores)."
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"No se pudo leer el archivo: {exc}")
+
+    with col_paste:
+        with st.container(border=True):
+            st.markdown("**Opción 2: Copiar y pegar desde Excel (Ctrl + C / Ctrl + V)**")
+            paste_txt = st.text_area(
+                "Pega aquí las filas copiadas desde Excel (CODIGO, NOMBRE, CARGO y LUN a DOM)",
+                height=170,
+                placeholder="Selecciona en Excel desde CODIGO hasta DOMINGO, copia con Ctrl + C y pégalo aquí...",
+                key="paste_excel_box",
+            )
+            if st.button("Cargar tabla pegada", key="btn_imp_paste", type="primary", use_container_width=True):
+                if not paste_txt.strip():
+                    st.error("Pega primero las celdas copiadas de Excel.")
+                else:
+                    try:
+                        lines = [l for l in paste_txt.splitlines() if l.strip()]
+                        sep = "\t" if any("\t" in l for l in lines) else ";"
+                        matrix = [l.split(sep) for l in lines]
+                        new_w, cnt = import_matrix_to_week(matrix, imp_date, employees, weeks)
+                        if imp_mode == "Reemplazar la semana activa":
+                            st.session_state.weeks[week_idx] = new_w
+                        else:
+                            st.session_state.weeks.append(new_w)
+                            st.session_state.active_week_idx = len(st.session_state.weeks) - 1
+                        st.session_state.roster_toast = f"Semana '{new_w['label']}' cargada desde texto pegado ({cnt} colaboradores)."
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Error al leer la tabla pegada: {exc}")
