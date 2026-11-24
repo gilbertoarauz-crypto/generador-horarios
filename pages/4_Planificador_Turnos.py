@@ -265,6 +265,15 @@ def get_total_cargo_target_for_day(cfg, day_idx):
     return sum(get_shift_target_for_day(cfg, s, day_idx) for s in shifts)
 
 
+def get_enabled_pool(cfg):
+    pool = cfg.get("rotation_pool", []) if cfg else []
+    enabled = [
+        s for s in pool
+        if any(get_shift_target_for_day(cfg, s, d) > 0 for d in range(7))
+    ]
+    return enabled if enabled else pool
+
+
 def get_cell_colors(cell):
     base = (cell or {}).get("base", "")
     is_at = (cell or {}).get("is_at", False)
@@ -400,32 +409,67 @@ def get_rest_hours_across_day_off(prev_cell, next_cell):
     return round((next_cell["start_min"] + 2880 - prev_cell["end_min"]) / 60.0, 1)
 
 
-def check_shift_fit(cells_7, prev_sunday_cell, day_idx, candidate_shift, rules):
-    cand = parse_raw_cell(candidate_shift)
-    if not is_work_shift(cand):
+def is_transition_valid(prev_shift_str, prev_offset, cand_str, cand_day, crossed_off, rules):
+    if not prev_shift_str:
         return True
-    prev_cell = prev_sunday_cell if day_idx == 0 else cells_7[day_idx - 1]
-    if prev_cell and prev_cell.get("base") == "L":
-        before_off = prev_sunday_cell if day_idx == 1 else (None if day_idx == 0 else cells_7[day_idx - 2])
-        gap = get_rest_hours_across_day_off(before_off, cand)
-        if gap is not None and gap < rules["min_rest_off"]:
-            return False
-    elif is_work_shift(prev_cell):
-        gap = get_rest_hours_gap(prev_cell, cand)
-        if gap is not None and gap < rules["min_rest_between"]:
-            return False
+    wp = parse_raw_cell(prev_shift_str)
+    wn = parse_raw_cell(cand_str)
+    if wp["start_min"] is None or wn["start_min"] is None:
+        return True
+    rest_h = (cand_day * 1440 + wn["start_min"] - (prev_offset * 1440 + wp["end_min"])) / 60.0
+    if crossed_off:
+        return rest_h >= rules["min_rest_off"]
+    return rest_h >= rules["min_rest_between"]
 
-    next_cell = cells_7[day_idx + 1] if day_idx < 6 else None
-    if next_cell and next_cell.get("base") == "L":
-        after_off = cells_7[day_idx + 2] if day_idx + 2 <= 6 else None
-        gap = get_rest_hours_across_day_off(cand, after_off)
-        if gap is not None and gap < rules["min_rest_off"]:
-            return False
-    elif is_work_shift(next_cell):
-        gap = get_rest_hours_gap(cand, next_cell)
-        if gap is not None and gap < rules["min_rest_between"]:
-            return False
+
+def check_range_fit(row, prev_row, start_d, end_d, cand_shift, rules):
+    prev_s = None
+    prev_off = start_d - 1
+    prev_crossed = False
+    for k in range(start_d - 1, -1, -1):
+        c = row[k]
+        if c.get("base") == "L":
+            prev_crossed = True
+            continue
+        if is_work_shift(c):
+            prev_s = c["base"]
+            prev_off = k
+            break
+        break
+    if not prev_s and prev_row and len(prev_row) == 7:
+        for k in range(6, -1, -1):
+            c = prev_row[k]
+            if c.get("base") == "L":
+                prev_crossed = True
+                continue
+            if is_work_shift(c):
+                prev_s = c["base"]
+                prev_off = k - 7
+                break
+            break
+    if not is_transition_valid(prev_s, prev_off, cand_shift, start_d, prev_crossed, rules):
+        return False
+
+    next_s = None
+    next_off = end_d + 1
+    next_crossed = False
+    for k in range(end_d + 1, 7):
+        c = row[k]
+        if c.get("base") == "L":
+            next_crossed = True
+            continue
+        if is_work_shift(c):
+            next_s = c["base"]
+            next_off = k
+            break
+        break
+    if next_s and not is_transition_valid(cand_shift, end_d, next_s, next_off, next_crossed, rules):
+        return False
     return True
+
+
+def check_shift_fit(cells_7, prev_sunday_cell, day_idx, candidate_shift, rules, prev_row=None):
+    return check_range_fit(cells_7, prev_row or ([prev_sunday_cell] * 7 if prev_sunday_cell else None), day_idx, day_idx, candidate_shift, rules)
 
 
 def compute_uncovered_tasks(week, employees, role_configs):
@@ -536,6 +580,14 @@ def validate_schedule(week, employees, role_configs, rules, prev_week=None):
 
 def auto_assign_at(week, employees, role_configs, rules, prev_week=None):
     new_week = copy.deepcopy(week)
+    for e in employees:
+        if not e["activo"] or e["cargo"] == "Técnico de Operaciones":
+            continue
+        row = new_week["assignments"].get(e["id"], [])
+        for d in range(min(7, len(row))):
+            if row[d].get("is_at") and not row[d].get("locked"):
+                row[d] = parse_raw_cell(format_cell_raw(row[d]["base"], is_at=False, is_cap=row[d].get("is_cap", False)))
+
     tech_cfg = role_configs.get("Técnico de Operaciones", {})
     tech_shifts = list(dict.fromkeys(
         tech_cfg.get("rotation_pool", [])
@@ -561,8 +613,30 @@ def auto_assign_at(week, employees, role_configs, rules, prev_week=None):
                 if covers_shift_window(c, s) and (e["cargo"] == "Técnico de Operaciones" or c.get("is_at")):
                     covered += 1
             while covered < target:
-                best_e = None
-                best_score = -10**9
+                # Paso 1: Candidatos ya programados en ese mismo turno (no altera Meta Diaria)
+                same_cands = []
+                for e in candidates:
+                    row = new_week["assignments"].get(e["id"], [])
+                    if len(row) < 7:
+                        continue
+                    c = row[d]
+                    if c.get("locked") or is_absence_state(c) or c.get("base") == "L" or c.get("is_at"):
+                        continue
+                    if c.get("base") == s:
+                        at_load = sum(1 for x in row if x.get("is_at"))
+                        same_cands.append((at_load, 0 if e["cargo"] == "Auxiliar de Operaciones" else 1, e))
+
+                if same_cands:
+                    same_cands.sort(key=lambda t: (t[0], t[1]))
+                    chosen = same_cands[0][2]
+                    row = new_week["assignments"][chosen["id"]]
+                    row[d] = parse_raw_cell(format_cell_raw(s, is_at=True, is_cap=row[d].get("is_cap", False)), locked=False)
+                    covered += 1
+                    assigned_cnt += 1
+                    continue
+
+                # Paso 2: Flex AT únicamente si su turno original tiene EXCEDENTE sobre la Meta Diaria
+                flex_cands = []
                 for e in candidates:
                     row = new_week["assignments"].get(e["id"], [])
                     if len(row) < 7:
@@ -570,22 +644,30 @@ def auto_assign_at(week, employees, role_configs, rules, prev_week=None):
                     c = row[d]
                     if c.get("locked") or is_absence_state(c) or c.get("base") == "L" or c.get("is_at") or not is_work_shift(c):
                         continue
-                    prev_sun = prev_week["assignments"].get(e["id"], [None] * 7)[6] if prev_week else None
-                    if not check_shift_fit(row, prev_sun, d, s, rules):
+                    own_shift = c["base"]
+                    own_target = get_shift_target_for_day(role_configs.get(e["cargo"], {}), own_shift, d)
+                    own_count = sum(
+                        1 for emp2 in employees
+                        if emp2["activo"] and emp2["cargo"] == e["cargo"]
+                        and new_week["assignments"].get(emp2["id"], [{}] * 7)[d].get("base") == own_shift
+                    )
+                    if own_count <= own_target:
                         continue
-                    score = 1000 if c["base"] == s else 0
-                    if e["cargo"] == "Auxiliar de Operaciones":
-                        score += 50
-                    score -= sum(1 for x in row if x.get("is_at")) * 150
-                    if score > best_score:
-                        best_score = score
-                        best_e = e
-                if not best_e:
-                    break
-                row = new_week["assignments"][best_e["id"]]
-                row[d] = parse_raw_cell(format_cell_raw(s, is_at=True, is_cap=row[d].get("is_cap", False)), locked=False)
-                covered += 1
-                assigned_cnt += 1
+                    prev_row = prev_week["assignments"].get(e["id"]) if prev_week else None
+                    if not check_range_fit(row, prev_row, d, d, s, rules):
+                        continue
+                    at_load = sum(1 for x in row if x.get("is_at"))
+                    flex_cands.append((-(own_count - own_target), at_load, 0 if e["cargo"] == "Auxiliar de Operaciones" else 1, e))
+
+                if flex_cands:
+                    flex_cands.sort(key=lambda t: (t[0], t[1], t[2]))
+                    chosen = flex_cands[0][3]
+                    row = new_week["assignments"][chosen["id"]]
+                    row[d] = parse_raw_cell(format_cell_raw(s, is_at=True, is_cap=row[d].get("is_cap", False)), locked=False)
+                    covered += 1
+                    assigned_cnt += 1
+                    continue
+                break
     return new_week, assigned_cnt
 
 
@@ -626,7 +708,7 @@ def generate_next_week(base_week, employees, role_configs, rules, override_start
         new_week["assignments"][eid] = row
 
     def get_rotated_shift(cargo, current_shift):
-        pool = role_configs.get(cargo, {}).get("rotation_pool", [])
+        pool = get_enabled_pool(role_configs.get(cargo, {}))
         if not pool:
             return current_shift
         if current_shift in pool:
@@ -656,14 +738,9 @@ def generate_next_week(base_week, employees, role_configs, rules, override_start
                 cnt += 1
         return cnt
 
-    def pick_best_shift(cargo, day_indices, prev_sun, row, preferred, avoid=None):
+    def pick_best_shift(cargo, day_indices, prev_row, row, preferred, avoid=None):
         cfg = role_configs.get(cargo, {})
-        pool = list(dict.fromkeys(
-            cfg.get("rotation_pool", [])
-            + list(cfg.get("daily_targets", {}).keys())
-            + list(cfg.get("saturday_targets", {}).keys())
-            + list(cfg.get("sunday_targets", {}).keys())
-        ))
+        pool = get_enabled_pool(cfg)
         if not pool or not day_indices:
             return preferred
 
@@ -672,7 +749,7 @@ def generate_next_week(base_week, employees, role_configs, rules, override_start
             for d in day_indices:
                 if sim[d].get("locked") or is_absence_state(sim[d]) or sim[d].get("base") == "L":
                     continue
-                if not check_shift_fit(sim, prev_sun, d, s, rules):
+                if not check_range_fit(sim, prev_row, d, d, s, rules):
                     return False
                 sim[d] = parse_raw_cell(s)
             return True
@@ -706,7 +783,7 @@ def generate_next_week(base_week, employees, role_configs, rules, override_start
 
     for cargo in CARGOS_ORDEN:
         cfg = role_configs.get(cargo, {})
-        pool = cfg.get("rotation_pool", [])
+        pool = get_enabled_pool(cfg)
         if not pool:
             continue
         cargo_emps = [e for e in employees if e["activo"] and e["cargo"] == cargo]
@@ -768,52 +845,89 @@ def generate_next_week(base_week, employees, role_configs, rules, override_start
             if rules["rotate_after_off"] and off_day is not None:
                 sunday_work_shift = prev_sun["base"] if is_work_shift(prev_sun) else last_work
                 pre_days = [d for d in range(0, off_day) if not row[d].get("locked") and not is_absence_state(row[d]) and row[d].get("base") != "L"]
-                sunday_needs_cov = any(
-                    count_shift(cargo, d, sunday_work_shift) < get_shift_target_for_day(cfg, sunday_work_shift, d)
+                sunday_net_need = sum(
+                    (1 if count_shift(cargo, d, sunday_work_shift) < get_shift_target_for_day(cfg, sunday_work_shift, d) else -1)
                     for d in pre_days
                 )
-                if pre_days and sunday_work_shift in pool and sunday_needs_cov and all(check_shift_fit(row, prev_sun, d, sunday_work_shift, rules) for d in pre_days):
+                sunday_needs_cov = sunday_net_need > 0
+                if (
+                    pre_days
+                    and sunday_work_shift in pool
+                    and sunday_needs_cov
+                    and all(check_range_fit(row, prev_row, d, d, sunday_work_shift, rules) for d in pre_days)
+                ):
                     pre_shift = sunday_work_shift
                 else:
-                    pre_shift = pick_best_shift(cargo, pre_days, prev_sun, row, last_work)
+                    pre_shift = pick_best_shift(cargo, pre_days, prev_row, row, last_work)
 
                 for d in pre_days:
                     row[d] = parse_raw_cell(pre_shift)
 
                 post_days = [d for d in range(off_day + 1, 7) if not row[d].get("locked") and not is_absence_state(row[d]) and row[d].get("base") != "L"]
                 rot_candidate = get_rotated_shift(cargo, pre_shift if pre_days else last_work)
-                post_shift = pick_best_shift(cargo, post_days, prev_sun, row, rot_candidate, avoid=(pre_shift if pre_days else last_work))
+                post_shift = pick_best_shift(cargo, post_days, prev_row, row, rot_candidate, avoid=(pre_shift if pre_days else last_work))
                 for d in post_days:
                     row[d] = parse_raw_cell(post_shift)
             else:
                 work_days = [d for d in range(7) if not row[d].get("locked") and not is_absence_state(row[d]) and row[d].get("base") != "L"]
                 rot_candidate = get_rotated_shift(cargo, last_work)
-                chosen = pick_best_shift(cargo, work_days, prev_sun, row, rot_candidate, avoid=last_work)
+                chosen = pick_best_shift(cargo, work_days, prev_row, row, rot_candidate, avoid=last_work)
                 for d in work_days:
                     row[d] = parse_raw_cell(chosen)
 
+        # Paso 2: Ajuste fino diario y por bloques contiguos para respetar exactamente la Meta Diaria
         shifts_all = list(dict.fromkeys(pool + list(cfg.get("daily_targets", {}).keys()) + list(cfg.get("saturday_targets", {}).keys()) + list(cfg.get("sunday_targets", {}).keys())))
         for d in range(7):
             under = [s for s in shifts_all if get_shift_target_for_day(cfg, s, d) > 0 and count_shift(cargo, d, s) < get_shift_target_for_day(cfg, s, d)]
-            over = [s for s in shifts_all if count_shift(cargo, d, s) > get_shift_target_for_day(cfg, s, d)]
+            over = sorted(
+                [s for s in shifts_all if count_shift(cargo, d, s) > get_shift_target_for_day(cfg, s, d)],
+                key=lambda s: -(count_shift(cargo, d, s) - get_shift_target_for_day(cfg, s, d)),
+            )
             for u_shift in under:
-                needed = get_shift_target_for_day(cfg, u_shift, d) - count_shift(cargo, d, u_shift)
-                for o_shift in over:
-                    if needed <= 0:
-                        break
-                    surplus = count_shift(cargo, d, o_shift) - get_shift_target_for_day(cfg, o_shift, d)
-                    for emp in cargo_emps:
-                        if needed <= 0 or surplus <= 0:
+                while count_shift(cargo, d, u_shift) < get_shift_target_for_day(cfg, u_shift, d):
+                    moved = False
+                    over = sorted(
+                        [s for s in shifts_all if s != u_shift and count_shift(cargo, d, s) > get_shift_target_for_day(cfg, s, d)],
+                        key=lambda s: -(count_shift(cargo, d, s) - get_shift_target_for_day(cfg, s, d)),
+                    )
+                    for o_shift in over:
+                        for emp in cargo_emps:
+                            r = new_week["assignments"][emp["id"]]
+                            c = r[d]
+                            if c.get("locked") or c.get("base") != o_shift:
+                                continue
+                            prev_row = base_week["assignments"].get(emp["id"], [parse_raw_cell("") for _ in range(7)])
+                            if check_range_fit(r, prev_row, d, d, u_shift, rules):
+                                r[d] = parse_raw_cell(u_shift)
+                                moved = True
+                                break
+                        if moved:
                             break
-                        r = new_week["assignments"][emp["id"]]
-                        c = r[d]
-                        if c.get("locked") or c.get("base") != o_shift:
-                            continue
-                        prev_sun = base_week["assignments"].get(emp["id"], [parse_raw_cell("") for _ in range(7)])[6]
-                        if check_shift_fit(r, prev_sun, d, u_shift, rules):
-                            r[d] = parse_raw_cell(u_shift)
-                            needed -= 1
-                            surplus -= 1
+                    if not moved:
+                        for o_shift in over:
+                            for emp in cargo_emps:
+                                r = new_week["assignments"][emp["id"]]
+                                if r[d].get("locked") or r[d].get("base") != o_shift:
+                                    continue
+                                end_d = d
+                                while (
+                                    end_d + 1 < 7
+                                    and not r[end_d + 1].get("locked")
+                                    and r[end_d + 1].get("base") == o_shift
+                                    and count_shift(cargo, end_d + 1, u_shift) < get_shift_target_for_day(cfg, u_shift, end_d + 1)
+                                    and count_shift(cargo, end_d + 1, o_shift) > get_shift_target_for_day(cfg, o_shift, end_d + 1)
+                                ):
+                                    end_d += 1
+                                prev_row = base_week["assignments"].get(emp["id"], [parse_raw_cell("") for _ in range(7)])
+                                if end_d > d and check_range_fit(r, prev_row, d, end_d, u_shift, rules):
+                                    for dd in range(d, end_d + 1):
+                                        r[dd] = parse_raw_cell(u_shift)
+                                    moved = True
+                                    break
+                            if moved:
+                                break
+                    if not moved:
+                        break
 
     at_assigned = 0
     if rules.get("auto_assign_at", True):
