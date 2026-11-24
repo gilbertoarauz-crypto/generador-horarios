@@ -1405,8 +1405,11 @@ def export_excel_bytes(week: dict, employees: List[dict]) -> bytes:
                 cell_obj = cells[col_idx - 4]
                 _, fg_hex, bg_argb = get_cell_colors(cell_obj)
                 c.fill = PatternFill("solid", fgColor=bg_argb)
-                c.font = Font(bold=bool(cell_obj.get("isAT") or cell_obj.get("baseShift") in ("L", "VACACIONES", "SUSPEND")),
-                              size=10, color=fg_hex.lstrip("#"))
+                c.font = Font(
+                    bold=bool(cell_obj.get("isAT") or cell_obj.get("baseShift") in ("L", "VACACIONES", "SUSPEND")),
+                    size=10,
+                    color=fg_hex.lstrip("#"),
+                )
                 c.alignment = Alignment(horizontal="center", vertical="center")
 
     widths = [11, 24, 24] + [16] * 7
@@ -1552,28 +1555,28 @@ def render_novedad_form(
     emp_labels = {e["id"]: f"{e['codigo']} — {e['nombre']} ({e['cargo']})" for e in emps}
 
     base_dt = datetime.date.fromisoformat(default_week_start_iso)
-    start_key = f"{key_prefix}_start_val"
-    end_key = f"{key_prefix}_end_val"
-    if start_key not in st.session_state:
-        st.session_state[start_key] = base_dt
-    if end_key not in st.session_state:
-        st.session_state[end_key] = base_dt + datetime.timedelta(days=4)
+    dt_start_key = f"{key_prefix}_dt_start"
+    dt_end_key = f"{key_prefix}_dt_end"
+    if dt_start_key not in st.session_state:
+        st.session_state[dt_start_key] = base_dt
+    if dt_end_key not in st.session_state:
+        st.session_state[dt_end_key] = base_dt + datetime.timedelta(days=4)
 
     p_cols = st.columns(4)
     if p_cols[0].button("Solo 1 día", key=f"{key_prefix}_p1", use_container_width=True):
-        st.session_state[end_key] = st.session_state[start_key]
+        st.session_state[dt_end_key] = st.session_state[dt_start_key]
         st.rerun()
     if p_cols[1].button("Lun–Vie (5 días)", key=f"{key_prefix}_p5", use_container_width=True):
-        st.session_state[start_key] = base_dt
-        st.session_state[end_key] = base_dt + datetime.timedelta(days=4)
+        st.session_state[dt_start_key] = base_dt
+        st.session_state[dt_end_key] = base_dt + datetime.timedelta(days=4)
         st.rerun()
     if p_cols[2].button("Sáb–Dom (2 días)", key=f"{key_prefix}_p2", use_container_width=True):
-        st.session_state[start_key] = base_dt + datetime.timedelta(days=5)
-        st.session_state[end_key] = base_dt + datetime.timedelta(days=6)
+        st.session_state[dt_start_key] = base_dt + datetime.timedelta(days=5)
+        st.session_state[dt_end_key] = base_dt + datetime.timedelta(days=6)
         st.rerun()
     if p_cols[3].button("Semana completa (7d)", key=f"{key_prefix}_p7", use_container_width=True):
-        st.session_state[start_key] = base_dt
-        st.session_state[end_key] = base_dt + datetime.timedelta(days=6)
+        st.session_state[dt_start_key] = base_dt
+        st.session_state[dt_end_key] = base_dt + datetime.timedelta(days=6)
         st.rerun()
 
     c1, c2, c3, c4 = st.columns([2.2, 1.3, 1.1, 1.1])
@@ -1589,10 +1592,8 @@ def render_novedad_form(
         format_func=lambda x: "L (Día Libre fijo)" if x == "L" else x,
         key=f"{key_prefix}_tipo",
     )
-    dt_start = c3.date_input("Desde", value=st.session_state[start_key], key=f"{key_prefix}_dt_start")
-    dt_end = c4.date_input("Hasta", value=st.session_state[end_key], key=f"{key_prefix}_dt_end")
-    st.session_state[start_key] = dt_start
-    st.session_state[end_key] = max(dt_start, dt_end)
+    dt_start = c3.date_input("Desde", key=dt_start_key)
+    dt_end = c4.date_input("Hasta", key=dt_end_key)
 
     nota = st.text_input(
         "Observación (opcional)",
@@ -1798,12 +1799,15 @@ with tab1:
             continue
         filtered_emps.append(e)
 
+    th_style = "padding:7px 8px;border-bottom:2px solid #CBD5E1;text-align:left;white-space:nowrap;"
+    td_base_style = "padding:6px 8px;border-bottom:1px solid #E2E8F0;"
+
     th_prev = ""
     if prev_week and show_prev_ref:
-        th_prev = "<th>SEM. ANTERIOR</th><th>DÍAS P/ L Y ROT.</th>"
+        th_prev = f"<th style='{th_style}'>SEM. ANTERIOR</th><th style='{th_style}'>DÍAS P/ L Y ROT.</th>"
 
     day_headers = "".join(
-        f"<th>{DIAS_SEMANA[d][:3]} {format_short_date_es(add_days_iso(active_week['start_date'], d))}</th>"
+        f"<th style='{th_style}text-align:center;'>{DIAS_SEMANA[d][:3]} {format_short_date_es(add_days_iso(active_week['start_date'], d))}</th>"
         for d in range(7)
     )
 
@@ -1818,11 +1822,11 @@ with tab1:
                 prev_l = DIAS_SEMANA[an["prev_off_idx"]][:3] if an["prev_off_idx"] is not None else "—"
                 d_txt = f"{an['consec_before_off']}d→L" if an["consec_before_off"] is not None else "—"
                 prev_tds = (
-                    f"<td style='font-size:11px;color:#475569;white-space:nowrap'>Dom: <b>{html.escape(prev_dom)}</b> | L: {prev_l}</td>"
-                    f"<td style='font-size:11px;color:#0f172a;white-space:nowrap'><b>{d_txt}</b> · {html.escape(an['rot_detail'].split(':')[0])}</td>"
+                    f"<td style='{td_base_style}font-size:11px;color:#475569;white-space:nowrap'>Dom: <b>{html.escape(prev_dom)}</b> | L: {prev_l}</td>"
+                    f"<td style='{td_base_style}font-size:11px;color:#0f172a;white-space:nowrap'><b>{d_txt}</b> · {html.escape(an['rot_detail'].split(':')[0])}</td>"
                 )
             else:
-                prev_tds = "<td>—</td><td>—</td>"
+                prev_tds = f"<td style='{td_base_style}'>—</td><td style='{td_base_style}'>—</td>"
 
         day_tds = []
         for d in range(7):
@@ -1834,7 +1838,7 @@ with tab1:
             txt = html.escape(c.get("raw") or "—")
             title_attr = html.escape(alert_msg or c.get("raw") or "Sin turno")
             day_tds.append(
-                f"<td title='{title_attr}' style='background:{bg};color:{fg};border:{border_css};"
+                f"<td title='{title_attr}' style='padding:6px 8px;background:{bg};color:{fg};border:{border_css};"
                 f"text-align:center;font-weight:600;font-size:12px;white-space:nowrap'>{txt}{lock_mark}</td>"
             )
 
@@ -1842,34 +1846,28 @@ with tab1:
         opacity_css = "opacity:0.55;" if not e["activo"] else ""
         rows_html.append(
             f"<tr style='{opacity_css}'>"
-            f"<td style='font-family:monospace'>{html.escape(e['codigo'])}</td>"
-            f"<td style='font-weight:600;white-space:nowrap'>{html.escape(e['nombre'])}{at_tag}</td>"
-            f"<td style='white-space:nowrap'>{html.escape(e['cargo'])}</td>"
+            f"<td style='{td_base_style}font-family:monospace'>{html.escape(e['codigo'])}</td>"
+            f"<td style='{td_base_style}font-weight:600;white-space:nowrap'>{html.escape(e['nombre'])}{at_tag}</td>"
+            f"<td style='{td_base_style}white-space:nowrap'>{html.escape(e['cargo'])}</td>"
             f"{prev_tds}{''.join(day_tds)}"
             f"</tr>"
         )
 
-    table_html = f"""
-    <div style="overflow-x:auto;border:1px solid #CBD5E1;border-radius:8px;background:#FFFFFF;">
-      <table style="width:100%;border-collapse:collapse;font-family:sans-serif;font-size:12px;">
-        <thead>
-          <tr style="background:#F1F5F9;color:#0F172A;border-bottom:2px solid #CBD5E1;text-align:left;">
-            <th style="padding:7px 8px;">CODIGO</th>
-            <th style="padding:7px 8px;">NOMBRE</th>
-            <th style="padding:7px 8px;">CARGO</th>
-            {th_prev}
-            {day_headers}
-          </tr>
-        </thead>
-        <tbody>
-          {''.join(rows_html)}
-        </tbody>
-      </table>
-    </div>
-    <style>
-      table td, table th {{ padding: 6px 8px; border-bottom: 1px solid #E2E8F0; }}
-    </style>
-    """
+    table_html = (
+        '<div style="overflow-x:auto;border:1px solid #CBD5E1;border-radius:8px;background:#FFFFFF;">'
+        '<table style="width:100%;border-collapse:collapse;font-family:sans-serif;font-size:12px;">'
+        '<thead>'
+        '<tr style="background:#F1F5F9;color:#0F172A;">'
+        f'<th style="{th_style}">CODIGO</th>'
+        f'<th style="{th_style}">NOMBRE</th>'
+        f'<th style="{th_style}">CARGO</th>'
+        f'{th_prev}{day_headers}'
+        '</tr>'
+        '</thead>'
+        f'<tbody>{"".join(rows_html)}</tbody>'
+        '</table>'
+        '</div>'
+    )
     st.markdown(table_html, unsafe_allow_html=True)
 
     bc1, bc2 = st.columns([3, 1.3])
@@ -1905,7 +1903,10 @@ with tab1:
         )
         curr_cell = (active_week["assignments"].get(emp_edit_id) or [parse_raw_cell("") for _ in range(7)])[day_start_edit]
         all_opts = ["(Vacío)"] + TURNOS_CATALOGO + ESTADOS_ESPECIALES
-        cur_b = curr_cell["baseShift"] if curr_cell["baseShift"] in all_opts else "(Vacío)"
+        cur_raw_base = curr_cell.get("baseShift", "")
+        if cur_raw_base and cur_raw_base not in all_opts:
+            all_opts = all_opts + [cur_raw_base]
+        cur_b = cur_raw_base if cur_raw_base in all_opts else "(Vacío)"
         new_base = ec3.selectbox(
             "Turno o Novedad",
             options=all_opts,
@@ -1922,7 +1923,10 @@ with tab1:
 
         if st.button("Guardar cambio", type="primary", key="t1_edit_save"):
             val = "" if new_base == "(Vacío)" else new_base
-            cell_obj = parse_raw_cell(format_cell_raw(val, False if is_novedad_sel else new_at, False if is_novedad_sel else new_cap), locked=new_locked)
+            cell_obj = parse_raw_cell(
+                format_cell_raw(val, False if is_novedad_sel else new_at, False if is_novedad_sel else new_cap),
+                locked=new_locked,
+            )
             row = st.session_state.weeks[safe_idx]["assignments"].setdefault(emp_edit_id, [parse_raw_cell("") for _ in range(7)])
             for d_i in range(day_start_edit, day_end_edit + 1):
                 row[d_i] = dict(cell_obj)
@@ -2060,6 +2064,8 @@ with tab2:
             )
         return "".join(chips)
 
+    t2_td = "padding:7px 8px;border-bottom:1px solid #E2E8F0;"
+    t2_th = "padding:8px;border-bottom:2px solid #CBD5E1;"
     comp_rows = []
     for a in filtered_an:
         e = a["emp"]
@@ -2071,35 +2077,34 @@ with tab2:
         h_color = "#047857" if a["rest_across_ok"] else "#B91C1C"
         comp_rows.append(
             f"<tr>"
-            f"<td><b>{html.escape(e['codigo'])} {html.escape(e['nombre'])}</b><br><span style='color:#64748B;font-size:11px'>{html.escape(e['cargo'])}</span></td>"
-            f"<td style='white-space:nowrap'>{prev_strip}</td>"
-            f"<td style='white-space:nowrap'>{curr_strip}</td>"
-            f"<td style='text-align:center;font-weight:700;color:{d_color}'>{d_txt}</td>"
-            f"<td style='text-align:center;font-weight:700;color:{h_color}'>{h_txt}</td>"
-            f"<td>{html.escape(a['rot_detail'])}</td>"
+            f"<td style='{t2_td}'><b>{html.escape(e['codigo'])} {html.escape(e['nombre'])}</b><br><span style='color:#64748B;font-size:11px'>{html.escape(e['cargo'])}</span></td>"
+            f"<td style='{t2_td}white-space:nowrap'>{prev_strip}</td>"
+            f"<td style='{t2_td}white-space:nowrap'>{curr_strip}</td>"
+            f"<td style='{t2_td}text-align:center;font-weight:700;color:{d_color}'>{d_txt}</td>"
+            f"<td style='{t2_td}text-align:center;font-weight:700;color:{h_color}'>{h_txt}</td>"
+            f"<td style='{t2_td}'>{html.escape(a['rot_detail'])}</td>"
             f"</tr>"
         )
 
-    st.markdown(
-        f"""
-        <div style="overflow-x:auto;border:1px solid #CBD5E1;border-radius:8px;background:#FFFFFF;">
-          <table style="width:100%;border-collapse:collapse;font-family:sans-serif;font-size:12px;">
-            <thead>
-              <tr style="background:#F1F5F9;color:#0F172A;border-bottom:2px solid #CBD5E1;text-align:left;">
-                <th style="padding:8px;">Colaborador y Cargo</th>
-                <th style="padding:8px;">Semana Anterior (Lun → Dom)</th>
-                <th style="padding:8px;">{'Nueva Semana Propuesta' if mode_choice == 'preview' else 'Semana Actual'} (Lun → Dom)</th>
-                <th style="padding:8px;text-align:center;">Días p/ Descanso</th>
-                <th style="padding:8px;text-align:center;">Horas en L</th>
-                <th style="padding:8px;">Rotación tras Día Libre</th>
-              </tr>
-            </thead>
-            <tbody>{''.join(comp_rows)}</tbody>
-          </table>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    curr_col_title = "Nueva Semana Propuesta" if mode_choice == "preview" else "Semana Actual"
+    comp_table_html = (
+        '<div style="overflow-x:auto;border:1px solid #CBD5E1;border-radius:8px;background:#FFFFFF;">'
+        '<table style="width:100%;border-collapse:collapse;font-family:sans-serif;font-size:12px;">'
+        '<thead>'
+        '<tr style="background:#F1F5F9;color:#0F172A;text-align:left;">'
+        f'<th style="{t2_th}">Colaborador y Cargo</th>'
+        f'<th style="{t2_th}">Semana Anterior (Lun → Dom)</th>'
+        f'<th style="{t2_th}">{curr_col_title} (Lun → Dom)</th>'
+        f'<th style="{t2_th}text-align:center;">Días p/ Descanso</th>'
+        f'<th style="{t2_th}text-align:center;">Horas en L</th>'
+        f'<th style="{t2_th}">Rotación tras Día Libre</th>'
+        '</tr>'
+        '</thead>'
+        f'<tbody>{"".join(comp_rows)}</tbody>'
+        '</table>'
+        '</div>'
     )
+    st.markdown(comp_table_html, unsafe_allow_html=True)
 
 
 # ------------------------------------------------------------------------------
