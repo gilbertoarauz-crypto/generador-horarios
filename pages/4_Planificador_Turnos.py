@@ -1,3 +1,4 @@
+import html
 import io
 import re
 from datetime import date, timedelta
@@ -13,6 +14,47 @@ try:
     )
 except Exception:
     pass
+
+# Estilo visual más cercano al diseño web limpio (azul corporativo y tarjetas)
+st.markdown(
+    """
+    <style>
+    .stApp { background-color: #f8fafc; }
+    .stButton > button[kind="primary"] {
+        background-color: #0369a1 !important;
+        border-color: #0369a1 !important;
+        color: #ffffff !important;
+    }
+    .stButton > button[kind="primary"]:hover {
+        background-color: #075985 !important;
+        border-color: #075985 !important;
+    }
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 1.5rem;
+        border-bottom: 1px solid #e2e8f0;
+    }
+    .stTabs [aria-selected="true"] {
+        color: #0369a1 !important;
+        border-bottom-color: #0369a1 !important;
+    }
+    .rot-table { width: 100%; border-collapse: collapse; font-size: 12px; background: #ffffff; }
+    .rot-table th {
+        background: #f1f5f9; color: #1e293b; text-align: left;
+        padding: 8px 10px; border-bottom: 1px solid #cbd5e1; font-weight: 600;
+    }
+    .rot-table td {
+        padding: 8px 10px; border-bottom: 1px solid #e2e8f0; vertical-align: middle;
+    }
+    .strip-grid { display: grid; grid-template-columns: repeat(7, minmax(36px, 1fr)); gap: 3px; }
+    .strip-cell {
+        border-radius: 3px; padding: 3px 2px; text-align: center;
+        font-family: monospace; font-size: 10px; border: 1px solid rgba(15,23,42,0.12);
+    }
+    .strip-day { font-size: 9px; opacity: 0.72; line-height: 1; margin-bottom: 2px; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 CARGOS_ORDEN = [
     "Analista de Operaciones",
@@ -215,6 +257,23 @@ def compute_rest_hours(prev_cell: dict, prev_day_idx: int, next_cell: dict, next
     end_abs = prev_day_idx * 1440 + wp[1]
     start_abs = next_day_idx * 1440 + wn[0]
     return round((start_abs - end_abs) / 60.0, 1)
+
+
+def compute_employee_weekly_hours(cells: list) -> tuple[float, int, int, int]:
+    total_min, work_days, free_days, at_count = 0, 0, 0, 0
+    for c in cells:
+        if not c:
+            continue
+        if c["base"] == "L":
+            free_days += 1
+            continue
+        w = parse_shift_window(c["base"])
+        if w:
+            total_min += w[2]
+            work_days += 1
+            if c["is_at"]:
+                at_count += 1
+    return round(total_min / 60.0, 1), work_days, free_days, at_count
 
 
 def get_cell_colors(cell: dict) -> tuple[str, str]:
@@ -680,7 +739,7 @@ def analyze_rotation_and_rest(curr_week: dict, prev_week, employees: list, role_
             detail = f"Rotó inicio: {prev_primary} → {first_work}"
         else:
             status = "SAME_SHIFT"
-            detail = f"Mantuvo {first_work}"
+            detail = f"Mantuvo {first_work}" if prev_primary else f"Turno continuo {first_work}"
 
         if days_before_off is None:
             interval_ok = max_streak <= rules["max_consecutive_work_days"]
@@ -690,6 +749,8 @@ def analyze_rotation_and_rest(curr_week: dict, prev_week, employees: list, role_
         rest_ok = rest_across is None or rest_across >= rules["min_rest_day_off"]
         results.append({
             "emp": emp,
+            "prev_cells": prev_cells,
+            "curr_cells": curr_cells,
             "prev_primary": prev_primary,
             "prev_sun": prev_sun,
             "prev_off": prev_off,
@@ -819,28 +880,51 @@ def import_matrix_rows(matrix: list, start_iso: str):
     return emps, {"id": f"week_{start_iso}", "label": build_week_label(start_iso), "start_iso": start_iso, "assignments": assigns}
 
 
-def init_state():
-    if "roster_ready" in st.session_state:
-        return
+def build_seed_state():
     emps, assigns = [], {}
     for cod, nom, car, pat, act, shs in SEED_ROWS:
         eid = f"emp_{cod}"
         emps.append({"id": eid, "codigo": cod, "nombre": nom, "cargo": car, "puede_at": pat, "activo": act})
         assigns[eid] = [parse_raw_cell(s) for s in shs]
-    st.session_state.roster_employees = emps
-    st.session_state.roster_weeks = [{
+    seed_week = {
         "id": "week_2026-10-26",
         "label": "Semana 26 oct — 1 nov",
         "start_iso": "2026-10-26",
         "assignments": assigns,
-    }]
-    st.session_state.roster_active_idx = 0
-    st.session_state.roster_rules = dict(DEFAULT_RULES)
-    st.session_state.roster_configs = {
+    }
+    configs = {
         k: {"rotation_pool": list(v["rotation_pool"]), "daily_targets": dict(v["daily_targets"])}
         for k, v in DEFAULT_ROLE_CONFIGS.items()
     }
+    return emps, [seed_week], dict(DEFAULT_RULES), configs
+
+
+def init_state():
+    if "roster_ready" in st.session_state:
+        return
+    emps, weeks_init, rules_init, configs_init = build_seed_state()
+    st.session_state.roster_employees = emps
+    st.session_state.roster_weeks = weeks_init
+    st.session_state.roster_active_idx = 0
+    st.session_state.roster_rules = rules_init
+    st.session_state.roster_configs = configs_init
     st.session_state.roster_ready = True
+
+
+def render_strip_html(cells: list) -> str:
+    parts = ['<div class="strip-grid">']
+    for idx, c in enumerate(cells):
+        bg, fg = get_cell_colors(c)
+        base = c["base"]
+        short = "L" if base == "L" else "VAC" if base == "VACACIONES" else "SUSP" if base == "SUSPEND" else (base[:5] if base else "—")
+        title = html.escape(f"{DIAS_SEMANA[idx]}: {c['raw'] or 'Sin turno'}")
+        parts.append(
+            f'<div class="strip-cell" title="{title}" style="background:#{bg}; color:#{fg};">'
+            f'<div class="strip-day">{DIAS_SEMANA[idx][:1]}</div>'
+            f'<div>{html.escape(short)}</div></div>'
+        )
+    parts.append("</div>")
+    return "".join(parts)
 
 
 init_state()
@@ -856,7 +940,7 @@ prev_week = weeks[active_idx - 1] if active_idx > 0 else None
 st.title("Planificador de Turnos Operativos")
 st.caption("Rotación semanal Noche → Tarde → Mañana · Descansos 12h / 24h · Cobertura Técnico AT")
 
-top_c1, top_c2, top_c3 = st.columns([3, 1.4, 1.4])
+top_c1, top_c2, top_c3, top_c4 = st.columns([2.8, 0.7, 1.5, 1.4])
 with top_c1:
     week_labels = [f"{i+1}. {w['label']}" for i, w in enumerate(weeks)]
     sel = st.selectbox("Semana activa", week_labels, index=active_idx)
@@ -866,13 +950,18 @@ with top_c1:
         st.rerun()
 with top_c2:
     st.write("")
+    if st.button("Eliminar", disabled=(len(weeks) <= 1 or active_idx == 0), use_container_width=True):
+        weeks.pop(active_idx)
+        st.session_state.roster_active_idx = max(0, active_idx - 1)
+        st.rerun()
+with top_c3:
+    st.write("")
     if st.button("Generar Siguiente Semana", type="primary", use_container_width=True):
         nw, at_cnt = generate_next_week(weeks[-1], employees, role_configs, rules)
         weeks.append(nw)
         st.session_state.roster_active_idx = len(weeks) - 1
-        st.success(f"Generada {nw['label']} ({at_cnt} apoyos AT).")
         st.rerun()
-with top_c3:
+with top_c4:
     st.write("")
     st.download_button(
         "Descargar Excel (.xlsx)",
@@ -886,11 +975,18 @@ issues = validate_schedule(active_week, employees, role_configs, rules, prev_wee
 rest_alerts = [i for i in issues if i["type"] != "UNCOVERED_TECH"]
 tech_gaps = [i for i in issues if i["type"] == "UNCOVERED_TECH"]
 
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Personal activo", sum(1 for e in employees if e["activo"]))
-m2.metric("Turnos AT asignados", sum(1 for e in employees for c in active_week["assignments"].get(e["id"], []) if c["is_at"]))
-m3.metric("Alertas descanso / racha", len(rest_alerts))
-m4.metric("Faltantes Técnico", len(tech_gaps))
+absents_cnt = sum(
+    1 for e in employees if e["activo"]
+    and any(c["base"] in ("VACACIONES", "SUSPEND", "INCAPACIDAD") for c in active_week["assignments"].get(e["id"], []))
+)
+at_cnt_total = sum(1 for e in employees for c in active_week["assignments"].get(e["id"], []) if c["is_at"])
+
+m1, m2, m3, m4, m5 = st.columns(5)
+m1.metric("Activos", sum(1 for e in employees if e["activo"]))
+m2.metric("Novedades", absents_cnt)
+m3.metric("Turnos AT", at_cnt_total)
+m4.metric("Descansos 12h/24h", "OK" if len(rest_alerts) == 0 else f"{len(rest_alerts)} alerta(s)")
+m5.metric("Técnicos", "100% cubierto" if len(tech_gaps) == 0 else f"{len(tech_gaps)} faltante(s)")
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "Horario Semanal",
@@ -901,21 +997,28 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 ])
 
 with tab1:
-    fc1, fc2, fc3 = st.columns([2, 1.5, 1.5])
-    with fc1:
-        filtro_cargo = st.selectbox("Filtrar por cargo", ["TODOS"] + CARGOS_ORDEN, key="f_cargo")
-    with fc2:
-        show_prev_cols = st.checkbox("Ver ref. semana anterior", value=bool(prev_week), disabled=(prev_week is None))
-    with fc3:
-        if st.button("Auto-cubrir Técnicos (AT)", use_container_width=True):
-            upd_w, cnt = auto_assign_tecnico_at(active_week, employees, role_configs, rules, prev_week)
-            weeks[active_idx] = upd_w
-            st.success(f"Apoyos AT actualizados ({cnt} asignados).")
-            st.rerun()
+    with st.container(border=True):
+        fc1, fc2, fc3, fc4, fc5 = st.columns([1.6, 1.4, 1.1, 1.3, 1.3])
+        search_q = fc1.text_input("Buscar código o nombre", placeholder="Ej. 671 o Guardao")
+        filtro_cargo = fc2.selectbox("Filtrar por cargo", ["TODOS"] + CARGOS_ORDEN, key="f_cargo")
+        solo_alertas = fc3.checkbox(f"Solo alertas ({len({i['employee_id'] for i in issues if i['employee_id']})})")
+        show_prev_cols = fc4.checkbox("Ver ref. semana anterior", value=bool(prev_week), disabled=(prev_week is None))
+        with fc5:
+            st.write("")
+            if st.button("Auto-cubrir Técnicos (AT)", use_container_width=True):
+                upd_w, cnt = auto_assign_tecnico_at(active_week, employees, role_configs, rules, prev_week)
+                weeks[active_idx] = upd_w
+                st.rerun()
 
+    issue_emp_ids = {i["employee_id"] for i in issues if i["employee_id"]}
     ordered_emps = sorted(employees, key=lambda e: CARGOS_ORDEN.index(e["cargo"]) if e["cargo"] in CARGOS_ORDEN else 99)
     if filtro_cargo != "TODOS":
         ordered_emps = [e for e in ordered_emps if e["cargo"] == filtro_cargo]
+    if solo_alertas:
+        ordered_emps = [e for e in ordered_emps if e["id"] in issue_emp_ids]
+    if search_q.strip():
+        q = search_q.strip().lower()
+        ordered_emps = [e for e in ordered_emps if q in e["codigo"].lower() or q in e["nombre"].lower() or q in e["cargo"].lower()]
 
     analysis_map = {a["emp"]["id"]: a for a in analyze_rotation_and_rest(active_week, prev_week, employees, role_configs, rules)} if prev_week else {}
     day_cols = [f"{DIAS_SEMANA[d][:3]} {format_short_es(add_days_iso(active_week['start_iso'], d))}" for d in range(7)]
@@ -927,9 +1030,9 @@ with tab1:
         if prev_week and show_prev_cols:
             an = analysis_map.get(emp["id"])
             prev_l = DIAS_SEMANA[an["prev_off"]][:3] if an and an["prev_off"] is not None else "—"
-            row_dict["SEM ANT (Dom / L)"] = f"{an['prev_sun']} | L:{prev_l}" if an else "—"
+            row_dict["SEM ANT (Dom / L)"] = f"Dom: {an['prev_sun']} | L: {prev_l}" if an else "—"
             d_txt = f"{an['days_before_off']}d→L" if an and an["days_before_off"] is not None else "—"
-            row_dict["DIAS P/ L / ROT."] = f"{d_txt} · {an['detail']}" if an else "—"
+            row_dict["DÍAS P/ L Y ROT."] = f"{d_txt} · {an['detail']}" if an else "—"
         cells = active_week["assignments"].get(emp["id"], [parse_raw_cell("") for _ in range(7)])
         for d, col_name in enumerate(day_cols):
             row_dict[col_name] = cells[d]["raw"]
@@ -940,190 +1043,435 @@ with tab1:
     df_view = pd.DataFrame(rows_view)
 
     def style_matrix_row(s):
-        styles = []
         cod = s["CODIGO"]
-        for col_name in s.index:
-            styles.append(cell_style_map.get((cod, col_name), ""))
-        return styles
+        return [cell_style_map.get((cod, col_name), "") for col_name in s.index]
 
     if df_view.empty:
-        st.info("No hay colaboradores para el filtro seleccionado.")
+        st.info("No hay colaboradores que coincidan con el filtro.")
     else:
         st.dataframe(df_view.style.apply(style_matrix_row, axis=1), use_container_width=True, height=520, hide_index=True)
 
-    with st.expander("Editar turno de un colaborador"):
-        ec1, ec2, ec3, ec4 = st.columns([2, 1.2, 1.5, 1])
-        emp_names = [f"{e['codigo']} - {e['nombre']} ({e['cargo']})" for e in ordered_emps]
-        if emp_names:
-            sel_e_txt = ec1.selectbox("Colaborador", emp_names)
+    bc1, bc2 = st.columns([3, 1.2])
+    bc1.caption(f"Mostrando {len(ordered_emps)} de {len(employees)} colaboradores.")
+    if bc2.button("Re-rotar semana actual", use_container_width=True):
+        base_ref = prev_week if prev_week else active_week
+        regen_w, _ = generate_next_week(base_ref, employees, role_configs, rules, target_start_iso=active_week["start_iso"])
+        regen_w["id"] = active_week["id"]
+        regen_w["label"] = active_week["label"]
+        weeks[active_idx] = regen_w
+        st.rerun()
+
+    with st.expander("Editar turno o novedad de un colaborador"):
+        if ordered_emps:
+            ec1, ec2, ec3 = st.columns([2, 1.2, 1.5])
+            emp_names = [f"{e['codigo']} - {e['nombre']} ({e['cargo']})" for e in ordered_emps]
+            sel_e_txt = ec1.selectbox("Colaborador", emp_names, key="ed_emp")
             sel_e = ordered_emps[emp_names.index(sel_e_txt)]
-            sel_d = ec2.selectbox("Día", DIAS_SEMANA)
+            sel_d = ec2.selectbox("Día", DIAS_SEMANA, key="ed_day")
             d_idx = DIAS_SEMANA.index(sel_d)
             curr_c = active_week["assignments"][sel_e["id"]][d_idx]
-            opts = [""] + TURNOS_CATALOGO + ESTADOS_ESPECIALES
+
+            role_pool = role_configs.get(sel_e["cargo"], {}).get("rotation_pool", [])
+            opts = [""] + list(dict.fromkeys(role_pool + TURNOS_CATALOGO + ESTADOS_ESPECIALES))
             idx_base = opts.index(curr_c["base"]) if curr_c["base"] in opts else 0
-            new_base = ec3.selectbox("Turno / Estado", opts, index=idx_base)
-            new_at = ec4.checkbox("AT (Cubre Técnico)", value=curr_c["is_at"], disabled=(new_base in ESTADOS_ESPECIALES or not new_base))
-            new_cap = st.checkbox("CAP (Capacitación)", value=curr_c["is_cap"], disabled=(new_base in ESTADOS_ESPECIALES or not new_base))
-            if st.button("Guardar cambio en celda"):
-                active_week["assignments"][sel_e["id"]][d_idx] = parse_raw_cell(format_cell_raw(new_base, new_at, new_cap), locked=True)
-                st.success("Turno actualizado.")
+            new_base_sel = ec3.selectbox("Turnos / Estados", opts, index=idx_base, key=f"ed_sel_{sel_e['id']}_{d_idx}")
+            custom_base = st.text_input("O escribe turno personalizado (ej. 03:00-19:00 o L)", value=new_base_sel or curr_c["base"], key=f"ed_txt_{sel_e['id']}_{d_idx}").upper().strip()
+
+            ck1, ck2, ck3 = st.columns(3)
+            disabled_mods = (custom_base in ESTADOS_ESPECIALES) or (not custom_base)
+            new_at = ck1.checkbox("AT (Cubre Técnico)", value=curr_c["is_at"], disabled=disabled_mods, key=f"ed_at_{sel_e['id']}_{d_idx}")
+            new_cap = ck2.checkbox("CAP (Capacitación)", value=curr_c["is_cap"], disabled=disabled_mods, key=f"ed_cap_{sel_e['id']}_{d_idx}")
+            new_lock = ck3.checkbox("Fijar al rotar", value=bool(curr_c.get("locked")), key=f"ed_lk_{sel_e['id']}_{d_idx}")
+
+            # Vista previa de descanso con el día anterior
+            if parse_shift_window(custom_base):
+                row_emp = active_week["assignments"][sel_e["id"]]
+                p_cell, p_off, crossed = None, -1, False
+                for k in range(d_idx - 1, -1, -1):
+                    if row_emp[k]["base"] == "L":
+                        crossed = True
+                        continue
+                    if parse_shift_window(row_emp[k]["base"]):
+                        p_cell, p_off = row_emp[k], k
+                        break
+                    break
+                if not p_cell and prev_week:
+                    p_row = prev_week["assignments"].get(sel_e["id"], [])
+                    for k in range(len(p_row) - 1, -1, -1):
+                        if p_row[k]["base"] == "L":
+                            crossed = True
+                            continue
+                        if parse_shift_window(p_row[k]["base"]):
+                            p_cell, p_off = p_row[k], k - 7
+                            break
+                        break
+                if p_cell:
+                    cand_cell = parse_raw_cell(format_cell_raw(custom_base, new_at, new_cap))
+                    rh = compute_rest_hours(p_cell, p_off, cand_cell, d_idx)
+                    if rh is not None:
+                        req_h = rules["min_rest_day_off"] if crossed else rules["min_rest_shifts"]
+                        if rh >= req_h:
+                            st.success(f"Descanso desde turno previo ({p_cell['base']}): {rh}h — Cumple mínimo de {req_h}h.")
+                        else:
+                            st.error(f"Descanso desde turno previo ({p_cell['base']}): {rh}h — Conflicto: requiere al menos {req_h}h.")
+
+            sb1, sb2 = st.columns([1, 1])
+            if sb1.button("Guardar turno", type="primary"):
+                active_week["assignments"][sel_e["id"]][d_idx] = parse_raw_cell(format_cell_raw(custom_base, new_at, new_cap), locked=new_lock)
+                st.rerun()
+            if sb2.button("Limpiar celda"):
+                active_week["assignments"][sel_e["id"]][d_idx] = parse_raw_cell("")
                 st.rerun()
 
-    if rest_alerts:
-        st.warning("Alertas de descanso (12h entre turnos / 24h en L / días seguidos):")
-        for a in rest_alerts:
-            st.write(f"- **{DIAS_SEMANA[a['day_index']]}:** {a['message']}")
-    else:
-        st.success("Sin conflictos de descanso 12h/24h ni rachas largas esta semana.")
+    p1, p2 = st.columns(2)
+    with p1:
+        with st.container(border=True):
+            st.subheader(f"Validación de Descansos ({rules['min_rest_shifts']}h / {rules['min_rest_day_off']}h)")
+            if not rest_alerts:
+                st.success("Sin conflictos de descanso ni rachas largas esta semana.")
+            else:
+                for a in rest_alerts:
+                    st.error(f"**{DIAS_SEMANA[a['day_index']]}:** {a['message']}")
+    with p2:
+        with st.container(border=True):
+            st.subheader("Cobertura Técnico de Operaciones (Directos + AT)")
+            if not tech_gaps:
+                st.success("100% cubierto esta semana.")
+            else:
+                for g in tech_gaps:
+                    st.warning(g["message"])
 
 with tab2:
-    mode_rot = st.radio(
-        "Modo de análisis",
-        ["Comparar Semana Activa vs Anterior", "Simular Siguiente Semana antes de crear"],
-        horizontal=True,
-    )
-    if mode_rot.startswith("Simular"):
-        sim_w, sim_at = generate_next_week(weeks[-1], employees, role_configs, rules)
-        eval_curr, eval_prev = sim_w, weeks[-1]
-        if st.button(f"Aplicar y Crear {sim_w['label']}", type="primary"):
-            weeks.append(sim_w)
-            st.session_state.roster_active_idx = len(weeks) - 1
-            st.success(f"Semana {sim_w['label']} creada.")
+    with st.container(border=True):
+        mode_rot = st.radio(
+            "Modo de análisis",
+            ["Semana Activa vs Anterior", "Previsualizar Siguiente Semana"],
+            index=(0 if prev_week else 1),
+            horizontal=True,
+        )
+        rc_a, rc_b, rc_c, rc_d = st.columns([1.2, 1.2, 1.6, 1.4])
+        new_min_d = int(rc_a.number_input("Mín. días trabajados entre L", 3, 6, rules["min_work_days_between_off"], key="rot_min_d"))
+        new_max_d = int(rc_b.number_input("Máx. días seguidos sin descanso", 5, 10, rules["max_consecutive_work_days"], key="rot_max_d"))
+        new_rot_l = rc_c.checkbox("Rotar turno después del Día Libre (L)", value=rules["rotate_after_day_off"], key="rot_after_l")
+        if new_min_d != rules["min_work_days_between_off"] or new_max_d != rules["max_consecutive_work_days"] or new_rot_l != rules["rotate_after_day_off"]:
+            rules["min_work_days_between_off"] = new_min_d
+            rules["max_consecutive_work_days"] = new_max_d
+            rules["rotate_after_day_off"] = new_rot_l
             st.rerun()
-    else:
-        eval_curr, eval_prev = active_week, prev_week
 
-    st.caption(f"Ventana analizada: {(eval_prev['label'] + ' → ') if eval_prev else ''}{eval_curr['label']}")
-    rot_data = analyze_rotation_and_rest(eval_curr, eval_prev, employees, role_configs, rules)
-    rot_rows = []
-    for r in rot_data:
-        emp = r["emp"]
-        prev_str = " | ".join([c["raw"] or "—" for c in eval_prev["assignments"].get(emp["id"], [])]) if eval_prev else "Sin semana previa"
-        curr_str = " | ".join([c["raw"] or "—" for c in eval_curr["assignments"].get(emp["id"], [])])
-        rot_rows.append({
-            "Código": emp["codigo"],
-            "Nombre": emp["nombre"],
-            "Cargo": emp["cargo"],
-            "Semana Anterior (Lun-Dom)": prev_str,
-            "Semana Analizada (Lun-Dom)": curr_str,
-            "Días seguidos p/ L": f"{r['days_before_off']}d" if r["days_before_off"] is not None else f"Sin L ({r['max_streak']}d)",
-            "Horas en L": f"{r['rest_across']}h" if r["rest_across"] is not None else "—",
-            "Rotación tras Día Libre": r["detail"],
-            "Estado": "OK" if (r["interval_ok"] and r["rest_ok"]) else "Revisar",
-        })
-    st.dataframe(pd.DataFrame(rot_rows), use_container_width=True, hide_index=True)
+        if mode_rot.startswith("Previsualizar"):
+            sim_w, _ = generate_next_week(weeks[-1], employees, role_configs, rules)
+            eval_curr, eval_prev = sim_w, weeks[-1]
+            with rc_d:
+                st.write("")
+                if st.button(f"Aplicar y Crear {sim_w['label']}", type="primary", use_container_width=True):
+                    weeks.append(sim_w)
+                    st.session_state.roster_active_idx = len(weeks) - 1
+                    st.rerun()
+        else:
+            eval_curr, eval_prev = active_week, prev_week
+
+        rot_data = analyze_rotation_and_rest(eval_curr, eval_prev, employees, role_configs, rules)
+        eval_issues = validate_schedule(eval_curr, employees, role_configs, rules, eval_prev)
+        active_rot = [r for r in rot_data if r["status"] != "ABSENCE"]
+        rotated_cnt = sum(1 for r in active_rot if r["status"] in ("ROTATED_AFTER_L", "ROTATED_ON_MONDAY"))
+        interval_bad = sum(1 for r in active_rot if not r["interval_ok"])
+        days_list = [r["days_before_off"] for r in active_rot if r["days_before_off"] is not None]
+        avg_days = round(sum(days_list) / len(days_list), 1) if days_list else 0.0
+        rest_err_cnt = sum(1 for i in eval_issues if i["type"] != "UNCOVERED_TECH")
+
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.metric("Ventana", f"{eval_prev['label'] if eval_prev else 'Inicio'} → {eval_curr['label']}")
+        k2.metric("Promedio días antes de L", f"{avg_days} días")
+        k3.metric("Rotaciones aplicadas", f"{rotated_cnt} / {len(active_rot)}")
+        k4.metric("Fuera de rango", interval_bad)
+        k5.metric("Conflictos 12h / 24h", rest_err_cnt)
+
+    rf1, rf2 = st.columns([1.5, 2])
+    rot_cargo_f = rf1.selectbox("Cargo", ["TODOS"] + CARGOS_ORDEN, key="rot_cargo_f")
+    rot_only_alerts = rf2.checkbox("Mostrar solo sin rotación o alertas de descanso", key="rot_only_al")
+
+    filtered_rot = sorted(rot_data, key=lambda r: CARGOS_ORDEN.index(r["emp"]["cargo"]) if r["emp"]["cargo"] in CARGOS_ORDEN else 99)
+    if rot_cargo_f != "TODOS":
+        filtered_rot = [r for r in filtered_rot if r["emp"]["cargo"] == rot_cargo_f]
+    if rot_only_alerts:
+        filtered_rot = [r for r in filtered_rot if (not r["interval_ok"]) or (not r["rest_ok"]) or r["status"] == "SAME_SHIFT"]
+
+    html_rows = [
+        '<div style="overflow-x:auto; border:1px solid #e2e8f0; border-radius:8px;">',
+        '<table class="rot-table"><thead><tr>',
+        '<th>Colaborador y Cargo</th>',
+        '<th>Semana Anterior (Lun → Dom)</th>',
+        '<th>Semana Analizada (Lun → Dom)</th>',
+        '<th>Días p/ Descanso</th>',
+        '<th>Horas en L</th>',
+        '<th>Rotación tras Día Libre</th>',
+        '</tr></thead><tbody>',
+    ]
+    for r in filtered_rot:
+        e = r["emp"]
+        prev_html = render_strip_html(r["prev_cells"]) if eval_prev else '<span style="color:#94a3b8;">Sin semana previa</span>'
+        curr_html = render_strip_html(r["curr_cells"])
+        if r["status"] == "ABSENCE":
+            days_html = "—"
+        elif r["days_before_off"] is not None:
+            c_col = "#047857" if r["interval_ok"] else "#b45309"
+            days_html = f'<strong style="color:{c_col};">{r["days_before_off"]} días seg.</strong>'
+        else:
+            days_html = f'<strong style="color:#b45309;">Sin L ({r["max_streak"]}d)</strong>'
+        hrs_html = f'<strong style="color:{"#047857" if r["rest_ok"] else "#b91c1c"};">{r["rest_across"]}h</strong>' if r["rest_across"] is not None else "—"
+        html_rows.append(
+            f'<tr>'
+            f'<td><strong>{html.escape(e["codigo"])}</strong> {html.escape(e["nombre"])}<br><span style="color:#64748b;font-size:11px;">{html.escape(e["cargo"])}</span></td>'
+            f'<td>{prev_html}</td>'
+            f'<td>{curr_html}</td>'
+            f'<td style="text-align:center;">{days_html}</td>'
+            f'<td style="text-align:center;">{hrs_html}</td>'
+            f'<td>{html.escape(r["detail"])}</td>'
+            f'</tr>'
+        )
+    html_rows.append("</tbody></table></div>")
+    st.markdown("".join(html_rows), unsafe_allow_html=True)
 
 with tab3:
-    st.subheader("Cobertura diaria de Técnico de Operaciones (Directos + Apoyo AT)")
-    tech_targets = role_configs["Técnico de Operaciones"]["daily_targets"]
-    cov_rows = []
-    for sh, tgt in tech_targets.items():
-        row_c = {"Turno Técnico": sh, "Meta": tgt}
-        for d in range(7):
-            directs = [
-                e["nombre"]
-                for e in employees
-                if e["activo"]
-                and e["cargo"] == "Técnico de Operaciones"
-                and covers_shift_window(active_week["assignments"].get(e["id"], [parse_raw_cell("") for _ in range(7)])[d]["base"], sh)
-            ]
-            ats = [
-                f"AT: {e['nombre']}"
-                for e in employees
-                if e["activo"]
-                and e["cargo"] != "Técnico de Operaciones"
-                and active_week["assignments"].get(e["id"], [parse_raw_cell("") for _ in range(7)])[d]["is_at"]
-                and covers_shift_window(active_week["assignments"].get(e["id"], [parse_raw_cell("") for _ in range(7)])[d]["base"], sh)
-            ]
-            tot = len(directs) + len(ats)
-            row_c[DIAS_SEMANA[d][:3]] = f"{tot}/{tgt} (" + (", ".join(directs + ats) or "Sin cubrir") + ")"
-        cov_rows.append(row_c)
-    st.dataframe(pd.DataFrame(cov_rows), use_container_width=True, hide_index=True)
+    with st.container(border=True):
+        ch1, ch2 = st.columns([3, 1.3])
+        ch1.subheader("Cobertura Técnico de Operaciones (Directos + Apoyo AT)")
+        if ch2.button("Recalcular Apoyos AT", type="primary", use_container_width=True):
+            upd_w, _ = auto_assign_tecnico_at(active_week, employees, role_configs, rules, prev_week)
+            weeks[active_idx] = upd_w
+            st.rerun()
+
+        tech_targets = role_configs["Técnico de Operaciones"]["daily_targets"]
+        cov_rows = []
+        for sh, tgt in tech_targets.items():
+            row_c = {"Turno Técnico": sh, "Meta/día": tgt}
+            for d in range(7):
+                directs = [e["nombre"] for e in employees if e["activo"] and e["cargo"] == "Técnico de Operaciones" and covers_shift_window(active_week["assignments"].get(e["id"], [parse_raw_cell("") for _ in range(7)])[d]["base"], sh)]
+                ats = [f"AT: {e['nombre']}" for e in employees if e["activo"] and e["cargo"] != "Técnico de Operaciones" and active_week["assignments"].get(e["id"], [parse_raw_cell("") for _ in range(7)])[d]["is_at"] and covers_shift_window(active_week["assignments"].get(e["id"], [parse_raw_cell("") for _ in range(7)])[d]["base"], sh)]
+                tot = len(directs) + len(ats)
+                row_c[DIAS_SEMANA[d][:3]] = f"{tot}/{tgt} · " + (", ".join(directs + ats) or "Sin personal")
+            cov_rows.append(row_c)
+        st.dataframe(pd.DataFrame(cov_rows), use_container_width=True, hide_index=True)
+
+    with st.container(border=True):
+        st.subheader("Dotación Diaria por Cargo y Turno (vs Meta configurada)")
+        dot_rows = []
+        for cargo in CARGOS_ORDEN:
+            cfg = role_configs[cargo]
+            for sh, tgt in cfg["daily_targets"].items():
+                r_dot = {"Cargo": cargo, "Turno": sh, "Meta": tgt}
+                for d in range(7):
+                    cnt = sum(
+                        1 for e in employees
+                        if e["activo"] and e["cargo"] == cargo
+                        and covers_shift_window(active_week["assignments"].get(e["id"], [parse_raw_cell("") for _ in range(7)])[d]["base"], sh)
+                    )
+                    r_dot[DIAS_SEMANA[d][:3]] = f"{cnt} ⚠️" if cnt < tgt else str(cnt)
+                dot_rows.append(r_dot)
+        st.dataframe(pd.DataFrame(dot_rows), use_container_width=True, hide_index=True)
+
+    with st.container(border=True):
+        st.subheader("Resumen Semanal de Horas, Días Libres y Turnos AT")
+        hrs_rows = []
+        for emp in sorted([e for e in employees if e["activo"]], key=lambda e: CARGOS_ORDEN.index(e["cargo"]) if e["cargo"] in CARGOS_ORDEN else 99):
+            hrs, wd, fd, atc = compute_employee_weekly_hours(active_week["assignments"].get(emp["id"], []))
+            hrs_rows.append({
+                "Código": emp["codigo"],
+                "Colaborador": emp["nombre"],
+                "Cargo": emp["cargo"],
+                "Días Trab.": wd,
+                "Días L": fd,
+                "Apoyos AT": atc,
+                "Horas Semanales": f"{hrs}h",
+            })
+        st.dataframe(pd.DataFrame(hrs_rows), use_container_width=True, hide_index=True)
 
 with tab4:
-    st.subheader("Reglas de descanso y rotación")
-    rc1, rc2, rc3, rc4 = st.columns(4)
-    rules["min_rest_shifts"] = int(rc1.number_input("Mín. horas entre turnos", 8, 24, rules["min_rest_shifts"]))
-    rules["min_rest_day_off"] = int(rc2.number_input("Mín. horas en Día Libre L", 12, 48, rules["min_rest_day_off"]))
-    rules["min_work_days_between_off"] = int(rc3.number_input("Mín. días trabajados entre L", 3, 6, rules["min_work_days_between_off"]))
-    rules["max_consecutive_work_days"] = int(rc4.number_input("Máx. días seguidos sin L", 5, 10, rules["max_consecutive_work_days"]))
-    rules["rotate_after_day_off"] = st.checkbox("Rotar turno después del Día Libre (L)", value=rules["rotate_after_day_off"])
-    rules["auto_assign_at"] = st.checkbox("Auto-asignar cobertura AT al generar semana", value=rules["auto_assign_at"])
+    with st.container(border=True):
+        st.subheader("Reglas Automáticas de Descanso y Rotación")
+        rc1, rc2, rc3 = st.columns(3)
+        v_r12 = int(rc1.number_input("Descanso mínimo entre turnos (horas)", 8, 24, rules["min_rest_shifts"], key="r_12"))
+        v_r24 = int(rc2.number_input("Descanso en Día Libre L (horas)", 12, 48, rules["min_rest_day_off"], key="r_24"))
+        v_dof = int(rc3.number_input("Días libres por semana", 1, 3, rules["days_off_per_week"], key="r_dof"))
 
-    st.subheader("Secuencia Noche → Tarde → Mañana por cargo")
-    for cargo in CARGOS_ORDEN:
-        cfg = role_configs[cargo]
-        new_seq = st.text_input(f"Secuencia {cargo}", value=", ".join(cfg["rotation_pool"]), key=f"seq_{cargo}")
-        parsed_seq = [x.strip() for x in new_seq.split(",") if x.strip()]
-        if parsed_seq:
-            cfg["rotation_pool"] = parsed_seq
-            cfg["daily_targets"] = {t: cfg["daily_targets"].get(t, 1) for t in parsed_seq}
+        rc4, rc5, rc6 = st.columns(3)
+        v_minw = int(rc4.number_input("Mín. días trabajados entre descansos (L)", 3, 6, rules["min_work_days_between_off"], key="r_minw"))
+        v_maxw = int(rc5.number_input("Máx. días seguidos sin descanso", 5, 10, rules["max_consecutive_work_days"], key="r_maxw"))
+        with rc6:
+            v_rotl = st.checkbox("Rotar turno después del Día Libre (L)", value=rules["rotate_after_day_off"], key="r_rotl")
+            v_autoat = st.checkbox("Auto-asignar cobertura AT al generar semana", value=rules["auto_assign_at"], key="r_autoat")
 
-    st.subheader("Agregar personal nuevo para cualquier cargo")
-    with st.form("form_nuevo_colaborador", clear_on_submit=True):
-        nc1, nc2, nc3, nc4 = st.columns([1, 2, 2, 1])
-        n_cod = nc1.text_input("Código")
-        n_nom = nc2.text_input("Nombre completo")
-        n_car = nc3.selectbox("Cargo", CARGOS_ORDEN)
-        n_at = nc4.checkbox("Habilitado AT")
-        if st.form_submit_button("Agregar colaborador"):
-            if n_cod.strip() and n_nom.strip():
-                eid = f"emp_{n_cod.strip()}_{len(employees)}"
-                employees.append({
-                    "id": eid,
-                    "codigo": n_cod.strip(),
-                    "nombre": n_nom.strip(),
-                    "cargo": n_car,
-                    "puede_at": n_at and n_car in ("Analista de Operaciones", "Auxiliar de Operaciones"),
-                    "activo": True,
-                })
-                for w in weeks:
-                    w["assignments"][eid] = [parse_raw_cell("") for _ in range(7)]
-                st.success(f"Agregado {n_nom.strip()} ({n_car}).")
-                st.rerun()
+        if (
+            v_r12 != rules["min_rest_shifts"]
+            or v_r24 != rules["min_rest_day_off"]
+            or v_dof != rules["days_off_per_week"]
+            or v_minw != rules["min_work_days_between_off"]
+            or v_maxw != rules["max_consecutive_work_days"]
+            or v_rotl != rules["rotate_after_day_off"]
+            or v_autoat != rules["auto_assign_at"]
+        ):
+            rules.update({
+                "min_rest_shifts": v_r12,
+                "min_rest_day_off": v_r24,
+                "days_off_per_week": v_dof,
+                "min_work_days_between_off": v_minw,
+                "max_consecutive_work_days": v_maxw,
+                "rotate_after_day_off": v_rotl,
+                "auto_assign_at": v_autoat,
+            })
+            st.rerun()
 
-    st.subheader("Directorio actual")
-    df_dir = pd.DataFrame([
-        {"Código": e["codigo"], "Nombre": e["nombre"], "Cargo": e["cargo"], "Habilitado AT": e["puede_at"], "Activo": e["activo"]}
-        for e in employees
-    ])
-    edited_dir = st.data_editor(
-        df_dir,
-        column_config={"Cargo": st.column_config.SelectboxColumn("Cargo", options=CARGOS_ORDEN)},
-        use_container_width=True,
-        hide_index=True,
-        key="dir_editor",
-    )
-    if st.button("Aplicar cambios del directorio"):
-        for idx, row in edited_dir.iterrows():
-            employees[idx]["cargo"] = row["Cargo"]
-            employees[idx]["puede_at"] = bool(row["Habilitado AT"]) and row["Cargo"] in ("Analista de Operaciones", "Auxiliar de Operaciones")
-            employees[idx]["activo"] = bool(row["Activo"])
-        st.success("Directorio actualizado.")
-        st.rerun()
+    with st.container(border=True):
+        st.subheader("Ciclo de Rotación y Meta Diaria por Cargo")
+        st.caption("Define los turnos en orden Noche → Tarde → Mañana (separados por coma) y cuántas personas requiere cada turno al día.")
+
+        changed_cfg = False
+        for row_start in range(0, len(CARGOS_ORDEN), 2):
+            pair = CARGOS_ORDEN[row_start:row_start + 2]
+            cols_pair = st.columns(2)
+            for idx_c, cargo in enumerate(pair):
+                cfg = role_configs[cargo]
+                with cols_pair[idx_c]:
+                    with st.container(border=True):
+                        st.markdown(f"**{cargo}**")
+                        seq_val = st.text_input(
+                            "Secuencia de rotación semanal",
+                            value=", ".join(cfg["rotation_pool"]),
+                            key=f"seq_card_{cargo}",
+                        )
+                        parsed_seq = [x.strip() for x in seq_val.split(",") if x.strip()]
+                        if parsed_seq and parsed_seq != cfg["rotation_pool"]:
+                            cfg["rotation_pool"] = parsed_seq
+                            cfg["daily_targets"] = {t: cfg["daily_targets"].get(t, 1) for t in parsed_seq}
+                            changed_cfg = True
+
+                        st.caption("Meta diaria de personas por turno:")
+                        t_cols = st.columns(max(1, len(cfg["rotation_pool"])))
+                        for t_idx, turno in enumerate(cfg["rotation_pool"]):
+                            cur_tgt = int(cfg["daily_targets"].get(turno, 1))
+                            new_tgt = int(t_cols[t_idx].number_input(
+                                turno,
+                                min_value=0,
+                                max_value=20,
+                                value=cur_tgt,
+                                key=f"meta_{cargo}_{turno}",
+                            ))
+                            if new_tgt != cur_tgt:
+                                cfg["daily_targets"][turno] = new_tgt
+                                changed_cfg = True
+        if changed_cfg:
+            st.rerun()
+
+    with st.container(border=True):
+        st.subheader("Directorio de Personal y Habilitación de Apoyo Técnico (AT)")
+        with st.form("form_nuevo_colaborador", clear_on_submit=True):
+            nc1, nc2, nc3, nc4, nc5 = st.columns([1, 2, 1.8, 1.1, 1])
+            n_cod = nc1.text_input("Código")
+            n_nom = nc2.text_input("Nombre completo")
+            n_car = nc3.selectbox("Cargo", CARGOS_ORDEN)
+            n_at = nc4.checkbox("Habilitado AT")
+            st.write("")
+            if nc5.form_submit_button("Agregar", type="primary", use_container_width=True):
+                if n_cod.strip() and n_nom.strip():
+                    eid = f"emp_{n_cod.strip()}_{len(employees)}"
+                    employees.append({
+                        "id": eid,
+                        "codigo": n_cod.strip(),
+                        "nombre": n_nom.strip(),
+                        "cargo": n_car,
+                        "puede_at": n_at and n_car in ("Analista de Operaciones", "Auxiliar de Operaciones"),
+                        "activo": True,
+                    })
+                    for w in weeks:
+                        w["assignments"][eid] = [parse_raw_cell("") for _ in range(7)]
+                    st.rerun()
+
+        df_dir = pd.DataFrame([
+            {
+                "Código": e["codigo"],
+                "Nombre": e["nombre"],
+                "Cargo": e["cargo"],
+                "Habilitado AT": e["puede_at"],
+                "Activo en Rotación": e["activo"],
+                "Eliminar": False,
+            }
+            for e in employees
+        ])
+        edited_dir = st.data_editor(
+            df_dir,
+            column_config={"Cargo": st.column_config.SelectboxColumn("Cargo", options=CARGOS_ORDEN)},
+            use_container_width=True,
+            hide_index=True,
+            key="dir_editor",
+        )
+        if st.button("Guardar cambios del directorio"):
+            kept = []
+            for idx, row in edited_dir.iterrows():
+                if row["Eliminar"]:
+                    continue
+                emp = employees[idx]
+                emp["cargo"] = row["Cargo"]
+                emp["puede_at"] = bool(row["Habilitado AT"]) and row["Cargo"] in ("Analista de Operaciones", "Auxiliar de Operaciones")
+                emp["activo"] = bool(row["Activo en Rotación"])
+                kept.append(emp)
+            st.session_state.roster_employees = kept
+            st.rerun()
 
 with tab5:
-    st.subheader("Importar semana desde Excel (.xlsx) o pegar desde Excel")
-    imp_date = st.date_input("Fecha del Lunes de la semana importada", value=date.fromisoformat(active_week["start_iso"]))
-    up_file = st.file_uploader("Subir archivo Excel (.xlsx / .xlsm)", type=["xlsx", "xlsm"])
-    if up_file is not None and st.button("Cargar archivo Excel subido"):
-        wb_in = load_workbook(up_file, data_only=True)
-        ws_in = wb_in.active
-        mat = [["" if v is None else v for v in row] for row in ws_in.iter_rows(values_only=True)]
-        new_emps, new_w = import_matrix_rows(mat, imp_date.isoformat())
-        st.session_state.roster_employees = new_emps
-        st.session_state.roster_weeks = [new_w]
-        st.session_state.roster_active_idx = 0
-        st.success(f"Importados {len(new_emps)} colaboradores.")
-        st.rerun()
+    with st.container(border=True):
+        eh1, eh2, eh3 = st.columns([2.5, 1.4, 1.3])
+        eh1.subheader("Importar Horario Base desde Excel o Exportar")
+        eh2.download_button(
+            "Descargar Excel con Colores",
+            data=export_excel_bytes(active_week, employees),
+            file_name=f"Horario_Operaciones_{active_week['start_iso']}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+        if eh3.button("Restaurar plantilla inicial", use_container_width=True):
+            emps_s, weeks_s, rules_s, configs_s = build_seed_state()
+            st.session_state.roster_employees = emps_s
+            st.session_state.roster_weeks = weeks_s
+            st.session_state.roster_active_idx = 0
+            st.session_state.roster_rules = rules_s
+            st.session_state.roster_configs = configs_s
+            st.rerun()
 
-    paste_txt = st.text_area("O pega aquí las celdas copiadas desde Excel (Ctrl + C / Ctrl + V)")
-    if st.button("Cargar tabla pegada") and paste_txt.strip():
-        mat = [line.split("\t") for line in paste_txt.splitlines() if line.strip()]
-        new_emps, new_w = import_matrix_rows(mat, imp_date.isoformat())
-        st.session_state.roster_employees = new_emps
-        st.session_state.roster_weeks = [new_w]
-        st.session_state.roster_active_idx = 0
-        st.success(f"Importados {len(new_emps)} colaboradores desde texto pegado.")
-        st.rerun()
+        ic1, ic2 = st.columns(2)
+        imp_date = ic1.date_input("Fecha del Lunes de la semana importada", value=date.fromisoformat(active_week["start_iso"]))
+        imp_mode = ic2.radio("Al importar:", ["Iniciar historial con esta semana", "Agregar al historial existente"], horizontal=True)
+
+        ex1, ex2 = st.columns(2)
+        with ex1:
+            with st.container(border=True):
+                st.markdown("**Opción 1: Subir archivo Excel (.xlsx / .xlsm)**")
+                up_file = st.file_uploader("Seleccionar archivo Excel", type=["xlsx", "xlsm"])
+                if up_file is not None and st.button("Cargar archivo Excel", type="primary"):
+                    wb_in = load_workbook(up_file, data_only=True)
+                    ws_in = wb_in.active
+                    mat = [["" if v is None else v for v in row] for row in ws_in.iter_rows(values_only=True)]
+                    new_emps, new_w = import_matrix_rows(mat, imp_date.isoformat())
+                    st.session_state.roster_employees = new_emps
+                    if imp_mode.startswith("Agregar"):
+                        st.session_state.roster_weeks.append(new_w)
+                        st.session_state.roster_active_idx = len(st.session_state.roster_weeks) - 1
+                    else:
+                        st.session_state.roster_weeks = [new_w]
+                        st.session_state.roster_active_idx = 0
+                    st.rerun()
+        with ex2:
+            with st.container(border=True):
+                st.markdown("**Opción 2: Copiar y pegar desde Excel (Ctrl + C / Ctrl + V)**")
+                paste_txt = st.text_area("Pega aquí desde CODIGO hasta DOMINGO", height=140)
+                if st.button("Cargar tabla pegada") and paste_txt.strip():
+                    mat = [line.split("\t") for line in paste_txt.splitlines() if line.strip()]
+                    new_emps, new_w = import_matrix_rows(mat, imp_date.isoformat())
+                    st.session_state.roster_employees = new_emps
+                    if imp_mode.startswith("Agregar"):
+                        st.session_state.roster_weeks.append(new_w)
+                        st.session_state.roster_active_idx = len(st.session_state.roster_weeks) - 1
+                    else:
+                        st.session_state.roster_weeks = [new_w]
+                        st.session_state.roster_active_idx = 0
+                    st.rerun()
