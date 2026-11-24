@@ -92,6 +92,10 @@ SEED_ROWS = [
 ]
 
 
+def is_tech_shift_no_at(shift_code: str) -> bool:
+    return str(shift_code or "").strip().startswith("19:00")
+
+
 def normalize_cargo(raw: str) -> str:
     s = unicodedata.normalize("NFKD", str(raw or "")).encode("ascii", "ignore").decode("ascii").upper().strip()
     if "ANALISTA" in s:
@@ -320,7 +324,8 @@ def auto_assign_tecnico_at(week: dict, employees: list, role_configs: dict, rule
 
     for d in range(7):
         for shift_code, target in tech_targets.items():
-            if target <= 0:
+            # El turno de las 19:00 debe ser cubierto exclusivamente por un Técnico de Operaciones (nunca AT)
+            if target <= 0 or is_tech_shift_no_at(shift_code):
                 continue
 
             def count_covered():
@@ -475,7 +480,7 @@ def generate_next_week(
             for d in day_indices:
                 cur = counts_by_day[d].get(cand, 0)
                 if cur < target:
-                    deficit_score += 200
+                    deficit_score += 450 if (cargo == "Técnico de Operaciones" and is_tech_shift_no_at(cand)) else 200
                 else:
                     surplus_penalty += (cur - target + 1) * 70
 
@@ -626,23 +631,37 @@ def generate_next_week(
 
     for cargo in cargos_presentes:
         active_pool = get_active_pool(cargo)
+        ordered_pool = (
+            sorted(active_pool, key=lambda s: 0 if is_tech_shift_no_at(s) else 1)
+            if cargo == "Técnico de Operaciones"
+            else active_pool
+        )
         targets = role_configs.get(cargo, {}).get("daily_targets", {})
         cargo_emps = [e for e in employees if e["activo"] and e["cargo"] == cargo]
         counts_by_day = shift_counts[cargo]
 
         for d in range(7):
-            for s_need in active_pool:
+            for s_need in ordered_pool:
                 target_need = targets.get(s_need, 0)
+                allow_borrow_no_at = (cargo == "Técnico de Operaciones" and is_tech_shift_no_at(s_need))
+
                 while counts_by_day[d].get(s_need, 0) < target_need:
-                    extra_shifts = [
+                    donor_shifts = [
                         s_cand for s_cand, cur_cnt in counts_by_day[d].items()
-                        if s_cand != s_need and cur_cnt > targets.get(s_cand, 0)
+                        if s_cand != s_need and (cur_cnt > targets.get(s_cand, 0) or (allow_borrow_no_at and cur_cnt >= 1))
                     ]
-                    if not extra_shifts:
+                    donor_shifts.sort(
+                        key=lambda s_cand: (
+                            counts_by_day[d].get(s_cand, 0) - targets.get(s_cand, 0),
+                            counts_by_day[d].get(s_cand, 0),
+                        ),
+                        reverse=True,
+                    )
+                    if not donor_shifts:
                         break
 
                     moved = False
-                    for extra_shift in extra_shifts:
+                    for extra_shift in donor_shifts:
                         for emp in cargo_emps:
                             row = new_assignments[emp["id"]]
                             cell = row[d]
@@ -1013,12 +1032,12 @@ def re_rotate_active_week():
     regen["label"] = active_week["label"]
     st.session_state.weeks[week_idx] = regen
     st.session_state.roster_toast = (
-        f"Semana '{active_week['label']}' re-rotada aplicando tus reglas y Meta diaria ({at_cnt} turno(s) AT asignados)."
+        f"Semana '{active_week['label']}' re-rotada aplicando reglas y Meta diaria ({at_cnt} turno(s) AT asignados; 19:00 solo Técnico)."
     )
 
 
 st.title("Planificador de Turnos Operativos")
-st.caption("Rotación semanal Noche → Tarde → Mañana · Descansos 12h / 24h · Meta diaria por cargo · Cobertura Técnico AT")
+st.caption("Rotación semanal Noche → Tarde → Mañana · Descansos 12h / 24h · Meta diaria · 19:00 Técnico sin AT")
 
 if st.session_state.get("roster_toast"):
     st.success(st.session_state.roster_toast)
@@ -1053,7 +1072,7 @@ with c3:
         next_w, at_cnt = generate_next_week(weeks[-1], employees, role_configs, rules)
         st.session_state.weeks.append(next_w)
         st.session_state.active_week_idx = len(st.session_state.weeks) - 1
-        st.session_state.roster_toast = f"Se generó '{next_w['label']}' respetando Meta diaria y rotación ({at_cnt} turnos AT)."
+        st.session_state.roster_toast = f"Se generó '{next_w['label']}' respetando Meta diaria y rotación ({at_cnt} turnos AT; 19:00 solo Técnico)."
         st.rerun()
 
 with c4:
@@ -1080,9 +1099,10 @@ for d in range(7):
     for sc, tgt in tech_targets.items():
         if tgt <= 0:
             continue
+        no_at = is_tech_shift_no_at(sc)
         cov = sum(
             1 for e in active_emps
-            if (e["cargo"] == "Técnico de Operaciones" or active_week["assignments"][e["id"]][d].get("is_at"))
+            if (e["cargo"] == "Técnico de Operaciones" or (not no_at and active_week["assignments"][e["id"]][d].get("is_at")))
             and covers_shift_window(active_week["assignments"][e["id"]][d].get("base", ""), sc)
         )
         if cov < tgt:
@@ -1141,7 +1161,7 @@ with tab1:
         if st.button("Auto-cubrir Técnicos (AT)", key="btn_at_top", use_container_width=True):
             updated_w, cnt = auto_assign_tecnico_at(active_week, employees, role_configs, rules, prev_week)
             st.session_state.weeks[week_idx] = updated_w
-            st.session_state.roster_toast = f"Cobertura AT aplicada: {cnt} turno(s) asignado(s)."
+            st.session_state.roster_toast = f"Cobertura AT aplicada: {cnt} turno(s) asignado(s) (19:00 exclusivo Técnico)."
             st.rerun()
     with f5:
         st.write("")
@@ -1350,6 +1370,7 @@ with tab2:
 
 with tab3:
     st.subheader("Cobertura Diaria por Cargo y Turno vs Meta")
+    st.caption("Nota: En Técnico de Operaciones, el turno 19:00-27:00 es cubierto únicamente por Técnicos directos (no admite AT).")
     cargo_cov_sel = st.selectbox("Seleccionar cargo para revisar cobertura", CARGOS, key="cov_cargo_sel")
     cfg_sel = role_configs[cargo_cov_sel]
     pool_cov = list(dict.fromkeys(cfg_sel["rotation_pool"] + list(cfg_sel["daily_targets"].keys())))
@@ -1357,14 +1378,16 @@ with tab3:
     cov_rows = []
     for sc in pool_cov:
         tgt = cfg_sel["daily_targets"].get(sc, 0)
-        row_c = {"TURNO": sc, "META": tgt}
+        no_at = (cargo_cov_sel == "Técnico de Operaciones" and is_tech_shift_no_at(sc))
+        label_turno = f"{sc} (Solo Técnico)" if no_at else sc
+        row_c = {"TURNO": label_turno, "META": tgt}
         for d in range(7):
             cnt = 0
             for e in active_emps:
                 cell = active_week["assignments"][e["id"]][d]
                 if e["cargo"] == cargo_cov_sel and covers_shift_window(cell.get("base", ""), sc):
                     cnt += 1
-                elif cargo_cov_sel == "Técnico de Operaciones" and cell.get("is_at") and covers_shift_window(cell.get("base", ""), sc):
+                elif cargo_cov_sel == "Técnico de Operaciones" and (not no_at) and cell.get("is_at") and covers_shift_window(cell.get("base", ""), sc):
                     cnt += 1
             row_c[day_cols_cov[d]] = f"{cnt} / {tgt}"
         cov_rows.append(row_c)
@@ -1393,7 +1416,7 @@ with tab4:
     rules["min_work_between_off"] = int(r4.number_input("Mín. días trabajados entre L", 3, 7, rules["min_work_between_off"]))
     rules["max_consecutive_days"] = int(r5.number_input("Máx. días seguidos sin L", 5, 10, rules["max_consecutive_days"]))
     rules["rotate_after_day_off"] = st.checkbox("Rotar turno después del Día Libre (L)", value=rules["rotate_after_day_off"])
-    rules["auto_assign_at"] = st.checkbox("Auto-asignar cobertura AT al generar semana", value=rules["auto_assign_at"])
+    rules["auto_assign_at"] = st.checkbox("Auto-asignar cobertura AT al generar semana (excluye 19:00)", value=rules["auto_assign_at"])
 
     st.divider()
     st.subheader("Ciclo de Rotación (Noche → Tarde → Mañana) y Meta Diaria por Cargo")
