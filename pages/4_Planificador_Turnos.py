@@ -837,10 +837,13 @@ def generate_next_week(
             for d in day_indices:
                 tgt = get_shift_target_for_day(cfg, cand, d)
                 cur = counts_by_day[d].get(cand, 0)
-                if cur < tgt:
-                    deficit_score += 450 if (cargo == "Técnico de Operaciones" and is_tech_shift_no_at(cand)) else 200
-                elif cur >= tgt:
-                    surplus_penalty += (cur - tgt + 1) * 70
+                if tgt <= 0:
+                    surplus_penalty += 160
+                elif cur < tgt:
+                    base_w = 450 if (cargo == "Técnico de Operaciones" and is_tech_shift_no_at(cand)) else 260
+                    deficit_score += base_w + (tgt - cur) * 50
+                else:
+                    surplus_penalty += (cur - tgt + 1) * 90
             rot_bonus = 35 if cand == ideal_next else 0
             if len(active_pool) > 1 and cand == prev_shift_ref:
                 rot_bonus -= 45
@@ -912,6 +915,7 @@ def generate_next_week(
         best_off_day = locked_off_idx if locked_off_idx >= 0 else (-1 if all_days_locked else ideal_off_day)
 
         if locked_off_idx < 0 and not all_days_locked:
+            active_cargo_cnt = sum(1 for x in employees if x["activo"] and x["cargo"] == emp["cargo"])
             best_score = float("inf")
             for cand_day in range(7):
                 if existing_cells[cand_day].get("locked"):
@@ -924,6 +928,14 @@ def generate_next_week(
                         worked_until_off += 1
 
                 penalty = cargo_off_counts[cand_day] * 12
+
+                day_total_target = sum(
+                    get_shift_target_for_day(role_configs.get(emp["cargo"], {}), s, cand_day)
+                    for s in active_pool
+                )
+                if active_cargo_cnt - (cargo_off_counts[cand_day] + 1) < day_total_target:
+                    penalty += 700
+
                 if worked_until_off > rules["max_consecutive_work_days"]:
                     penalty += 5000 + (worked_until_off - rules["max_consecutive_work_days"]) * 500
                 elif locked_absence_days == 0 and worked_until_off < rules["min_work_days_between_off"]:
@@ -969,6 +981,14 @@ def generate_next_week(
             sunday_work_shift
             and any(get_shift_target_for_day(role_configs.get(emp["cargo"], {}), sunday_work_shift, d) > 0 for d in pre_days)
         )
+        sunday_shift_needs_cov = bool(
+            sunday_work_shift
+            and any(
+                shift_count_by_cargo[emp["cargo"]][d].get(sunday_work_shift, 0)
+                < get_shift_target_for_day(role_configs.get(emp["cargo"], {}), sunday_work_shift, d)
+                for d in pre_days
+            )
+        )
         can_keep_sunday_on_mon = bool(
             sunday_work_shift
             and sunday_shift_enabled
@@ -990,6 +1010,7 @@ def generate_next_week(
             and not sunday_crossed_off
             and not pre_touches_absence
             and sunday_work_shift
+            and sunday_shift_needs_cov
             and can_keep_sunday_on_mon
             and best_off_day > 0
             and pre_days
@@ -1422,7 +1443,7 @@ def export_excel_bytes(week: dict, employees: List[dict]) -> bytes:
 
 
 # ==============================================================================
-# ESTADO INICIAL Y HELPERS DE NOVEDADES EN SESSION_STATE
+# ESTADO INICIAL Y SINCRONIZACIÓN DE REGLAS/METAS ANTES DE GENERAR
 # ==============================================================================
 
 def create_seed_state():
@@ -1471,7 +1492,43 @@ def init_state():
         st.session_state.roster_initialized = True
 
 
+def sync_widget_state_to_configs():
+    """Sincroniza reglas y metas diarias antes de cualquier cálculo o botón superior."""
+    r = st.session_state.rules
+    if "t4_r12" in st.session_state:
+        r["min_rest_between_shifts"] = int(st.session_state["t4_r12"])
+    if "t4_r24" in st.session_state:
+        r["min_rest_day_off"] = int(st.session_state["t4_r24"])
+    if "t4_min_w" in st.session_state:
+        r["min_work_days_between_off"] = int(st.session_state["t4_min_w"])
+    if "t4_max_c" in st.session_state:
+        r["max_consecutive_work_days"] = int(st.session_state["t4_max_c"])
+    if "t4_rot_l" in st.session_state:
+        r["rotate_after_day_off"] = bool(st.session_state["t4_rot_l"])
+    if "t4_auto_at" in st.session_state:
+        r["auto_assign_at"] = bool(st.session_state["t4_auto_at"])
+
+    for cargo in CARGOS_ORDEN:
+        cfg = st.session_state.role_configs[cargo]
+        seq_key = f"t4_seq_{cargo}"
+        if seq_key in st.session_state:
+            parsed_pool = [s.strip() for s in str(st.session_state[seq_key]).split(",") if s.strip()]
+            if parsed_pool:
+                cfg["rotation_pool"] = parsed_pool
+        for s_code in cfg["rotation_pool"]:
+            wk_k = f"tgt_wk_{cargo}_{s_code}"
+            sat_k = f"tgt_sat_{cargo}_{s_code}"
+            sun_k = f"tgt_sun_{cargo}_{s_code}"
+            if wk_k in st.session_state:
+                cfg["daily_targets"][s_code] = int(st.session_state[wk_k])
+            if sat_k in st.session_state:
+                cfg.setdefault("saturday_targets", {})[s_code] = int(st.session_state[sat_k])
+            if sun_k in st.session_state:
+                cfg.setdefault("sunday_targets", {})[s_code] = int(st.session_state[sun_k])
+
+
 init_state()
+sync_widget_state_to_configs()
 
 
 def re_rotate_active_week():
@@ -1491,7 +1548,7 @@ def re_rotate_active_week():
     regen["label"] = curr["label"]
     st.session_state.weeks[idx] = regen
     st.session_state.notice = (
-        f"Semana '{curr['label']}' re-rotada aplicando reglas, metas y novedades programadas ({at_cnt} turno(s) AT asignados)."
+        f"Semana '{curr['label']}' re-rotada aplicando tus reglas, Meta Diaria y novedades ({at_cnt} turno(s) AT asignados)."
     )
 
 
@@ -2034,8 +2091,13 @@ with tab2:
     avg_days = round(sum(days_list) / len(days_list), 1) if days_list else 0.0
     rest_conflicts = sum(1 for i in eval_issues if i["type"] != "UNCOVERED_TECH")
 
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("Ventana comparada", f"{eval_prev['label'] if eval_prev else 'Base'} → {eval_curr['label']}")
+    k1, k2, k3, k4, k5 = st.columns([1.8, 1, 1, 1, 1])
+    k1.markdown(
+        f"<div style='font-size:12px;color:#475569;'>Ventana comparada</div>"
+        f"<div style='font-size:15px;font-weight:700;color:#0F172A;margin-top:4px;'>"
+        f"{eval_prev['label'] if eval_prev else 'Base'}<br>→ {eval_curr['label']}</div>",
+        unsafe_allow_html=True,
+    )
     k2.metric("Promedio días antes de L", f"{avg_days} días")
     k3.metric("Rotaciones aplicadas", f"{rot_cnt} / {len(active_an)}")
     k4.metric("Intervalo fuera de rango", int_bad)
@@ -2056,16 +2118,38 @@ with tab2:
         for idx, c in enumerate(cells_list):
             bg, fg, _ = get_cell_colors(c)
             b = c.get("baseShift", "")
-            short = "L" if b == "L" else "VAC" if b == "VACACIONES" else "SUSP" if b == "SUSPEND" else (b[:5] if b else "—")
-            chips.append(
-                f"<div style='display:inline-block;width:36px;padding:2px 1px;margin-right:2px;border-radius:3px;"
-                f"border:1px solid #CBD5E1;background:{bg};color:{fg};text-align:center;font-family:monospace;font-size:10px;'>"
-                f"<div style='font-size:8px;opacity:0.7'>{DIAS_SEMANA[idx][:1]}</div>{html.escape(short)}</div>"
-            )
-        return "".join(chips)
+            is_at = bool(c.get("isAT"))
+            if b == "L":
+                line1, line2 = "LIBRE", ""
+            elif b == "VACACIONES":
+                line1, line2 = "VAC", ""
+            elif b == "SUSPEND":
+                line1, line2 = "SUSP", ""
+            elif b == "INCAPACIDAD":
+                line1, line2 = "INCAP", ""
+            elif b == "PERMISO":
+                line1, line2 = "PERM", ""
+            elif "-" in b:
+                p0, p1 = b.split("-", 1)
+                line1 = p0
+                line2 = f"-{p1}{' AT' if is_at else ''}"
+            else:
+                line1 = b or "—"
+                line2 = "AT" if is_at else ""
 
-    t2_td = "padding:7px 8px;border-bottom:1px solid #E2E8F0;"
-    t2_th = "padding:8px;border-bottom:2px solid #CBD5E1;"
+            sub_html = f"<div style='font-size:10px;opacity:0.9;line-height:1.15'>{html.escape(line2)}</div>" if line2 else "<div style='font-size:10px;line-height:1.15'>&nbsp;</div>"
+            chips.append(
+                f"<div title='{html.escape(DIAS_SEMANA[idx])}: {html.escape(c.get('raw') or 'Sin turno')}' "
+                f"style='min-width:56px;padding:5px 4px;border-radius:5px;border:1px solid #CBD5E1;"
+                f"background:{bg};color:{fg};text-align:center;font-family:monospace;'>"
+                f"<div style='font-size:10px;opacity:0.75;font-weight:700;margin-bottom:2px'>{DIAS_SEMANA[idx][:3]}</div>"
+                f"<div style='font-size:11.5px;font-weight:700;line-height:1.15'>{html.escape(line1)}</div>"
+                f"{sub_html}</div>"
+            )
+        return f"<div style='display:grid;grid-template-columns:repeat(7,minmax(56px,1fr));gap:5px;'>{''.join(chips)}</div>"
+
+    t2_td = "padding:8px;border-bottom:1px solid #E2E8F0;vertical-align:middle;"
+    t2_th = "padding:8px;border-bottom:2px solid #CBD5E1;white-space:nowrap;"
     comp_rows = []
     for a in filtered_an:
         e = a["emp"]
@@ -2077,12 +2161,12 @@ with tab2:
         h_color = "#047857" if a["rest_across_ok"] else "#B91C1C"
         comp_rows.append(
             f"<tr>"
-            f"<td style='{t2_td}'><b>{html.escape(e['codigo'])} {html.escape(e['nombre'])}</b><br><span style='color:#64748B;font-size:11px'>{html.escape(e['cargo'])}</span></td>"
-            f"<td style='{t2_td}white-space:nowrap'>{prev_strip}</td>"
-            f"<td style='{t2_td}white-space:nowrap'>{curr_strip}</td>"
-            f"<td style='{t2_td}text-align:center;font-weight:700;color:{d_color}'>{d_txt}</td>"
-            f"<td style='{t2_td}text-align:center;font-weight:700;color:{h_color}'>{h_txt}</td>"
-            f"<td style='{t2_td}'>{html.escape(a['rot_detail'])}</td>"
+            f"<td style='{t2_td}min-width:170px;'><b>{html.escape(e['codigo'])} {html.escape(e['nombre'])}</b><br><span style='color:#64748B;font-size:11px'>{html.escape(e['cargo'])}</span></td>"
+            f"<td style='{t2_td}min-width:420px;'>{prev_strip}</td>"
+            f"<td style='{t2_td}min-width:420px;'>{curr_strip}</td>"
+            f"<td style='{t2_td}text-align:center;font-weight:700;font-size:13px;color:{d_color};white-space:nowrap'>{d_txt}</td>"
+            f"<td style='{t2_td}text-align:center;font-weight:700;font-size:13px;color:{h_color};white-space:nowrap'>{h_txt}</td>"
+            f"<td style='{t2_td}min-width:200px;'>{html.escape(a['rot_detail'])}</td>"
             f"</tr>"
         )
 
