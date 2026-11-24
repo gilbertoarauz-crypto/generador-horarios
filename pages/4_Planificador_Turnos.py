@@ -38,26 +38,38 @@ DEFAULT_ROLE_CONFIGS = {
     "Analista de Operaciones": {
         "rotation_pool": ["19:00-27:00", "11:00-19:00", "06:00-15:00", "03:00-11:00"],
         "daily_targets": {"19:00-27:00": 1, "11:00-19:00": 1, "06:00-15:00": 1, "03:00-11:00": 1},
+        "saturday_targets": {},
+        "sunday_targets": {},
     },
     "Auxiliar de Operaciones": {
         "rotation_pool": ["19:00-27:00", "23:00-31:00", "11:00-19:00", "03:00-11:00"],
         "daily_targets": {"19:00-27:00": 1, "23:00-31:00": 1, "11:00-19:00": 2, "03:00-11:00": 2},
+        "saturday_targets": {},
+        "sunday_targets": {},
     },
     "Operador Líder": {
         "rotation_pool": ["20:00-28:00"],
         "daily_targets": {"20:00-28:00": 1},
+        "saturday_targets": {},
+        "sunday_targets": {},
     },
     "Técnico de Operaciones": {
         "rotation_pool": ["19:00-27:00", "11:00-19:00", "03:00-11:00"],
         "daily_targets": {"19:00-27:00": 1, "11:00-19:00": 1, "03:00-11:00": 1},
+        "saturday_targets": {},
+        "sunday_targets": {},
     },
     "Auxiliar de Alistamiento": {
         "rotation_pool": ["22:00-30:00", "20:00-28:00", "08:00-17:00"],
         "daily_targets": {"22:00-30:00": 1, "20:00-28:00": 2, "08:00-17:00": 1},
+        "saturday_targets": {},
+        "sunday_targets": {},
     },
     "Conductor de Operaciones": {
         "rotation_pool": ["11:00-18:00", "03:00-10:00"],
         "daily_targets": {"11:00-18:00": 1, "03:00-10:00": 1},
+        "saturday_targets": {},
+        "sunday_targets": {},
     },
 }
 
@@ -94,6 +106,20 @@ SEED_ROWS = [
 
 def is_tech_shift_no_at(shift_code: str) -> bool:
     return str(shift_code or "").strip().startswith("19:00")
+
+
+def get_shift_target_for_day(cfg: dict, shift_code: str, day_idx: int) -> int:
+    if not cfg:
+        return 0
+    if day_idx == 5:
+        sat = cfg.get("saturday_targets") or {}
+        if shift_code in sat:
+            return int(sat[shift_code])
+    elif day_idx == 6:
+        sun = cfg.get("sunday_targets") or {}
+        if shift_code in sun:
+            return int(sun[shift_code])
+    return int((cfg.get("daily_targets") or {}).get(shift_code, 0))
 
 
 def normalize_cargo(raw: str) -> str:
@@ -224,6 +250,41 @@ def get_week_day_headers(start_date: dt.date) -> list:
     return [f"{DIAS_SEMANA[i]} {format_date_es(start_date + dt.timedelta(days=i))}" for i in range(7)]
 
 
+def compute_uncovered_tasks(week: dict, employees: list, role_configs: dict) -> list:
+    uncovered = []
+    active = [e for e in employees if e["activo"]]
+    for cargo in CARGOS:
+        cfg = role_configs.get(cargo, {})
+        shifts = list(dict.fromkeys(cfg.get("rotation_pool", []) + list((cfg.get("daily_targets") or {}).keys())))
+        for d in range(7):
+            for sc in shifts:
+                tgt = get_shift_target_for_day(cfg, sc, d)
+                if tgt <= 0:
+                    continue
+                no_at = (cargo == "Técnico de Operaciones" and is_tech_shift_no_at(sc))
+                assigned = 0
+                for e in active:
+                    cell = week["assignments"].get(e["id"], [{}] * 7)[d]
+                    b = cell.get("base", "")
+                    if not b:
+                        continue
+                    if e["cargo"] == cargo and covers_shift_window(b, sc):
+                        assigned += 1
+                    elif cargo == "Técnico de Operaciones" and (not no_at) and cell.get("is_at") and covers_shift_window(b, sc):
+                        assigned += 1
+                if assigned < tgt:
+                    uncovered.append({
+                        "day_idx": d,
+                        "DÍA": DIAS_SEMANA[d],
+                        "CARGO": cargo,
+                        "TURNO": sc,
+                        "ASIGNADOS / META": f"{assigned} / {tgt}",
+                        "FALTANTES": tgt - assigned,
+                        "MOTIVO": "Requiere Técnico directo (19:00 no admite AT)" if no_at else "Personal insuficiente, novedades o descanso 12h/24h",
+                    })
+    return uncovered
+
+
 def import_matrix_to_week(matrix: list, start_date: dt.date, employees: list, weeks: list):
     if not matrix:
         raise ValueError("No se encontraron filas válidas para importar.")
@@ -318,13 +379,14 @@ def auto_assign_tecnico_at(week: dict, employees: list, role_configs: dict, rule
             if d < len(row) and row[d].get("is_at") and not row[d].get("locked"):
                 row[d] = parse_raw_cell(format_cell_raw(row[d]["base"], False, row[d].get("is_cap", False)))
 
-    tech_targets = role_configs.get("Técnico de Operaciones", {}).get("daily_targets", {})
+    tech_cfg = role_configs.get("Técnico de Operaciones", {})
+    tech_shifts = list(dict.fromkeys(tech_cfg.get("rotation_pool", []) + list((tech_cfg.get("daily_targets") or {}).keys())))
     at_totals = {e["id"]: sum(1 for c in assignments.get(e["id"], []) if c.get("is_at")) for e in employees}
     assigned_count = 0
 
     for d in range(7):
-        for shift_code, target in tech_targets.items():
-            # El turno de las 19:00 debe ser cubierto exclusivamente por un Técnico de Operaciones (nunca AT)
+        for shift_code in tech_shifts:
+            target = get_shift_target_for_day(tech_cfg, shift_code, d)
             if target <= 0 or is_tech_shift_no_at(shift_code):
                 continue
 
@@ -416,7 +478,7 @@ def auto_assign_tecnico_at(week: dict, employees: list, role_configs: dict, rule
                         1 for o in employees
                         if o["activo"] and o["cargo"] == emp["cargo"] and assignments[o["id"]][d].get("base") == cur_s
                     )
-                    cur_tgt = role_configs.get(emp["cargo"], {}).get("daily_targets", {}).get(cur_s, 0)
+                    cur_tgt = get_shift_target_for_day(role_configs.get(emp["cargo"], {}), cur_s, d)
                     has_surplus = 0 if cur_cnt > cur_tgt else 1
                     return (has_surplus, at_totals.get(emp["id"], 0), 0 if emp["cargo"] == "Auxiliar de Operaciones" else 1)
 
@@ -457,12 +519,16 @@ def generate_next_week(
     def get_active_pool(cargo: str) -> list:
         cfg = role_configs.get(cargo, {})
         pool = cfg.get("rotation_pool", ["08:00-17:00"]) or ["08:00-17:00"]
-        targets = cfg.get("daily_targets", {})
-        filtered = [s for s in pool if targets.get(s, 0) > 0]
+        filtered = [
+            s for s in pool
+            if get_shift_target_for_day(cfg, s, 0) > 0
+            or get_shift_target_for_day(cfg, s, 5) > 0
+            or get_shift_target_for_day(cfg, s, 6) > 0
+        ]
         return filtered if filtered else pool
 
     def pick_best_shift_for_days(cargo: str, active_pool: list, day_indices: list, prev_shift_ref: str, is_valid_fn) -> str:
-        targets = role_configs.get(cargo, {}).get("daily_targets", {})
+        cfg = role_configs.get(cargo, {})
         counts_by_day = shift_counts[cargo]
         idx_ref = active_pool.index(prev_shift_ref) if prev_shift_ref in active_pool else -1
         ideal_next = active_pool[(idx_ref + 1) % len(active_pool)] if idx_ref >= 0 else active_pool[0]
@@ -475,9 +541,9 @@ def generate_next_week(
                 continue
             deficit_score = 0
             surplus_penalty = 0
-            target = targets.get(cand, 0)
 
             for d in day_indices:
+                target = get_shift_target_for_day(cfg, cand, d)
                 cur = counts_by_day[d].get(cand, 0)
                 if cur < target:
                     deficit_score += 450 if (cargo == "Técnico de Operaciones" and is_tech_shift_no_at(cand)) else 200
@@ -508,8 +574,8 @@ def generate_next_week(
             ]
             continue
 
+        cfg = role_configs.get(emp["cargo"], {})
         active_pool = get_active_pool(emp["cargo"])
-        targets = role_configs.get(emp["cargo"], {}).get("daily_targets", {})
         primary_prev = get_primary_shift(prev_cells, active_pool[0])
         pool_idx = active_pool.index(primary_prev) if primary_prev in active_pool else -1
         next_target = active_pool[(pool_idx + 1) % len(active_pool)] if pool_idx >= 0 else active_pool[emp_idx % len(active_pool)]
@@ -565,7 +631,7 @@ def generate_next_week(
         pre_days = [d for d in range(best_off)]
         post_days = [d for d in range(best_off + 1, 7)]
 
-        sunday_enabled = targets.get(sunday_shift, 0) > 0 if sunday_shift else False
+        sunday_enabled = any(get_shift_target_for_day(cfg, sunday_shift, d) > 0 for d in pre_days) if sunday_shift else False
         can_keep_sun = (
             is_transition_valid(sunday_shift, sunday_off, sunday_shift, 0, sunday_crossed, rules)
             if (sunday_shift and sunday_enabled)
@@ -630,29 +696,29 @@ def generate_next_week(
             cargos_presentes.append(e["cargo"])
 
     for cargo in cargos_presentes:
+        cfg = role_configs.get(cargo, {})
         active_pool = get_active_pool(cargo)
         ordered_pool = (
             sorted(active_pool, key=lambda s: 0 if is_tech_shift_no_at(s) else 1)
             if cargo == "Técnico de Operaciones"
             else active_pool
         )
-        targets = role_configs.get(cargo, {}).get("daily_targets", {})
         cargo_emps = [e for e in employees if e["activo"] and e["cargo"] == cargo]
         counts_by_day = shift_counts[cargo]
 
         for d in range(7):
             for s_need in ordered_pool:
-                target_need = targets.get(s_need, 0)
+                target_need = get_shift_target_for_day(cfg, s_need, d)
                 allow_borrow_no_at = (cargo == "Técnico de Operaciones" and is_tech_shift_no_at(s_need))
 
                 while counts_by_day[d].get(s_need, 0) < target_need:
                     donor_shifts = [
                         s_cand for s_cand, cur_cnt in counts_by_day[d].items()
-                        if s_cand != s_need and (cur_cnt > targets.get(s_cand, 0) or (allow_borrow_no_at and cur_cnt >= 1))
+                        if s_cand != s_need and (cur_cnt > get_shift_target_for_day(cfg, s_cand, d) or (allow_borrow_no_at and cur_cnt >= 1))
                     ]
                     donor_shifts.sort(
                         key=lambda s_cand: (
-                            counts_by_day[d].get(s_cand, 0) - targets.get(s_cand, 0),
+                            counts_by_day[d].get(s_cand, 0) - get_shift_target_for_day(cfg, s_cand, d),
                             counts_by_day[d].get(s_cand, 0),
                         ),
                         reverse=True,
@@ -995,7 +1061,12 @@ def init_state():
     st.session_state.employees = employees
     st.session_state.rules = dict(DEFAULT_REST_RULES)
     st.session_state.role_configs = {
-        k: {"rotation_pool": list(v["rotation_pool"]), "daily_targets": dict(v["daily_targets"])}
+        k: {
+            "rotation_pool": list(v["rotation_pool"]),
+            "daily_targets": dict(v["daily_targets"]),
+            "saturday_targets": dict(v.get("saturday_targets", {})),
+            "sunday_targets": dict(v.get("sunday_targets", {})),
+        }
         for k, v in DEFAULT_ROLE_CONFIGS.items()
     }
     w2, _ = generate_next_week(w1, employees, st.session_state.role_configs, st.session_state.rules)
@@ -1032,12 +1103,12 @@ def re_rotate_active_week():
     regen["label"] = active_week["label"]
     st.session_state.weeks[week_idx] = regen
     st.session_state.roster_toast = (
-        f"Semana '{active_week['label']}' re-rotada aplicando reglas y Meta diaria ({at_cnt} turno(s) AT asignados; 19:00 solo Técnico)."
+        f"Semana '{active_week['label']}' re-rotada aplicando reglas, metas de Sáb/Dom y 19:00 solo Técnico ({at_cnt} AT asignados)."
     )
 
 
 st.title("Planificador de Turnos Operativos")
-st.caption("Rotación semanal Noche → Tarde → Mañana · Descansos 12h / 24h · Meta diaria · 19:00 Técnico sin AT")
+st.caption("Rotación semanal Noche → Tarde → Mañana · Descansos 12h / 24h · Metas L–V / Sáb / Dom · 19:00 Técnico sin AT")
 
 if st.session_state.get("roster_toast"):
     st.success(st.session_state.roster_toast)
@@ -1093,27 +1164,17 @@ nov_count = sum(
 )
 at_count = sum(1 for e in active_emps for c in active_week["assignments"].get(e["id"], []) if c.get("is_at"))
 alerts = validate_week_rest(active_week, employees, rules, prev_week)
-tech_targets = role_configs["Técnico de Operaciones"]["daily_targets"]
-tech_missing = 0
-for d in range(7):
-    for sc, tgt in tech_targets.items():
-        if tgt <= 0:
-            continue
-        no_at = is_tech_shift_no_at(sc)
-        cov = sum(
-            1 for e in active_emps
-            if (e["cargo"] == "Técnico de Operaciones" or (not no_at and active_week["assignments"][e["id"]][d].get("is_at")))
-            and covers_shift_window(active_week["assignments"][e["id"]][d].get("base", ""), sc)
-        )
-        if cov < tgt:
-            tech_missing += (tgt - cov)
+uncovered_list = compute_uncovered_tasks(active_week, employees, role_configs)
+tech_missing = sum(u["FALTANTES"] for u in uncovered_list if u["CARGO"] == "Técnico de Operaciones")
+total_missing_tasks = sum(u["FALTANTES"] for u in uncovered_list)
 
-m1, m2, m3, m4, m5 = st.columns(5)
+m1, m2, m3, m4, m5, m6 = st.columns(6)
 m1.metric("Activos", len(active_emps))
 m2.metric("Novedades", nov_count)
 m3.metric("Turnos AT", at_count)
 m4.metric("Descansos 12h/24h", "OK" if not alerts else f"{len(alerts)} alerta(s)")
 m5.metric("Técnicos", "100% Cubierto" if tech_missing == 0 else f"{tech_missing} faltante(s)")
+m6.metric("Tareas sin cubrir", "0 (Completo)" if total_missing_tasks == 0 else f"{total_missing_tasks} faltante(s)")
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "Horario Semanal",
@@ -1369,7 +1430,33 @@ with tab2:
         st.markdown(table_html, unsafe_allow_html=True)
 
 with tab3:
-    st.subheader("Cobertura Diaria por Cargo y Turno vs Meta")
+    st.subheader("Tareas y Turnos Sin Cubrir (Faltantes de Meta)")
+    st.caption("Muestra todas las tareas o turnos que quedaron por debajo de la meta configurada (Lun–Vie, Sábado o Domingo) en cualquier cargo.")
+    flt_falt = st.selectbox(
+        "Filtrar faltantes por cargo",
+        ["TODOS"] + CARGOS,
+        format_func=lambda x: f"Todos los cargos ({total_missing_tasks} faltante(s))" if x == "TODOS" else x,
+        key="flt_uncovered_cargo",
+    )
+    filtered_uncovered = [u for u in uncovered_list if flt_falt == "TODOS" or u["CARGO"] == flt_falt]
+    if not filtered_uncovered:
+        st.success("No hay tareas pendientes: todas las metas diarias configuradas están 100% cubiertas.")
+    else:
+        df_unc = pd.DataFrame([
+            {
+                "DÍA": u["DÍA"],
+                "CARGO": u["CARGO"],
+                "TURNO": u["TURNO"],
+                "ASIGNADOS / META": u["ASIGNADOS / META"],
+                "FALTANTES": f"-{u['FALTANTES']}",
+                "MOTIVO / OBSERVACIÓN": u["MOTIVO"],
+            }
+            for u in filtered_uncovered
+        ])
+        st.dataframe(df_unc, use_container_width=True)
+
+    st.divider()
+    st.subheader("Cobertura Diaria por Cargo y Turno vs Meta (L–V / Sáb / Dom)")
     st.caption("Nota: En Técnico de Operaciones, el turno 19:00-27:00 es cubierto únicamente por Técnicos directos (no admite AT).")
     cargo_cov_sel = st.selectbox("Seleccionar cargo para revisar cobertura", CARGOS, key="cov_cargo_sel")
     cfg_sel = role_configs[cargo_cov_sel]
@@ -1377,11 +1464,14 @@ with tab3:
     day_cols_cov = get_week_day_headers(active_week["start_date"])
     cov_rows = []
     for sc in pool_cov:
-        tgt = cfg_sel["daily_targets"].get(sc, 0)
+        tgt_lv = get_shift_target_for_day(cfg_sel, sc, 0)
+        tgt_sab = get_shift_target_for_day(cfg_sel, sc, 5)
+        tgt_dom = get_shift_target_for_day(cfg_sel, sc, 6)
         no_at = (cargo_cov_sel == "Técnico de Operaciones" and is_tech_shift_no_at(sc))
         label_turno = f"{sc} (Solo Técnico)" if no_at else sc
-        row_c = {"TURNO": label_turno, "META": tgt}
+        row_c = {"TURNO": label_turno, "META (L-V / S / D)": f"{tgt_lv} / {tgt_sab} / {tgt_dom}"}
         for d in range(7):
+            tgt_d = get_shift_target_for_day(cfg_sel, sc, d)
             cnt = 0
             for e in active_emps:
                 cell = active_week["assignments"][e["id"]][d]
@@ -1389,7 +1479,7 @@ with tab3:
                     cnt += 1
                 elif cargo_cov_sel == "Técnico de Operaciones" and (not no_at) and cell.get("is_at") and covers_shift_window(cell.get("base", ""), sc):
                     cnt += 1
-            row_c[day_cols_cov[d]] = f"{cnt} / {tgt}"
+            row_c[day_cols_cov[d]] = f"{cnt} / {tgt_d}"
         cov_rows.append(row_c)
     st.dataframe(pd.DataFrame(cov_rows), use_container_width=True)
 
@@ -1420,13 +1510,15 @@ with tab4:
 
     st.divider()
     st.subheader("Ciclo de Rotación (Noche → Tarde → Mañana) y Meta Diaria por Cargo")
-    st.caption("Pon en 0 cualquier turno que no necesites cubrir y ajusta las cantidades por día. Luego pulsa 'Aplicar y Re-rotar semana actual'.")
+    st.caption("Ajusta cuántas personas necesitas en Lun–Vie, Sábado y Domingo por cada turno (pon 0 donde no requieras). Luego pulsa 'Aplicar reglas y Re-rotar semana actual'.")
     cols_cfg = st.columns(2)
     for idx_c, cargo in enumerate(CARGOS):
         with cols_cfg[idx_c % 2]:
             with st.container(border=True):
                 st.markdown(f"**{cargo}**")
                 cfg = role_configs[cargo]
+                cfg.setdefault("saturday_targets", {})
+                cfg.setdefault("sunday_targets", {})
                 pool_str = st.text_input(
                     "Secuencia de rotación semanal (Noche → Tarde → Mañana, separada por coma)",
                     value=", ".join(cfg["rotation_pool"]),
@@ -1437,15 +1529,45 @@ with tab4:
                     cfg["rotation_pool"] = new_pool
                 target_shifts = list(dict.fromkeys(cfg["rotation_pool"] + list(cfg["daily_targets"].keys())))
                 if target_shifts:
-                    t_cols = st.columns(len(target_shifts))
-                    for j, s_code in enumerate(target_shifts):
-                        cfg["daily_targets"][s_code] = int(
-                            t_cols[j].number_input(
-                                s_code,
+                    hdr_t = st.columns([1.4, 1, 1, 1])
+                    hdr_t[0].caption("Turno")
+                    hdr_t[1].caption("Lun–Vie")
+                    hdr_t[2].caption("Sábado")
+                    hdr_t[3].caption("Domingo")
+                    for s_code in target_shifts:
+                        row_t = st.columns([1.4, 1, 1, 1])
+                        row_t[0].markdown(f"`{s_code}`")
+                        wk_val = int(
+                            row_t[1].number_input(
+                                "Lun-Vie",
                                 min_value=0,
                                 max_value=20,
                                 value=int(cfg["daily_targets"].get(s_code, 0)),
-                                key=f"tgt_{cargo}_{s_code}",
+                                key=f"tgt_wk_{cargo}_{s_code}",
+                                label_visibility="collapsed",
+                            )
+                        )
+                        cfg["daily_targets"][s_code] = wk_val
+                        sat_default = int(cfg["saturday_targets"].get(s_code, wk_val))
+                        cfg["saturday_targets"][s_code] = int(
+                            row_t[2].number_input(
+                                "Sáb",
+                                min_value=0,
+                                max_value=20,
+                                value=sat_default,
+                                key=f"tgt_sat_{cargo}_{s_code}",
+                                label_visibility="collapsed",
+                            )
+                        )
+                        sun_default = int(cfg["sunday_targets"].get(s_code, wk_val))
+                        cfg["sunday_targets"][s_code] = int(
+                            row_t[3].number_input(
+                                "Dom",
+                                min_value=0,
+                                max_value=20,
+                                value=sun_default,
+                                key=f"tgt_sun_{cargo}_{s_code}",
+                                label_visibility="collapsed",
                             )
                         )
 
