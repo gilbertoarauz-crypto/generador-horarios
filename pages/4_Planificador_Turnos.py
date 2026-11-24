@@ -1,3 +1,4 @@
+import html
 import io
 import re
 import unicodedata
@@ -752,13 +753,13 @@ def validate_week_rest(week: dict, employees: list, rules: dict, prev_week=None)
     return alerts
 
 
-def analyze_rotation_table(curr_week: dict, prev_week, employees: list, role_configs: dict, rules: dict) -> pd.DataFrame:
-    rows = []
+def analyze_rotation_details(curr_week: dict, prev_week, employees: list, role_configs: dict, rules: dict) -> list:
+    items = []
     for emp in employees:
         if not emp["activo"]:
             continue
-        prev_cells = prev_week["assignments"].get(emp["id"], []) if prev_week else []
-        curr_cells = curr_week["assignments"].get(emp["id"], [])
+        prev_cells = prev_week["assignments"].get(emp["id"], [parse_raw_cell("")] * 7) if prev_week else []
+        curr_cells = curr_week["assignments"].get(emp["id"], [parse_raw_cell("")] * 7)
         pool = role_configs.get(emp["cargo"], {}).get("rotation_pool", [])
         prev_off = next((i for i, c in enumerate(prev_cells) if c.get("base") == "L"), None)
         curr_off = next((i for i, c in enumerate(curr_cells) if c.get("base") == "L"), None)
@@ -766,7 +767,15 @@ def analyze_rotation_table(curr_week: dict, prev_week, employees: list, role_con
         combined = (prev_cells + curr_cells) if prev_week else curr_cells
         offset_curr = 7 if prev_week else 0
 
-        before_l, after_l, days_before_l, rest_l = "—", "—", None, None
+        max_consec_14, streak = 0, 0
+        for c in combined:
+            if parse_shift_window(c.get("base", "")):
+                streak += 1
+                max_consec_14 = max(max_consec_14, streak)
+            else:
+                streak = 0
+
+        before_l, after_l, days_before_l, rest_l = "", "", None, None
         if curr_off is not None:
             cnt = 0
             for i in range(offset_curr + curr_off - 1, -1, -1):
@@ -800,27 +809,83 @@ def analyze_rotation_table(curr_week: dict, prev_week, employees: list, role_con
         prev_primary = get_primary_shift(prev_cells, "") if prev_week else ""
 
         if not first_curr:
-            estado = "Novedad / Sin turno"
+            status, detail = "ABSENCE", "Sin turnos asignados / Novedad"
         elif len(pool) <= 1:
-            estado = f"Turno fijo ({first_curr})"
-        elif curr_off is not None and before_l != "—" and after_l != "—" and before_l != after_l:
-            estado = f"Rotó tras L ({DIAS_SEMANA[curr_off]}): {before_l} → {after_l}"
+            status, detail = "FIXED_ROLE", f"Turno fijo ({first_curr})"
+        elif curr_off is not None and before_l and after_l and before_l != after_l:
+            status, detail = "ROTATED_AFTER_L", f"Rotó tras L ({DIAS_SEMANA[curr_off]}): {before_l} → {after_l}"
         elif prev_primary and first_curr != prev_primary:
-            estado = f"Rotó inicio: {prev_primary} → {first_curr}"
+            status, detail = "ROTATED_ON_MONDAY", f"Rotó desde inicio: {prev_primary} → {first_curr}"
         else:
-            estado = f"Mantuvo {first_curr}"
+            status = "SAME_SHIFT"
+            detail = f"Mantuvo {first_curr} (igual a sem. anterior)" if prev_primary else f"Turno continuo {first_curr}"
 
-        rows.append({
-            "CÓDIGO": emp["codigo"],
-            "COLABORADOR": emp["nombre"],
-            "CARGO": emp["cargo"],
-            "L ANTERIOR": DIAS_SEMANA[prev_off] if prev_off is not None else "—",
-            "L ACTUAL": DIAS_SEMANA[curr_off] if curr_off is not None else "Sin L",
-            "DÍAS SEGUIDOS P/L": f"{days_before_l}d" if days_before_l is not None else "—",
-            "DESCANSO EN L": f"{rest_l}h" if rest_l is not None else "—",
-            "CAMBIO / ROTACIÓN": estado,
+        if days_before_l is None:
+            off_ok = max_consec_14 <= rules["max_consecutive_days"]
+        else:
+            off_ok = (rules["min_work_between_off"] <= days_before_l <= rules["max_consecutive_days"]) and (max_consec_14 <= rules["max_consecutive_days"])
+        rest_ok = (rest_l is None) or (rest_l >= rules["min_rest_off_hours"])
+
+        items.append({
+            "emp": emp,
+            "prev_cells": prev_cells,
+            "curr_cells": curr_cells,
+            "prev_off": prev_off,
+            "curr_off": curr_off,
+            "days_before_l": days_before_l,
+            "max_consec_14": max_consec_14,
+            "rest_l": rest_l,
+            "status": status,
+            "detail": detail,
+            "off_ok": off_ok,
+            "rest_ok": rest_ok,
         })
-    return pd.DataFrame(rows)
+    return items
+
+
+def shift_badge_colors(cell: dict):
+    b = str(cell.get("base", "")).strip().upper()
+    if b == "SUSPEND":
+        return ("#DC2626", "#FFFFFF", "#B91C1C")
+    if b == "VACACIONES":
+        return ("#FFFFFF", "#DC2626", "#E2E8F0")
+    if b in {"INCAPACIDAD", "PERMISO"}:
+        return ("#FFF1F2", "#9F1239", "#FECDD3")
+    if b == "L":
+        return ("#FCE4D6", "#C00000", "#FED7AA")
+    if cell.get("is_at") or b in {"03:00-19:00", "11:00-27:00", "23:00-35:00"}:
+        return ("#FBCFE8", "#0F172A", "#F472B6")
+    if b.startswith("03:00-"):
+        return ("#92D050", "#0F172A", "#65A30D")
+    if b.startswith("11:00-"):
+        return ("#FFC000", "#0F172A", "#D97706")
+    if b.startswith("19:00-"):
+        return ("#B4C6E7", "#0F172A", "#93C5FD")
+    if b.startswith("23:00-"):
+        return ("#FFF2CC", "#0F172A", "#FDE68A")
+    if b.startswith("20:00-"):
+        return ("#00B0F0", "#0F172A", "#0284C7")
+    if b.startswith("22:00-"):
+        return ("#A6A6A6", "#0F172A", "#64748B")
+    if b in {"06:00-15:00", "08:00-17:00"}:
+        return ("#FFFFFF", "#0F172A", "#CBD5E1")
+    return ("#F8FAFC", "#475569", "#E2E8F0")
+
+
+def build_mini_strip_html(cells: list) -> str:
+    badges = []
+    for idx in range(7):
+        cell = cells[idx] if idx < len(cells) else {"base": "", "raw": ""}
+        b = cell.get("base", "")
+        bg, fg, br = shift_badge_colors(cell)
+        short_txt = "L" if b == "L" else ("VAC" if b == "VACACIONES" else ("SUSP" if b == "SUSPEND" else (b[:5] if b else "—")))
+        tip = html.escape(f"{DIAS_SEMANA[idx]}: {cell.get('raw') or 'Sin turno'}")
+        d_ltr = DIAS_SEMANA[idx][0]
+        badges.append(
+            f'<div title="{tip}" style="background:{bg};color:{fg};border:1px solid {br};border-radius:4px;padding:3px 2px;text-align:center;font-family:monospace;font-size:10px;line-height:1.15;font-weight:600;">'
+            f'<div style="font-size:9px;opacity:0.7;">{d_ltr}</div><div>{html.escape(short_txt)}</div></div>'
+        )
+    return f'<div style="display:grid;grid-template-columns:repeat(7,minmax(32px,1fr));gap:3px;">{"".join(badges)}</div>'
 
 
 def export_excel_bytes(week: dict, employees: list) -> bytes:
@@ -917,6 +982,7 @@ def init_state():
     w2, _ = generate_next_week(w1, employees, st.session_state.role_configs, st.session_state.rules)
     st.session_state.weeks = [w1, w2]
     st.session_state.active_week_idx = 1
+    st.session_state.rot_mode = "compare"
     st.session_state.roster_toast = ""
     st.session_state.roster_initialized = True
 
@@ -1085,8 +1151,8 @@ with tab1:
             st.rerun()
 
     day_cols = get_week_day_headers(active_week["start_date"])
-    rot_df = analyze_rotation_table(active_week, prev_week, employees, role_configs, rules)
-    rot_map = {r["CÓDIGO"]: r for _, r in rot_df.iterrows()} if not rot_df.empty else {}
+    rot_items_t1 = analyze_rotation_details(active_week, prev_week, employees, role_configs, rules)
+    rot_map = {item["emp"]["codigo"]: item for item in rot_items_t1}
     alert_names = {a.split(":")[0].split(" (")[0] for a in alerts}
 
     grid_rows = []
@@ -1101,12 +1167,14 @@ with tab1:
         r_info = rot_map.get(emp["codigo"], {})
         prev_cells = prev_week["assignments"].get(emp["id"], []) if prev_week else []
         prev_dom = prev_cells[6].get("raw", "—") if len(prev_cells) == 7 else "—"
+        prev_l = DIAS_SEMANA[r_info["prev_off"]] if r_info.get("prev_off") is not None else "—"
+        d_pl = f"{r_info['days_before_l']}d" if r_info.get("days_before_l") is not None else "—"
         row_dict = {
             "CODIGO": emp["codigo"],
             "NOMBRE": emp["nombre"],
             "CARGO": emp["cargo"],
-            "SEM ANT": f"Dom: {prev_dom} | L: {r_info.get('L ANTERIOR', '—')}",
-            "DÍAS P/L Y ROT.": f"{r_info.get('DÍAS SEGUIDOS P/L', '—')} · {r_info.get('CAMBIO / ROTACIÓN', '')}",
+            "SEM ANT": f"Dom: {prev_dom} | L: {prev_l}",
+            "DÍAS P/L Y ROT.": f"{d_pl} · {r_info.get('detail', '')}",
         }
         for d in range(7):
             row_dict[day_cols[d]] = cells[d].get("raw", "") if d < len(cells) else ""
@@ -1146,9 +1214,139 @@ with tab1:
             st.rerun()
 
 with tab2:
-    st.subheader("Auditoría de Rotación y Descansos")
-    rot_full = analyze_rotation_table(active_week, prev_week, employees, role_configs, rules)
-    st.dataframe(rot_full, use_container_width=True, height=560)
+    with st.container(border=True):
+        h_l, h_r = st.columns([2.2, 1.8])
+        with h_l:
+            st.subheader("Análisis de Días para Descanso (L) y Rotación Tras Días Libres")
+            st.caption("Compara la semana anterior contra la semana nueva para verificar cuántos días continuos trabaja cada colaborador antes de su día libre y cómo rota de turno después de descansar.")
+        with h_r:
+            mode_options = [f"Semana Activa ({active_week['label']})", "Previsualizar Siguiente Semana"]
+            mode_idx = 1 if st.session_state.get("rot_mode") == "preview" else 0
+            chosen_mode = st.radio("Modo de análisis", mode_options, index=mode_idx, horizontal=True, label_visibility="collapsed")
+            st.session_state.rot_mode = "preview" if chosen_mode == "Previsualizar Siguiente Semana" else "compare"
+
+        is_preview = st.session_state.rot_mode == "preview"
+        if is_preview:
+            preview_base = weeks[-1]
+            preview_gen, preview_at = generate_next_week(preview_base, employees, role_configs, rules)
+            eval_curr, eval_prev = preview_gen, preview_base
+        else:
+            eval_curr, eval_prev = active_week, prev_week
+
+        rc1, rc2, rc3, rc4 = st.columns([1.2, 1.2, 1.4, 1.4])
+        rules["min_work_between_off"] = int(rc1.number_input("Mín. días trabajados entre L", 3, 6, rules["min_work_between_off"], key="tab2_min_l"))
+        rules["max_consecutive_days"] = int(rc2.number_input("Máx. días seguidos sin descanso", 5, 10, rules["max_consecutive_days"], key="tab2_max_l"))
+        with rc3:
+            st.write("")
+            st.write("")
+            rules["rotate_after_day_off"] = st.checkbox("Rotar turno después del Día Libre (L)", value=rules["rotate_after_day_off"], key="tab2_rot_l")
+        with rc4:
+            st.write("")
+            st.write("")
+            if is_preview:
+                if st.button(f"Aplicar y Crear {eval_curr['label']}", type="primary", use_container_width=True, key="btn_apply_preview_t2"):
+                    st.session_state.weeks.append(eval_curr)
+                    st.session_state.active_week_idx = len(st.session_state.weeks) - 1
+                    st.session_state.rot_mode = "compare"
+                    st.session_state.roster_toast = f"Se aplicó y creó '{eval_curr['label']}' ({preview_at} cobertura(s) AT)."
+                    st.rerun()
+            else:
+                if st.button("Simular Próxima Semana", use_container_width=True, key="btn_sim_next_t2"):
+                    st.session_state.rot_mode = "preview"
+                    st.rerun()
+
+        rot_details = analyze_rotation_details(eval_curr, eval_prev, employees, role_configs, rules)
+        eval_alerts = validate_week_rest(eval_curr, employees, rules, eval_prev)
+        active_rot = [r for r in rot_details if r["status"] != "ABSENCE"]
+        rotated_cnt = sum(1 for r in active_rot if r["status"] in {"ROTATED_AFTER_L", "ROTATED_ON_MONDAY"})
+        interval_bad = sum(1 for r in active_rot if not r["off_ok"])
+        days_list = [r["days_before_l"] for r in active_rot if r["days_before_l"] is not None]
+        avg_days = round(sum(days_list) / len(days_list), 1) if days_list else 0.0
+
+        st.divider()
+        km1, km2, km3, km4, km5 = st.columns([2, 1, 1, 1, 1])
+        km1.metric("Ventana comparada", f"{eval_prev['label']} → {eval_curr['label']}" if eval_prev else eval_curr["label"])
+        km2.metric("Promedio días antes de L", f"{avg_days} días")
+        km3.metric("Rotaciones aplicadas", f"{rotated_cnt} / {len(active_rot)}")
+        km4.metric("Intervalo fuera de rango", interval_bad)
+        km5.metric("Conflictos 12h / 24h", len(eval_alerts))
+
+    rf1, rf2, rf3 = st.columns([1.8, 2.2, 2])
+    cargo_rot_filter = rf1.selectbox("Filtrar por cargo", ["TODOS"] + CARGOS, format_func=lambda x: f"Todos los cargos ({len(active_emps)})" if x == "TODOS" else x, key="rot_cargo_flt")
+    with rf2:
+        st.write("")
+        st.write("")
+        only_no_rot = st.checkbox("Mostrar solo sin rotación o alertas de descanso", key="rot_only_alerts")
+    with rf3:
+        st.write("")
+        st.write("")
+        st.caption(f"Rango saludable: **{rules['min_work_between_off']}–{rules['max_consecutive_days']} días** · Descanso L ≥ **{rules['min_rest_off_hours']}h**")
+
+    filtered_rot = [
+        r for r in rot_details
+        if (cargo_rot_filter == "TODOS" or r["emp"]["cargo"] == cargo_rot_filter)
+        and (not only_no_rot or (not r["off_ok"] or not r["rest_ok"] or r["status"] == "SAME_SHIFT"))
+    ]
+
+    if not filtered_rot:
+        st.info("No hay colaboradores que coincidan con el filtro seleccionado.")
+    else:
+        curr_col_title = "Nueva Semana Propuesta (Lun → Dom)" if is_preview else "Semana Actual (Lun → Dom)"
+        rows_html = []
+        for item in filtered_rot:
+            emp = item["emp"]
+            prev_strip = build_mini_strip_html(item["prev_cells"]) if eval_prev else '<span style="color:#94a3b8;">Sin semana previa</span>'
+            curr_strip = build_mini_strip_html(item["curr_cells"])
+
+            if item["status"] == "ABSENCE":
+                dias_html = '<span style="color:#94a3b8;">—</span>'
+            elif item["days_before_l"] is not None:
+                c_ok = "#047857" if item["off_ok"] else "#B45309"
+                p_lbl = f"{DIAS_SEMANA[item['prev_off']]} → " if item["prev_off"] is not None else ""
+                c_lbl = f"L {DIAS_SEMANA[item['curr_off']]}" if item["curr_off"] is not None else ""
+                dias_html = f'<div style="font-weight:700;color:{c_ok};">{item["days_before_l"]} días seg.</div><div style="font-size:10px;color:#64748B;">{p_lbl}{c_lbl}</div>'
+            else:
+                dias_html = f'<span style="color:#B45309;font-weight:700;">Sin L ({item["max_consec_14"]}d)</span>'
+
+            if item["rest_l"] is not None:
+                r_col = "#047857" if item["rest_ok"] else "#B91C1C"
+                horas_html = f'<span style="font-weight:700;color:{r_col};">{item["rest_l"]}h</span>'
+            else:
+                horas_html = '<span style="color:#94a3b8;">—</span>'
+
+            det_col = "#B45309" if item["status"] == "SAME_SHIFT" else "#1E293B"
+            warn_extra = (
+                f'<div style="font-size:11px;color:#B45309;">Fuera de rango ({rules["min_work_between_off"]}–{rules["max_consecutive_days"]} días antes de L)</div>'
+                if (not item["off_ok"] and item["status"] != "ABSENCE") else ""
+            )
+
+            rows_html.append(
+                f'<tr style="border-bottom:1px solid #E2E8F0;">'
+                f'<td style="padding:8px 10px;vertical-align:top;">'
+                f'<div style="font-weight:600;color:#0F172A;"><span style="color:#64748B;font-family:monospace;margin-right:6px;">{html.escape(emp["codigo"])}</span>{html.escape(emp["nombre"])}</div>'
+                f'<div style="font-size:11px;color:#64748B;">{html.escape(emp["cargo"])}</div></td>'
+                f'<td style="padding:6px 8px;vertical-align:middle;">{prev_strip}</td>'
+                f'<td style="padding:6px 8px;vertical-align:middle;">{curr_strip}</td>'
+                f'<td style="padding:6px 8px;text-align:center;vertical-align:middle;font-family:monospace;">{dias_html}</td>'
+                f'<td style="padding:6px 8px;text-align:center;vertical-align:middle;font-family:monospace;">{horas_html}</td>'
+                f'<td style="padding:6px 10px;vertical-align:middle;color:{det_col};font-weight:500;">{html.escape(item["detail"])}{warn_extra}</td>'
+                f'</tr>'
+            )
+
+        table_html = (
+            '<div style="overflow-x:auto;max-height:580px;overflow-y:auto;border:1px solid #CBD5E1;border-radius:8px;background:#FFFFFF;">'
+            '<table style="width:100%;border-collapse:collapse;font-size:12px;">'
+            '<thead><tr style="background:#F1F5F9;border-bottom:2px solid #CBD5E1;color:#1E293B;position:sticky;top:0;z-index:1;">'
+            '<th style="padding:10px;text-align:left;min-width:190px;">Colaborador y Cargo</th>'
+            '<th style="padding:10px;text-align:left;min-width:255px;">Semana Anterior (Lun → Dom)</th>'
+            f'<th style="padding:10px;text-align:left;min-width:255px;">{curr_col_title}</th>'
+            '<th style="padding:10px;text-align:center;min-width:115px;">Días p/ Descanso</th>'
+            '<th style="padding:10px;text-align:center;min-width:85px;">Horas en L</th>'
+            '<th style="padding:10px;text-align:left;min-width:220px;">Rotación tras Día Libre</th>'
+            '</tr></thead>'
+            f'<tbody>{"".join(rows_html)}</tbody></table></div>'
+        )
+        st.markdown(table_html, unsafe_allow_html=True)
 
 with tab3:
     st.subheader("Cobertura Diaria por Cargo y Turno vs Meta")
