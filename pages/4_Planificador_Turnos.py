@@ -1,6 +1,7 @@
 import copy
 import datetime as dt
 import io
+import json
 import re
 import unicodedata
 import openpyxl
@@ -162,8 +163,12 @@ def add_days_iso(iso_str, days):
     return d.strftime("%Y-%m-%d")
 
 
+def format_week_date_range(monday_iso):
+    return f"{format_short_date(monday_iso)} — {format_short_date(add_days_iso(monday_iso, 6))}"
+
+
 def week_label_from_monday(monday_iso):
-    return f"Semana {format_short_date(monday_iso)} — {format_short_date(add_days_iso(monday_iso, 6))}"
+    return f"Semana {format_week_date_range(monday_iso)}"
 
 
 def parse_raw_cell(raw_val, locked=False):
@@ -201,6 +206,14 @@ def parse_raw_cell(raw_val, locked=False):
         return {"raw": clean, "base": base, "is_at": is_at, "is_cap": is_cap, "start_min": start_min, "end_min": end_min, "locked": locked}
 
     return {"raw": clean, "base": clean, "is_at": is_at, "is_cap": is_cap, "start_min": None, "end_min": None, "locked": locked}
+
+
+def normalize_shift_code(code_str):
+    m = re.search(r"(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})", str(code_str or "").strip())
+    if not m:
+        return None
+    sh, sm, eh, em = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+    return f"{sh:02d}:{sm:02d}-{eh:02d}:{em:02d}"
 
 
 def format_cell_raw(base, is_at=False, is_cap=False):
@@ -379,6 +392,12 @@ def init_state():
         st.session_state["scheduled_novedades"] = []
     if "rerotate_offset" not in st.session_state:
         st.session_state["rerotate_offset"] = 0
+    if "preview_seed_offset" not in st.session_state:
+        st.session_state["preview_seed_offset"] = 0
+    if "preview_draft_week" not in st.session_state:
+        st.session_state["preview_draft_week"] = None
+    if "preview_draft_sig" not in st.session_state:
+        st.session_state["preview_draft_sig"] = None
 
 
 def sync_widget_state_to_configs():
@@ -393,6 +412,19 @@ def sync_widget_state_to_configs():
     ]:
         if wk in st.session_state:
             rules[rk] = st.session_state[wk]
+
+    role_configs = st.session_state["role_configs"]
+    for cargo, cfg in role_configs.items():
+        for s in get_all_cargo_shifts(cfg):
+            k_wk = f"tgt_wk_{cargo}_{s}"
+            k_sat = f"tgt_sat_{cargo}_{s}"
+            k_sun = f"tgt_sun_{cargo}_{s}"
+            if k_wk in st.session_state:
+                cfg["daily_targets"][s] = int(st.session_state[k_wk])
+            if k_sat in st.session_state:
+                cfg.setdefault("saturday_targets", {})[s] = int(st.session_state[k_sat])
+            if k_sun in st.session_state:
+                cfg.setdefault("sunday_targets", {})[s] = int(st.session_state[k_sun])
 
 
 def apply_novedad_to_week(week, nov):
@@ -576,12 +608,14 @@ def get_daily_tech_coverage(week, employees, role_configs):
     tech_shifts = get_all_cargo_shifts(tech_cfg)
     active_emps = [e for e in employees if e["activo"]]
     results = []
+
     for d in range(7):
         for s in tech_shifts:
             target = get_shift_target_for_day(tech_cfg, s, d)
             no_at = is_tech_no_at(s)
             direct_members = []
             at_members = []
+
             for e in active_emps:
                 cell = (week["assignments"].get(e["id"], [{}] * 7))[d]
                 if not covers_shift_window(cell, s):
@@ -594,6 +628,7 @@ def get_daily_tech_coverage(week, employees, role_configs):
                         "cargo": e["cargo"],
                         "raw": cell.get("raw", ""),
                         "is_at": False,
+                        "is_cap": cell.get("is_cap", False),
                     })
                 elif not no_at and cell.get("is_at"):
                     at_members.append({
@@ -603,7 +638,9 @@ def get_daily_tech_coverage(week, employees, role_configs):
                         "cargo": e["cargo"],
                         "raw": cell.get("raw", ""),
                         "is_at": True,
+                        "is_cap": cell.get("is_cap", False),
                     })
+
             total_assigned = len(direct_members) + len(at_members)
             results.append({
                 "day_idx": d,
@@ -856,16 +893,12 @@ def generate_next_week(
                 sim[d] = parse_raw_cell(s)
             return True
 
-        if strict_avoid and avoid and any(s != avoid for s in pool):
-            cand_pool = [s for s in pool if s != avoid]
-        else:
-            cand_pool = pool
-
+        cand_pool = [s for s in pool if s != avoid] if (strict_avoid and avoid and any(s != avoid for s in pool)) else pool
         valid_strict = [s for s in cand_pool if fits_all(s)]
         valid_any = valid_strict if valid_strict else [s for s in pool if fits_all(s)]
         base_valid = valid_any if valid_any else cand_pool
-        rot_shift = tie_breaker_offset % len(base_valid) if tie_breaker_offset > 0 else 0
-        valid = base_valid[rot_shift:] + base_valid[:rot_shift] if rot_shift else base_valid
+        rot_s = tie_breaker_offset % len(base_valid) if tie_breaker_offset > 0 else 0
+        valid = base_valid if rot_s == 0 else (base_valid[rot_s:] + base_valid[:rot_s])
 
         best_s = valid[0]
         best_score = -10**9
@@ -902,7 +935,7 @@ def generate_next_week(
         if not base_cargo_emps:
             continue
         emp_rot = seed_offset % len(base_cargo_emps)
-        cargo_emps = base_cargo_emps[emp_rot:] + base_cargo_emps[:emp_rot] if emp_rot else base_cargo_emps
+        cargo_emps = base_cargo_emps if emp_rot == 0 else (base_cargo_emps[emp_rot:] + base_cargo_emps[:emp_rot])
 
         min_w = rules["min_work_between_off"]
         max_c = rules["max_consecutive"]
@@ -916,10 +949,12 @@ def generate_next_week(
                 continue
 
             prev_sun = prev_row[6] if (prev_row and len(prev_row) == 7) else parse_raw_cell("")
-            if prev_row:
-                last_work = next((c["base"] for c in reversed(prev_row) if is_work_shift(c)), pool[(emp_idx + seed_offset) % len(pool)])
-            else:
-                last_work = next((c["base"] for c in base_row if is_work_shift(c)), pool[(emp_idx + seed_offset) % len(pool)])
+            last_work_cell = (
+                next((c for c in reversed(prev_row) if is_work_shift(c)), None)
+                if prev_row
+                else next((c for c in base_row if is_work_shift(c)), None)
+            )
+            last_work = last_work_cell["base"] if last_work_cell else pool[(emp_idx + seed_offset) % len(pool)]
 
             streak = 0
             if prev_row:
@@ -930,26 +965,29 @@ def generate_next_week(
                         break
 
             locked_off_idx = next((i for i, c in enumerate(row) if c.get("locked") and c.get("base") == "L"), None)
+            off_day = None
             if locked_off_idx is not None:
                 off_day = locked_off_idx
             else:
                 has_abs_l = any(is_absence_state(c) or c.get("base") == "L" for c in row)
-                if has_abs_l:
-                    off_day = None
-                else:
+                if not has_abs_l:
                     existing_off = next((i for i, c in enumerate(base_row) if c.get("base") == "L"), -1) if is_same_week_baseline else -1
                     if is_same_week_baseline and existing_off != -1 and seed_offset == 0:
                         off_day = existing_off
                     else:
-                        if prev_row:
-                            ideal = max(0, min(6, max_c - 1 - streak))
-                            min_allowed = max(0, min_w - streak)
-                            max_allowed = min(6, max_c - streak)
-                        else:
-                            ideal = (existing_off + seed_offset) % 7 if existing_off != -1 else (emp_idx + seed_offset) % 7
-                            min_allowed = 0
-                            max_allowed = 6
-
+                        base_ideal = (
+                            max(0, min(6, max_c - 1 - streak))
+                            if prev_row
+                            else ((existing_off + seed_offset) % 7 if existing_off != -1 else (emp_idx + seed_offset) % 7)
+                        )
+                        min_allowed = max(0, min_w - streak) if prev_row else 0
+                        max_allowed = min(6, max_c - streak) if prev_row else 6
+                        allowed_span = max(1, max_allowed - min_allowed + 1)
+                        ideal = (
+                            min_allowed + ((base_ideal - min_allowed + seed_offset) % allowed_span)
+                            if (prev_row and seed_offset > 0)
+                            else base_ideal
+                        )
                         candidates = [d for d in range(min_allowed, max_allowed + 1) if not row[d].get("locked") and not is_absence_state(row[d])]
                         if not candidates:
                             candidates = [d for d in range(7) if not row[d].get("locked") and not is_absence_state(row[d])]
@@ -972,8 +1010,6 @@ def generate_next_week(
                                 if sc > best_off_score:
                                     best_off_score = sc
                                     off_day = cd
-                        else:
-                            off_day = None
 
             if off_day is not None and not row[off_day].get("locked"):
                 row[off_day] = parse_raw_cell("L")
@@ -984,10 +1020,10 @@ def generate_next_week(
                 if pre_days:
                     if is_same_week_baseline:
                         pref_start = get_rotated_shift(cargo, last_work, seed_offset) if seed_offset > 0 else (last_work if last_work in pool else pool[0])
-                        pre_shift = pick_best_shift(cargo, pre_days, None, row, pref_start, tie_breaker_offset=seed_offset)
+                        pre_shift = pick_best_shift(cargo, pre_days, None, row, pref_start, None, False, seed_offset)
                     elif prev_sun.get("base") == "L":
-                        rot_mon = get_rotated_shift(cargo, last_work, 1 + (seed_offset % max(1, len(pool) - 1)))
-                        pre_shift = pick_best_shift(cargo, pre_days, prev_row, row, rot_mon, avoid=last_work, strict_avoid=True, tie_breaker_offset=seed_offset)
+                        rot_on_mon = get_rotated_shift(cargo, last_work, 1 + (seed_offset % max(1, len(pool) - 1)))
+                        pre_shift = pick_best_shift(cargo, pre_days, prev_row, row, rot_on_mon, last_work, True, seed_offset)
                     else:
                         sunday_work_shift = prev_sun["base"] if is_work_shift(prev_sun) else last_work
                         sunday_net_need = sum(
@@ -1001,7 +1037,8 @@ def generate_next_week(
                         ):
                             pre_shift = sunday_work_shift
                         else:
-                            pre_shift = pick_best_shift(cargo, pre_days, prev_row, row, sunday_work_shift, tie_breaker_offset=seed_offset)
+                            pre_shift = pick_best_shift(cargo, pre_days, prev_row, row, sunday_work_shift, None, False, seed_offset)
+
                     for d in pre_days:
                         row[d] = parse_raw_cell(pre_shift)
 
@@ -1010,13 +1047,22 @@ def generate_next_week(
                     base_before_l = pre_shift if pre_days else last_work
                     rot_step = 1 + (seed_offset % max(1, len(pool) - 1))
                     rot_candidate = get_rotated_shift(cargo, base_before_l, rot_step)
-                    post_shift = pick_best_shift(cargo, post_days, prev_row, row, rot_candidate, avoid=base_before_l, strict_avoid=True, tie_breaker_offset=seed_offset)
+                    post_shift = pick_best_shift(cargo, post_days, prev_row, row, rot_candidate, base_before_l, True, seed_offset)
                     for d in post_days:
                         row[d] = parse_raw_cell(post_shift)
             else:
                 work_days = [d for d in range(7) if not row[d].get("locked") and not is_absence_state(row[d]) and row[d].get("base") != "L"]
                 rot_candidate = get_rotated_shift(cargo, last_work, 1 + (seed_offset % max(1, len(pool))))
-                chosen = pick_best_shift(cargo, work_days, prev_row, row, rot_candidate, avoid=(last_work if rules["rotate_after_off"] else None), strict_avoid=rules["rotate_after_off"], tie_breaker_offset=seed_offset)
+                chosen = pick_best_shift(
+                    cargo,
+                    work_days,
+                    prev_row,
+                    row,
+                    rot_candidate,
+                    last_work if rules["rotate_after_off"] else None,
+                    bool(rules["rotate_after_off"]),
+                    seed_offset,
+                )
                 for d in work_days:
                     row[d] = parse_raw_cell(chosen)
 
@@ -1044,8 +1090,12 @@ def generate_next_week(
                                 and count_shift(cargo, end_d + 1, o_shift) > get_shift_target_for_day(cfg, o_shift, end_d + 1)
                             ):
                                 end_d += 1
-                            emp_prev_row = None if is_same_week_baseline else base_week["assignments"].get(emp["id"])
-                            if end_d > d and check_range_fit(r, emp_prev_row, d, end_d, u_shift, rules) and preserves_rotation_across_off(r, emp_prev_row, d, end_d, u_shift, rules):
+                            emp_prev_row = None if is_same_week_baseline else base_week["assignments"].get(emp["id"], [parse_raw_cell("") for _ in range(7)])
+                            if (
+                                end_d > d
+                                and check_range_fit(r, emp_prev_row, d, end_d, u_shift, rules)
+                                and preserves_rotation_across_off(r, emp_prev_row, d, end_d, u_shift, rules)
+                            ):
                                 for dd in range(d, end_d + 1):
                                     r[dd] = parse_raw_cell(u_shift)
                                 moved = True
@@ -1058,8 +1108,11 @@ def generate_next_week(
                                 r = new_week["assignments"][emp["id"]]
                                 if r[d].get("locked") or r[d].get("base") != o_shift:
                                     continue
-                                emp_prev_row = None if is_same_week_baseline else base_week["assignments"].get(emp["id"])
-                                if check_range_fit(r, emp_prev_row, d, d, u_shift, rules) and preserves_rotation_across_off(r, emp_prev_row, d, d, u_shift, rules):
+                                emp_prev_row = None if is_same_week_baseline else base_week["assignments"].get(emp["id"], [parse_raw_cell("") for _ in range(7)])
+                                if (
+                                    check_range_fit(r, emp_prev_row, d, d, u_shift, rules)
+                                    and preserves_rotation_across_off(r, emp_prev_row, d, d, u_shift, rules)
+                                ):
                                     r[d] = parse_raw_cell(u_shift)
                                     moved = True
                                     break
@@ -1074,28 +1127,31 @@ def generate_next_week(
     return new_week, at_assigned
 
 
-def trigger_rerotate_active_week():
+def trigger_rerotate_active_week(employees, role_configs, rules):
     weeks = st.session_state["weeks"]
     if not weeks:
         return None, 0
-    idx_a = min(st.session_state["active_week_idx"], len(weeks) - 1)
-    cur_w = weeks[idx_a]
-    prev_w = weeks[idx_a - 1] if idx_a > 0 else None
-    next_offset = st.session_state.get("rerotate_offset", 0) + 1
+    active_idx = min(st.session_state["active_week_idx"], len(weeks) - 1)
+    cur_w = weeks[active_idx]
+    prev_w = weeks[active_idx - 1] if active_idx > 0 else None
+    is_first_week = prev_w is None
+    ref_w = prev_w if prev_w is not None else cur_w
+    next_offset = int(st.session_state.get("rerotate_offset", 0)) + 1
     st.session_state["rerotate_offset"] = next_offset
+
     reg, at_c = generate_next_week(
-        prev_w or cur_w,
-        st.session_state["employees"],
-        st.session_state["role_configs"],
-        st.session_state["rules"],
+        ref_w,
+        employees,
+        role_configs,
+        rules,
         override_start_iso=cur_w["start_date"],
         existing_target=cur_w,
         scheduled_novedades=st.session_state["scheduled_novedades"],
-        is_same_week_baseline=(prev_w is None),
+        is_same_week_baseline=is_first_week,
         seed_offset=next_offset,
     )
-    st.session_state["weeks"][idx_a] = reg
-    return cur_w["label"], at_c
+    st.session_state["weeks"][active_idx] = reg
+    return reg, at_c
 
 
 def analyze_rotation(curr_week, prev_week, employees, role_configs, rules):
@@ -1230,16 +1286,16 @@ def export_week_to_excel_bytes(week, employees):
         for i in range(7)
     ]
     ws.append(headers)
-    thin = Side(border_style="thin", color="475569")
+    thin = Side(border_style="thin", color="CBD5E1")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
     for col_idx in range(1, 11):
         c = ws.cell(row=1, column=col_idx)
-        c.font = Font(bold=True, color="0F172A", size=11)
+        c.font = Font(bold=True, color="0F172A", size=10)
         c.fill = PatternFill("solid", fgColor="E2E8F0")
         c.alignment = Alignment(horizontal="center", vertical="center")
         c.border = border
-    ws.row_dimensions[1].height = 26
+    ws.row_dimensions[1].height = 24
 
     sorted_emps = sorted(
         [e for e in employees if e["activo"]],
@@ -1259,9 +1315,9 @@ def export_week_to_excel_bytes(week, employees):
                 sc = row_cells[c_idx - 4]
                 bg, fg, _ = get_cell_colors(sc)
                 cell.fill = PatternFill("solid", fgColor=bg.lstrip("#"))
-                cell.font = Font(size=11, bold=True, color=fg.lstrip("#"))
+                cell.font = Font(size=10, bold=True, color=fg.lstrip("#"))
                 cell.alignment = Alignment(horizontal="center", vertical="center")
-        ws.row_dimensions[r_idx].height = 24
+        ws.row_dimensions[r_idx].height = 22
 
     widths = [10, 24, 26] + [18] * 7
     for idx, w in enumerate(widths, start=1):
@@ -1341,6 +1397,10 @@ def render_novedad_form(key_prefix, employees, default_start_str, allow_rerotate
         [e for e in employees if e["activo"]],
         key=lambda e: (CARGOS_ORDEN.index(e["cargo"]) if e["cargo"] in CARGOS_ORDEN else 99, e["nombre"]),
     )
+    if not emps_sorted:
+        st.info("No hay colaboradores activos disponibles para registrar novedades.")
+        return
+
     emp_labels = [f"{e['codigo']} — {e['nombre']} ({e['cargo']})" for e in emps_sorted]
     default_monday = dt.date.fromisoformat(default_start_str)
 
@@ -1384,7 +1444,7 @@ def render_novedad_form(key_prefix, employees, default_start_str, allow_rerotate
         key=f"{key_prefix}_apply",
     )
     rerotate = (
-        o3.checkbox("Re-rotar semana actual", value=False, disabled=not active_week_exists, key=f"{key_prefix}_rerot")
+        o3.checkbox("Re-rotar semana activa", value=False, disabled=not active_week_exists, key=f"{key_prefix}_rerot")
         if allow_rerotate
         else False
     )
@@ -1414,7 +1474,11 @@ def render_novedad_form(key_prefix, employees, default_start_str, allow_rerotate
             st.session_state["weeks"] = new_weeks
 
         if rerotate and st.session_state["weeks"]:
-            trigger_rerotate_active_week()
+            trigger_rerotate_active_week(
+                st.session_state["employees"],
+                st.session_state["role_configs"],
+                st.session_state["rules"],
+            )
 
         st.success(f"Novedad {sel_tipo} registrada para {emp['nombre']} ({s_iso} al {e_iso}). Días aplicados: {applied_total}.")
         st.rerun()
@@ -1443,6 +1507,63 @@ def render_no_active_week_reminder(section_title):
     st.markdown(card_html, unsafe_allow_html=True)
 
 
+def render_inline_week_cell_editor(key_prefix, target_week, employees, role_configs, is_preview_draft=False):
+    emps_sorted = sorted(
+        [e for e in employees if e["activo"]],
+        key=lambda e: (CARGOS_ORDEN.index(e["cargo"]) if e["cargo"] in CARGOS_ORDEN else 99, e["nombre"]),
+    )
+    if not emps_sorted:
+        st.info("No hay colaboradores activos.")
+        return
+    e_labels = [f"{e['codigo']} — {e['nombre']} ({e['cargo']})" for e in emps_sorted]
+    ed1, ed2, ed3 = st.columns([2.2, 1.1, 1.1])
+    sel_e = ed1.selectbox("Colaborador", e_labels, key=f"{key_prefix}_emp")
+    d_from = ed2.selectbox("Desde día", DAYS_ES, index=0, key=f"{key_prefix}_d1")
+    d_to = ed3.selectbox("Hasta día", DAYS_ES, index=0, key=f"{key_prefix}_d2")
+
+    emp_obj = emps_sorted[e_labels.index(sel_e)]
+    d_idx_1 = DAYS_ES.index(d_from)
+    d_idx_2 = max(d_idx_1, DAYS_ES.index(d_to))
+    cur_cell = target_week["assignments"].get(emp_obj["id"], [parse_raw_cell("") for _ in range(7)])[d_idx_1]
+
+    role_pool = role_configs.get(emp_obj["cargo"], {}).get("rotation_pool", [])
+    preset_opts = ["(Escribir manual)"] + role_pool + ["L", "VACACIONES", "SUSPEND", "INCAPACIDAD", "PERMISO"]
+    ed4, ed5, ed6, ed7 = st.columns([1.8, 1.8, 1.0, 1.0])
+    sel_preset = ed4.selectbox("Turno o novedad rápida", preset_opts, key=f"{key_prefix}_preset")
+    default_val = cur_cell.get("raw", "") if sel_preset == "(Escribir manual)" else sel_preset
+    manual_val = ed5.text_input("Valor de celda", value=default_val, key=f"{key_prefix}_val_{emp_obj['id']}_{d_idx_1}_{sel_preset}")
+    chk_at = ed6.checkbox("AT", value=cur_cell.get("is_at", False), key=f"{key_prefix}_at")
+    chk_lock = ed7.checkbox("Fijar al rotar", value=cur_cell.get("locked", False), key=f"{key_prefix}_lock")
+    save_future_ed = st.checkbox("Guardar también en Novedades programadas si es novedad", value=True, key=f"{key_prefix}_save_nov")
+
+    if st.button("Guardar cambio en rango seleccionado", type="primary", key=f"{key_prefix}_save_btn"):
+        base_clean = manual_val.strip()
+        if base_clean.upper() in SPECIAL_STATES:
+            final_raw = base_clean.upper()
+            final_lock = True
+        else:
+            parsed_m = parse_raw_cell(base_clean)
+            final_raw = format_cell_raw(parsed_m["base"], is_at=chk_at, is_cap=parsed_m["is_cap"])
+            final_lock = chk_lock
+
+        row = target_week["assignments"].setdefault(emp_obj["id"], [parse_raw_cell("") for _ in range(7)])
+        for dd in range(d_idx_1, d_idx_2 + 1):
+            row[dd] = parse_raw_cell(final_raw, locked=final_lock)
+
+        if save_future_ed and base_clean.upper() in SPECIAL_STATES:
+            st.session_state["scheduled_novedades"].append({
+                "id": f"nov_{emp_obj['id']}_{dt.datetime.now().timestamp()}",
+                "emp_id": emp_obj["id"],
+                "tipo": base_clean.upper(),
+                "start_date": add_days_iso(target_week["start_date"], d_idx_1),
+                "end_date": add_days_iso(target_week["start_date"], d_idx_2),
+            })
+
+        msg_scope = "en la propuesta antes de guardar" if is_preview_draft else "en la semana activa"
+        st.success(f"Actualizado {emp_obj['nombre']} de {DAYS_ES[d_idx_1]} a {DAYS_ES[d_idx_2]} ({msg_scope}).")
+        st.rerun()
+
+
 # ----------------- INICIO DE APP -----------------
 init_state()
 sync_widget_state_to_configs()
@@ -1467,7 +1588,7 @@ else:
     active_week = None
     prev_week = None
 
-top1, top2, top3, top4, top5 = st.columns([2.8, 1.0, 1.5, 1.8, 1.6])
+top1, top2, top3, top4 = st.columns([3.2, 1.0, 1.8, 1.8])
 with top1:
     if has_weeks:
         week_labels = [f"{i + 1}. {w['label']}" for i, w in enumerate(weeks)]
@@ -1485,17 +1606,11 @@ with top2:
     if st.button("Eliminar", disabled=not has_weeks, use_container_width=True):
         st.session_state["weeks"].pop(active_idx)
         st.session_state["active_week_idx"] = max(0, active_idx - 1)
+        st.session_state["preview_draft_week"] = None
+        st.session_state["preview_draft_sig"] = None
         st.rerun()
 
 with top3:
-    st.write("")
-    st.write("")
-    if st.button("Re-rotar semana actual", key="top_rerotate_btn", disabled=not has_weeks, use_container_width=True):
-        lbl_r, at_r = trigger_rerotate_active_week()
-        st.success(f"Semana '{lbl_r}' re-rotada correctamente ({at_r} cobertura(s) AT).")
-        st.rerun()
-
-with top4:
     st.write("")
     st.write("")
     if st.button("Generar Siguiente Semana", type="primary", disabled=not has_weeks, use_container_width=True):
@@ -1508,10 +1623,13 @@ with top4:
         )
         st.session_state["weeks"].append(nw)
         st.session_state["active_week_idx"] = len(st.session_state["weeks"]) - 1
+        st.session_state["preview_draft_week"] = None
+        st.session_state["preview_draft_sig"] = None
+        st.session_state["preview_seed_offset"] = 0
         st.success(f"Semana '{nw['label']}' generada ({at_c} turno(s) AT asignados).")
         st.rerun()
 
-with top5:
+with top4:
     st.write("")
     st.write("")
     if has_weeks:
@@ -1532,7 +1650,7 @@ if has_weeks:
     active_emps_cnt = sum(1 for e in employees if e["activo"])
     novedades_cnt = sum(
         1 for e in employees if e["activo"]
-        and any(c.get("base") in ("VACACIONES", "SUSPEND", "INCAPACIDAD", "PERMISO") for c in active_week["assignments"].get(e["id"], []))
+        and any(is_absence_state(c) for c in active_week["assignments"].get(e["id"], []))
     )
     at_cnt = sum(sum(1 for c in active_week["assignments"].get(e["id"], []) if c.get("is_at")) for e in employees if e["activo"])
     rest_alerts_cnt = sum(1 for i in issues if i["type"] != "UNCOVERED_TECH")
@@ -1540,7 +1658,7 @@ if has_weeks:
     uncovered_total = sum(u["missing"] for u in uncovered)
 
     m1, m2, m3, m4, m5, m6 = st.columns(6)
-    m1.metric("Activos", f"{active_emps_cnt} / {len(employees)}")
+    m1.metric("Activos", active_emps_cnt)
     m2.metric("Novedades", novedades_cnt)
     m3.metric("Turnos AT", at_cnt)
     m4.metric("Descansos 12h/24h", "OK" if rest_alerts_cnt == 0 else f"{rest_alerts_cnt} alertas")
@@ -1563,45 +1681,47 @@ with tab1:
     if not has_weeks:
         render_no_active_week_reminder("Horario Semanal")
     else:
-        f1, f2, f3, f4, f5, f6 = st.columns([1.9, 1.4, 1.1, 1.2, 1.3, 1.3])
+        f1, f2, f3, f4, f5 = st.columns([2, 1.5, 1.2, 1.4, 1.4])
         search_q = f1.text_input("Buscar código o nombre", placeholder="Ej. 671 o Guardao")
         cargo_sel = f2.selectbox("Filtrar por cargo", ["TODOS"] + CARGOS_ORDEN, key="t1_cargo")
         only_alerts = f3.checkbox(f"Solo alertas ({len(issues)})", key="t1_alerts")
         show_prev_ref = f4.checkbox("Ver ref. semana anterior", value=True, key="t1_prev")
-        if f5.button("Auto-cubrir AT", use_container_width=True, key="t1_auto_at_top"):
+        if f5.button("Auto-cubrir Técnicos (AT)", use_container_width=True):
             nw, cnt = auto_assign_at(active_week, employees, role_configs, rules, prev_week)
             st.session_state["weeks"][active_idx] = nw
             st.success(f"Se asignaron {cnt} turno(s) AT automáticamente.")
             st.rerun()
-        if f6.button("Re-rotar semana actual", type="primary", use_container_width=True, key="t1_rerotate_top"):
-            lbl_r, at_r = trigger_rerotate_active_week()
-            st.success(f"Semana '{lbl_r}' re-rotada ({at_r} cobertura(s) AT).")
-            st.rerun()
 
         legend_items = [
-            ("#70AD47", "#558733", "03:00"),
-            ("#B6C3B4", "#92A390", "06:00 / 07:00"),
-            ("#D9D9D9", "#AEAEAE", "08:00"),
-            ("#CC9900", "#9E7600", "11:00"),
-            ("#C850B0", "#9E3889", "13:00 / Apoyo AT"),
-            ("#8E9FB4", "#6C7F96", "19:00"),
-            ("#25A9D8", "#1885AD", "20:00"),
-            ("#949494", "#6E6E6E", "22:00"),
-            ("#B6BE5F", "#8E9640", "23:00"),
-            ("#C6B39A", "#A89378", "L (Libre)"),
+            ("#70AD47", "#800000", "#558733", "Mañana (03:00)"),
+            ("#B6C3B4", "#800000", "#92A390", "Mañana (06:00)"),
+            ("#CC9900", "#800000", "#9E7600", "Tarde (11:00)"),
+            ("#C850B0", "#000000", "#9E3889", "Apoyo AT / 13:00"),
+            ("#8E9FB4", "#800000", "#6C7F96", "Noche (19:00)"),
+            ("#25A9D8", "#800000", "#1885AD", "Líder / 20:00"),
+            ("#B6BE5F", "#800000", "#8E9640", "Trasnoche (23:00)"),
+            ("#C6B39A", "#800000", "#A89378", "L (Libre)"),
         ]
-        legend_html = "<div style='display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin:4px 0 10px 0;font-size:12px;color:#334155;'>"
-        for l_bg, l_brd, l_txt in legend_items:
-            legend_html += (
-                f"<span style='display:inline-flex;align-items:center;gap:6px;'>"
-                f"<span style='display:inline-block;width:14px;height:14px;border-radius:3px;background:{l_bg};border:1px solid {l_brd};'></span>"
-                f"<span>{l_txt}</span></span>"
-            )
-        legend_html += "</div>"
-        st.markdown(legend_html, unsafe_allow_html=True)
+        legend_pills = "".join(
+            f"<span style='display:inline-flex;align-items:center;gap:5px;font-size:11px;color:#475569;margin-right:12px;'>"
+            f"<span style='display:inline-block;width:13px;height:13px;border-radius:3px;background:{bg};border:1px solid {brd};'></span>"
+            f"{lbl}</span>"
+            for bg, _fg, brd, lbl in legend_items
+        )
+        st.markdown(f"<div style='margin:4px 0 8px 0;display:flex;flex-wrap:wrap;align-items:center;'>{legend_pills}</div>", unsafe_allow_html=True)
 
         start_dt = dt.date.fromisoformat(active_week["start_date"])
-        day_headers = [f"{SHORT_DAYS_ES[i]} {(start_dt + dt.timedelta(days=i)).day}-{MONTHS_ES[(start_dt + dt.timedelta(days=i)).month - 1]}" for i in range(7)]
+        day_headers = []
+        for i in range(7):
+            d_obj = start_dt + dt.timedelta(days=i)
+            at_day_cnt = sum(
+                1 for e in employees
+                if e["activo"] and (active_week["assignments"].get(e["id"], [{}] * 7))[i].get("is_at")
+            )
+            at_sub = f"<div style='font-size:10px;color:#9E3889;font-weight:700;'>{at_day_cnt} AT</div>" if at_day_cnt > 0 else ""
+            day_headers.append(
+                f"<div>{SHORT_DAYS_ES[i]} {d_obj.day}-{MONTHS_ES[d_obj.month - 1]}</div>{at_sub}"
+            )
 
         issue_emp_ids = {i["emp_id"] for i in issues if i["emp_id"]}
         filtered_emps = sorted(
@@ -1616,28 +1736,22 @@ with tab1:
         if only_alerts:
             filtered_emps = [e for e in filtered_emps if e["id"] in issue_emp_ids]
 
-        active_emps_all = [e for e in employees if e["activo"]]
-        th_style = "padding:10px 11px;border:1px solid #94A3B8;background:#F1F5F9;color:#0F172A;font-size:12px;font-weight:700;text-align:left;white-space:nowrap;"
+        th_style = "padding:10px 10px;border:1px solid #CBD5E1;background:#F1F5F9;color:#0F172A;font-size:12px;text-align:left;white-space:nowrap;"
+        th_day_style = "padding:10px 12px;border:1px solid #CBD5E1;background:#F1F5F9;color:#0F172A;font-size:12px;text-align:center;min-width:146px;white-space:nowrap;"
         th_cells = f"<th style='{th_style}'>CODIGO</th><th style='{th_style}'>NOMBRE</th><th style='{th_style}'>CARGO</th>"
         if show_prev_ref:
             th_cells += f"<th style='{th_style}'>SEM ANT (Dom / L)</th><th style='{th_style}'>DÍAS P/ L Y ROT.</th>"
-        for d_idx, dh in enumerate(day_headers):
-            at_day_cnt = sum(1 for e in active_emps_all if (active_week["assignments"].get(e["id"], [{}] * 7))[d_idx].get("is_at"))
-            th_cells += (
-                f"<th style='{th_style}text-align:center;min-width:146px;'>"
-                f"<div>{dh}</div>"
-                f"<div style='font-size:11px;color:#86198F;font-weight:700;'>{at_day_cnt} AT</div>"
-                f"</th>"
-            )
+        for dh in day_headers:
+            th_cells += f"<th style='{th_day_style}'>{dh}</th>"
 
         rows_html_list = []
         for e in filtered_emps:
             r = active_week["assignments"].get(e["id"], [parse_raw_cell("") for _ in range(7)])
-            at_badge = " <span style='color:#9D174D;font-size:10px;font-weight:700;'>AT</span>" if e["puede_at"] else ""
+            at_badge = " <span style='color:#9E3889;font-size:10px;font-weight:700;'>· AT</span>" if e["puede_at"] else ""
             tr_cells = (
-                f"<td style='padding:8px 10px;border:1px solid #CBD5E1;font-family:monospace;font-size:13px;font-weight:700;white-space:nowrap;'>{e['codigo']}</td>"
-                f"<td style='padding:8px 10px;border:1px solid #CBD5E1;font-size:13px;font-weight:600;white-space:nowrap;'>{e['nombre']}{at_badge}</td>"
-                f"<td style='padding:8px 10px;border:1px solid #CBD5E1;font-size:12px;white-space:nowrap;color:#334155;'>{e['cargo']}</td>"
+                f"<td style='padding:8px 10px;border:1px solid #CBD5E1;font-family:monospace;white-space:nowrap;font-weight:600;'>{e['codigo']}</td>"
+                f"<td style='padding:8px 10px;border:1px solid #CBD5E1;font-weight:600;white-space:nowrap;'>{e['nombre']}{at_badge}</td>"
+                f"<td style='padding:8px 10px;border:1px solid #CBD5E1;white-space:nowrap;color:#475569;'>{e['cargo']}</td>"
             )
             if show_prev_ref:
                 sem_ant, rot_txt = get_prev_ref_summary(e["id"], active_week, prev_week, r, rules)
@@ -1650,19 +1764,18 @@ with tab1:
                 bg, fg, _ = get_cell_colors(c)
                 lock_icon = " 🔒" if c.get("locked") else ""
                 has_err = any(i["emp_id"] == e["id"] and i["day_idx"] == d_idx for i in issues)
-                cell_border = "2px solid #DC2626" if has_err else "1px solid #64748B"
+                cell_border = "2px solid #DC2626" if has_err else "1px solid #CBD5E1"
                 txt = c.get("raw") or "—"
                 tr_cells += (
                     f"<td style='min-width:146px;height:42px;padding:9px 12px;border:{cell_border};"
-                    f"background:{bg};color:{fg};font-family:ui-monospace,SFMono-Regular,Menlo,monospace;"
-                    f"font-weight:800;font-size:14px;text-align:center;letter-spacing:-0.02em;white-space:nowrap;'>"
-                    f"{txt}{lock_icon}</td>"
+                    f"background:{bg};color:{fg};font-weight:800;font-size:14px;text-align:center;"
+                    f"font-family:system-ui,-apple-system,sans-serif;white-space:nowrap;'>{txt}{lock_icon}</td>"
                 )
             rows_html_list.append(f"<tr>{tr_cells}</tr>")
 
         table_html = (
-            "<div style='overflow-x:auto;border:1px solid #94A3B8;border-radius:8px;background:#FFFFFF;'>"
-            "<table style='border-collapse:collapse;width:100%;font-family:system-ui,-apple-system,sans-serif;font-size:13px;'>"
+            "<div style='overflow-x:auto;border:1px solid #CBD5E1;border-radius:8px;background:#FFFFFF;'>"
+            "<table style='border-collapse:collapse;width:100%;font-family:system-ui,-apple-system,sans-serif;font-size:12px;'>"
             f"<thead><tr>{th_cells}</tr></thead>"
             f"<tbody>{''.join(rows_html_list)}</tbody>"
             "</table></div>"
@@ -1670,64 +1783,18 @@ with tab1:
         st.markdown(table_html, unsafe_allow_html=True)
 
         b1, b2 = st.columns([3, 1.4])
-        b1.caption(f"Mostrando {len(filtered_emps)} de {active_emps_cnt} colaboradores activos ({len(employees) - active_emps_cnt} inactivos en directorio).")
-        if b2.button("Re-rotar semana actual", key="t1_rerotate_bottom", use_container_width=True):
-            lbl_r, at_r = trigger_rerotate_active_week()
-            st.success(f"Semana '{lbl_r}' re-rotada aplicando tus reglas y Meta diaria ({at_r} turno(s) AT asignados).")
-            st.rerun()
+        b1.caption(f"Mostrando {len(filtered_emps)} de {sum(1 for e in employees if e['activo'])} colaboradores activos.")
+        if b2.button("Re-rotar semana actual", key="t1_rerotate_btn", use_container_width=True):
+            reg, at_c = trigger_rerotate_active_week(employees, role_configs, rules)
+            if reg:
+                st.success(f"Semana '{reg['label']}' re-rotada aplicando tus reglas y Meta diaria ({at_c} turno(s) AT asignados).")
+                st.rerun()
 
         with st.expander("➕ Agregar novedad por rango (Vacaciones, Suspensión, Libre, Incapacidad, Permiso)"):
             render_novedad_form("t1_nov", employees, active_week["start_date"], allow_rerotate=True, active_week_exists=True)
 
         with st.expander("✏️ Editar turno o novedad puntual de un colaborador (uno o varios días)"):
-            emps_sorted = sorted(
-                [e for e in employees if e["activo"]],
-                key=lambda e: (CARGOS_ORDEN.index(e["cargo"]) if e["cargo"] in CARGOS_ORDEN else 99, e["nombre"]),
-            )
-            e_labels = [f"{e['codigo']} — {e['nombre']} ({e['cargo']})" for e in emps_sorted]
-            ed1, ed2, ed3 = st.columns([2.2, 1.1, 1.1])
-            sel_e = ed1.selectbox("Colaborador", e_labels, key="ed_emp")
-            d_from = ed2.selectbox("Desde día", DAYS_ES, index=0, key="ed_d1")
-            d_to = ed3.selectbox("Hasta día", DAYS_ES, index=0, key="ed_d2")
-
-            emp_obj = emps_sorted[e_labels.index(sel_e)]
-            d_idx_1 = DAYS_ES.index(d_from)
-            d_idx_2 = max(d_idx_1, DAYS_ES.index(d_to))
-            cur_cell = active_week["assignments"].get(emp_obj["id"], [parse_raw_cell("") for _ in range(7)])[d_idx_1]
-
-            role_pool = get_all_cargo_shifts(role_configs.get(emp_obj["cargo"], {}))
-            preset_opts = ["(Escribir manual)"] + role_pool + ["L", "VACACIONES", "SUSPEND", "INCAPACIDAD", "PERMISO"]
-            ed4, ed5, ed6, ed7 = st.columns([1.8, 1.8, 1.0, 1.0])
-            sel_preset = ed4.selectbox("Turno o novedad rápida", preset_opts, key="ed_preset")
-            manual_val = ed5.text_input("Valor de celda", value=cur_cell.get("raw", "") if sel_preset == "(Escribir manual)" else sel_preset, key="ed_val")
-            chk_at = ed6.checkbox("AT", value=cur_cell.get("is_at", False), key="ed_at")
-            chk_lock = ed7.checkbox("Fijar al rotar", value=cur_cell.get("locked", False), key="ed_lock")
-            save_future_ed = st.checkbox("Guardar también en Novedades programadas si es novedad", value=True, key="ed_save_nov")
-
-            if st.button("Guardar cambio en rango seleccionado", type="primary", key="ed_save_btn"):
-                base_clean = manual_val.strip()
-                if base_clean.upper() in SPECIAL_STATES:
-                    final_raw = base_clean.upper()
-                    final_lock = True
-                else:
-                    parsed_m = parse_raw_cell(base_clean)
-                    final_raw = format_cell_raw(parsed_m["base"], is_at=chk_at, is_cap=parsed_m["is_cap"])
-                    final_lock = chk_lock
-
-                row = active_week["assignments"].setdefault(emp_obj["id"], [parse_raw_cell("") for _ in range(7)])
-                for dd in range(d_idx_1, d_idx_2 + 1):
-                    row[dd] = parse_raw_cell(final_raw, locked=final_lock)
-
-                if save_future_ed and base_clean.upper() in SPECIAL_STATES:
-                    st.session_state["scheduled_novedades"].append({
-                        "id": f"nov_{emp_obj['id']}_{dt.datetime.now().timestamp()}",
-                        "emp_id": emp_obj["id"],
-                        "tipo": base_clean.upper(),
-                        "start_date": add_days_iso(active_week["start_date"], d_idx_1),
-                        "end_date": add_days_iso(active_week["start_date"], d_idx_2),
-                    })
-                st.success(f"Actualizado {emp_obj['nombre']} de {DAYS_ES[d_idx_1]} a {DAYS_ES[d_idx_2]}.")
-                st.rerun()
+            render_inline_week_cell_editor("t1_ed", active_week, employees, role_configs, is_preview_draft=False)
 
         if issues:
             st.subheader("Alertas activas de esta semana")
@@ -1739,40 +1806,102 @@ with tab2:
         render_no_active_week_reminder("Rotación y Descansos")
     else:
         st.subheader("Análisis de Días para Descanso (L) y Rotación Tras Días Libres")
-        st.caption("Compara la semana anterior contra la semana nueva, registra novedades antes de generarla y verifica días continuos antes de L.")
+        st.caption("Rota la nueva semana, ajusta turnos si lo necesitas y guarda los cambios para verlos en la pantalla principal.")
 
+        base_week_ref = weeks[-1]
+        base_sig = json.dumps({
+            "base": base_week_ref["assignments"],
+            "base_date": base_week_ref["start_date"],
+            "emps": [(e["id"], e["cargo"], e["activo"], e["puede_at"]) for e in employees],
+            "cfg": role_configs,
+            "rules": rules,
+            "novs": st.session_state["scheduled_novedades"],
+            "offset": st.session_state["preview_seed_offset"],
+        }, sort_keys=True, default=str)
+
+        if st.session_state["preview_draft_sig"] != base_sig or st.session_state["preview_draft_week"] is None:
+            gen_pw, _gen_at = generate_next_week(
+                base_week_ref,
+                employees,
+                role_configs,
+                rules,
+                scheduled_novedades=st.session_state["scheduled_novedades"],
+                seed_offset=st.session_state["preview_seed_offset"],
+            )
+            st.session_state["preview_draft_week"] = gen_pw
+            st.session_state["preview_draft_sig"] = base_sig
+
+        preview_week = st.session_state["preview_draft_week"]
+        act_range_lbl = format_week_date_range(active_week["start_date"])
+        next_range_lbl = format_week_date_range(preview_week["start_date"])
+
+        mode_opt_active = f"Semana Activa ({act_range_lbl})"
+        mode_opt_preview = f"Previsualizar Siguiente ({next_range_lbl})"
         default_mode = 0 if prev_week else 1
         mode_choice = st.radio(
             "Modo de visualización",
-            [f"Semana Activa ({active_week['label']})", "Previsualizar Siguiente Semana"],
+            [mode_opt_active, mode_opt_preview],
             index=default_mode,
             horizontal=True,
+            key="t2_mode_radio",
         )
-        is_preview = mode_choice == "Previsualizar Siguiente Semana"
+        is_preview = mode_choice == mode_opt_preview
 
-        p1, p2, p3, p4 = st.columns([1.2, 1.2, 1.4, 1.6])
+        p1, p2, p3, p4, p5 = st.columns([1.0, 1.0, 1.2, 1.4, 1.8])
         rules["min_work_between_off"] = int(p1.number_input("Mín. días trabajados entre L", 3, 6, value=int(rules["min_work_between_off"]), key="t2_min_work"))
         rules["max_consecutive"] = int(p2.number_input("Máx. días seguidos sin descanso", 5, 10, value=int(rules["max_consecutive"]), key="t2_max_cons"))
         with p3:
             st.write("")
             st.write("")
-            rules["rotate_after_off"] = st.checkbox("Rotar turno después del Día Libre (L)", value=bool(rules["rotate_after_off"]), key="t2_rot")
+            rules["rotate_after_off"] = st.checkbox("Rotar turno después de L", value=bool(rules["rotate_after_off"]), key="t2_rot")
 
-        preview_week, preview_at = generate_next_week(
-            weeks[-1],
-            employees,
-            role_configs,
-            rules,
-            scheduled_novedades=st.session_state["scheduled_novedades"],
-        )
         with p4:
             st.write("")
             st.write("")
             if is_preview:
-                if st.button(f"Aplicar y Crear {preview_week['label']}", type="primary", use_container_width=True):
-                    st.session_state["weeks"].append(preview_week)
+                if st.button("🔄 Rotar Nueva Semana", key="t2_rotate_preview_btn", use_container_width=True):
+                    curr_sig = json.dumps(preview_week["assignments"], sort_keys=True)
+                    cur_off_val = int(st.session_state["preview_seed_offset"])
+                    chosen_off = cur_off_val + 1
+                    for step in range(1, 9):
+                        cand_off = cur_off_val + step
+                        cand_w, _ = generate_next_week(
+                            base_week_ref,
+                            employees,
+                            role_configs,
+                            rules,
+                            scheduled_novedades=st.session_state["scheduled_novedades"],
+                            seed_offset=cand_off,
+                        )
+                        if json.dumps(cand_w["assignments"], sort_keys=True) != curr_sig:
+                            chosen_off = cand_off
+                            break
+                    st.session_state["preview_seed_offset"] = chosen_off
+                    st.session_state["preview_draft_sig"] = None
+                    st.rerun()
+            else:
+                if st.button("🔄 Re-rotar Semana Actual", key="t2_rerotate_active_btn", use_container_width=True):
+                    reg, at_c = trigger_rerotate_active_week(employees, role_configs, rules)
+                    if reg:
+                        st.success(f"Semana '{reg['label']}' re-rotada ({at_c} turno(s) AT).")
+                        st.rerun()
+
+        with p5:
+            st.write("")
+            st.write("")
+            if is_preview:
+                preview_at_cnt = sum(
+                    sum(1 for c in preview_week["assignments"].get(e["id"], []) if c.get("is_at"))
+                    for e in employees if e["activo"]
+                )
+                if st.button(f"💾 Guardar {preview_week['label']}", type="primary", key="t2_save_preview_btn", use_container_width=True):
+                    saved_week = copy.deepcopy(preview_week)
+                    st.session_state["weeks"].append(saved_week)
                     st.session_state["active_week_idx"] = len(st.session_state["weeks"]) - 1
-                    st.success(f"Semana '{preview_week['label']}' creada ({preview_at} cobertura(s) AT).")
+                    st.session_state["preview_seed_offset"] = 0
+                    st.session_state["preview_draft_week"] = None
+                    st.session_state["preview_draft_sig"] = None
+                    st.success(f"¡Listo! '{saved_week['label']}' se guardó con {preview_at_cnt} turno(s) AT y ya es la Semana Activa en la pestaña 'Horario Semanal'.")
                     st.rerun()
 
         sched_novs = st.session_state["scheduled_novedades"]
@@ -1791,6 +1920,7 @@ with tab2:
                     )
                     if nc2.button("Quitar", key=f"t2_del_nov_{idx_n}"):
                         st.session_state["scheduled_novedades"].pop(idx_n)
+                        st.session_state["preview_draft_sig"] = None
                         st.rerun()
             else:
                 st.info("No hay novedades programadas. Regístralas abajo para que queden bloqueadas en la siguiente semana.")
@@ -1798,16 +1928,23 @@ with tab2:
 
         eval_curr = preview_week if is_preview else active_week
         eval_prev = weeks[-1] if is_preview else prev_week
-        analyses = analyze_rotation(eval_curr, eval_prev, employees, role_configs, rules)
 
+        with st.expander(f"✏️ Ajustar manualmente un turno o día libre en {'la Nueva Semana Propuesta' if is_preview else 'la Semana Actual'} ({format_week_date_range(eval_curr['start_date'])})"):
+            render_inline_week_cell_editor("t2_ed", eval_curr, employees, role_configs, is_preview_draft=is_preview)
+
+        analyses = analyze_rotation(eval_curr, eval_prev, employees, role_configs, rules)
         active_an = [a for a in analyses if a["rot_status"] != "ABSENCE"]
         valid_days = [a["days_before_off"] for a in active_an if a["days_before_off"] is not None]
         avg_days = round(sum(valid_days) / len(valid_days), 1) if valid_days else 0
         rotated_cnt = sum(1 for a in active_an if a["rot_status"] in ("ROTATED_AFTER_L", "ROTATED_ON_MONDAY"))
         interval_bad = sum(1 for a in active_an if not a["off_ok"])
 
+        prev_range_txt = format_week_date_range(eval_prev["start_date"]) if eval_prev else None
+        curr_range_txt = format_week_date_range(eval_curr["start_date"])
+        compared_window_txt = f"{prev_range_txt} → {curr_range_txt}" if prev_range_txt else curr_range_txt
+
         sm1, sm2, sm3, sm4 = st.columns(4)
-        sm1.metric("Ventana comparada", eval_curr["label"])
+        sm1.metric("Ventana comparada", compared_window_txt)
         sm2.metric("Promedio días antes de L", f"{avg_days} días")
         sm3.metric("Rotaciones aplicadas", f"{rotated_cnt} / {len(active_an)}")
         sm4.metric("Intervalo fuera de rango", interval_bad)
@@ -1825,7 +1962,7 @@ with tab2:
         if only_bad:
             filtered_an = [a for a in filtered_an if not a["off_ok"] or not a["rest_ok"] or a["rot_status"] == "SAME_SHIFT"]
 
-        def strip_html(cells):
+        def strip_html(cells, week_start_iso):
             if not cells:
                 return "<span style='color:#94A3B8;'>Sin semana previa</span>"
             boxes = []
@@ -1849,19 +1986,35 @@ with tab2:
                 else:
                     line1 = b[:6] if b else "—"
                     line2 = "AT" if c.get("is_at") else ""
-                sub_html = f"<div style='font-size:11px;font-weight:700;margin-top:1px;'>{line2}</div>" if line2 else ""
+                day_dt_str = format_short_date(add_days_iso(week_start_iso, d)) if week_start_iso else ""
+                day_hdr_str = f"{SHORT_DAYS_ES[d]} {day_dt_str}" if day_dt_str else SHORT_DAYS_ES[d]
+                sub_html = f"<div style='font-size:10px;opacity:0.95;font-weight:700;margin-top:1px;'>{line2}</div>" if line2 else ""
                 boxes.append(
-                    f"<div title='{DAYS_ES[d]}: {c.get('raw', '')}' style='min-width:68px;padding:6px 5px;border-radius:5px;"
-                    f"background:{bg};color:{fg};border:1px solid {brd};text-align:center;font-family:monospace;line-height:1.18;'>"
-                    f"<div style='font-size:10px;opacity:0.8;font-weight:700;margin-bottom:2px;'>{SHORT_DAYS_ES[d]}</div>"
-                    f"<div style='font-size:12px;font-weight:800;'>{line1}</div>"
+                    f"<div title='{DAYS_ES[d]} {day_dt_str}: {c.get('raw', '')}' style='min-width:70px;padding:5px 4px;border-radius:5px;"
+                    f"background:{bg};color:{fg};border:1px solid {brd};text-align:center;font-family:monospace;line-height:1.15;'>"
+                    f"<div style='font-size:10px;opacity:0.85;font-weight:700;margin-bottom:2px;white-space:nowrap;'>{day_hdr_str}</div>"
+                    f"<div style='font-size:11px;font-weight:800;'>{line1}</div>"
                     f"{sub_html}"
                     "</div>"
                 )
-            return "<div style='display:flex;gap:6px;flex-wrap:nowrap;'>" + "".join(boxes) + "</div>"
+            return "<div style='display:flex;gap:5px;flex-wrap:nowrap;'>" + "".join(boxes) + "</div>"
 
-        th2 = "padding:8px 10px;border:1px solid #CBD5E1;background:#F1F5F9;color:#0F172A;font-size:12px;text-align:left;white-space:nowrap;"
+        th2 = "padding:9px 10px;border:1px solid #CBD5E1;background:#F1F5F9;color:#0F172A;font-size:12px;text-align:left;white-space:nowrap;"
+        prev_badge_html = (
+            f"<span style='margin-left:8px;background:#E2E8F0;color:#1E293B;padding:2px 7px;border-radius:4px;"
+            f"font-family:monospace;font-size:11px;font-weight:700;'>{prev_range_txt}</span>"
+            if prev_range_txt
+            else ""
+        )
+        curr_title_txt = "Nueva Semana Propuesta" if is_preview else "Semana Actual"
+        curr_badge_html = (
+            f"<span style='margin-left:8px;background:#E0F2FE;color:#0C4A6E;padding:2px 7px;border-radius:4px;"
+            f"font-family:monospace;font-size:11px;font-weight:700;'>{curr_range_txt}</span>"
+        )
+
         comp_rows = []
+        prev_start_iso = eval_prev["start_date"] if eval_prev else None
+        curr_start_iso = eval_curr["start_date"]
         for a in filtered_an:
             e = a["emp"]
             days_txt = "—" if a["rot_status"] == "ABSENCE" else (f"{a['days_before_off']} días seg." if a["days_before_off"] is not None else f"Sin L ({a['max_seq']}d)")
@@ -1869,11 +2022,13 @@ with tab2:
             hrs_txt = f"{a['rest_hours']}h" if a["rest_hours"] is not None else "—"
             hrs_color = "#047857" if a["rest_ok"] else "#DC2626"
             rot_color = "#B45309" if a["rot_status"] == "SAME_SHIFT" else "#0F172A"
+            prev_strip = strip_html(a["prev_cells"], prev_start_iso)
+            curr_strip = strip_html(a["curr_cells"], curr_start_iso)
             comp_rows.append(
                 "<tr>"
                 f"<td style='padding:8px 10px;border:1px solid #E2E8F0;min-width:190px;'><div style='font-weight:600;'>{e['codigo']} {e['nombre']}</div><div style='font-size:11px;color:#64748B;'>{e['cargo']}</div></td>"
-                f"<td style='padding:8px 10px;border:1px solid #E2E8F0;min-width:520px;'>{strip_html(a['prev_cells'])}</td>"
-                f"<td style='padding:8px 10px;border:1px solid #E2E8F0;min-width:520px;'>{strip_html(a['curr_cells'])}</td>"
+                f"<td style='padding:8px 10px;border:1px solid #E2E8F0;min-width:540px;'>{prev_strip}</td>"
+                f"<td style='padding:8px 10px;border:1px solid #E2E8F0;min-width:540px;'>{curr_strip}</td>"
                 f"<td style='padding:8px 10px;border:1px solid #E2E8F0;text-align:center;font-weight:700;color:{days_color};white-space:nowrap;'>{days_txt}</td>"
                 f"<td style='padding:8px 10px;border:1px solid #E2E8F0;text-align:center;font-weight:700;color:{hrs_color};white-space:nowrap;'>{hrs_txt}</td>"
                 f"<td style='padding:8px 10px;border:1px solid #E2E8F0;color:{rot_color};min-width:220px;'>{a['rot_detail']}</td>"
@@ -1883,8 +2038,8 @@ with tab2:
         comp_table_html = (
             "<div style='overflow-x:auto;border:1px solid #CBD5E1;border-radius:8px;background:#FFFFFF;'>"
             "<table style='border-collapse:collapse;width:100%;font-family:system-ui,-apple-system,sans-serif;font-size:12px;'>"
-            f"<thead><tr><th style='{th2}'>Colaborador y Cargo</th><th style='{th2}'>Semana Anterior (Lun → Dom)</th>"
-            f"<th style='{th2}'>{'Nueva Semana Propuesta' if is_preview else 'Semana Actual'} (Lun → Dom)</th>"
+            f"<thead><tr><th style='{th2}'>Colaborador y Cargo</th><th style='{th2}'>Semana Anterior {prev_badge_html}</th>"
+            f"<th style='{th2}'>{curr_title_txt} {curr_badge_html}</th>"
             f"<th style='{th2}'>Días p/ Descanso</th><th style='{th2}'>Horas en L</th><th style='{th2}'>Rotación tras Día Libre</th></tr></thead>"
             f"<tbody>{''.join(comp_rows)}</tbody>"
             "</table></div>"
@@ -1895,77 +2050,68 @@ with tab3:
     if not has_weeks:
         render_no_active_week_reminder("Cobertura y Apoyo AT")
     else:
-        st.subheader("Cobertura de Técnico de Operaciones y Códigos AT por Día")
-        st.caption("Visualiza los códigos de quién cubre directamente como Técnico y quién cubre las tareas como Apoyo Técnico (AT) cada día. El turno 19:00-27:00 requiere Técnico directo.")
+        st.subheader("Detalle Diario de Códigos — Cobertura Técnico de Operaciones y Apoyo AT")
+        st.info("Regla activa: El turno de 19:00-27:00 NO puede ser cubierto por personal AT; debe cubrirlo un Técnico de Operaciones directo.")
 
-        daily_cov = get_daily_tech_coverage(active_week, employees, role_configs)
+        tech_cov = get_daily_tech_coverage(active_week, employees, role_configs)
+        d_sel = st.selectbox("Seleccionar día para ver códigos de cobertura", DAYS_ES, index=0, key="t3_day_sel")
+        d_sel_idx = DAYS_ES.index(d_sel)
+        day_cov_rows = [r for r in tech_cov if r["day_idx"] == d_sel_idx]
+
+        cols_day = st.columns(max(1, len(day_cov_rows)))
+        for idx_c, item in enumerate(day_cov_rows):
+            with cols_day[idx_c]:
+                status_bg = "#FEE2E2" if item["missing"] > 0 else "#DCFCE7"
+                status_fg = "#991B1B" if item["missing"] > 0 else "#166534"
+                status_txt = f"Falta {item['missing']}" if item["missing"] > 0 else "Cubierto"
+                direct_html = "".join(
+                    f"<div style='padding:4px 7px;margin:3px 0;border-radius:4px;background:#EFF6FF;border:1px solid #BFDBFE;font-size:12px;'>"
+                    f"<strong>{m['codigo']}</strong> — {m['nombre']} <span style='color:#1D4ED8;font-size:10px;font-weight:700;'>[Técnico]</span></div>"
+                    for m in item["direct_members"]
+                )
+                at_html = "".join(
+                    f"<div style='padding:4px 7px;margin:3px 0;border-radius:4px;background:#FDF2F8;border:1px solid #FBCFE8;font-size:12px;'>"
+                    f"<strong>{m['codigo']}</strong> — {m['nombre']} <span style='color:#9E3889;font-size:10px;font-weight:700;'>[AT]</span></div>"
+                    for m in item["at_members"]
+                )
+                empty_html = "<div style='color:#94A3B8;font-size:12px;margin-top:6px;'>Sin cobertura asignada</div>"
+                members_block = (direct_html + at_html) if (direct_html or at_html) else empty_html
+                rule_badge = "Solo Técnico directo" if item["no_at"] else "Acepta apoyo AT"
+                card_cov = (
+                    "<div style='border:1px solid #CBD5E1;border-radius:8px;padding:12px;background:#FFFFFF;height:100%;'>"
+                    f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;'>"
+                    f"<strong style='font-size:14px;color:#0F172A;'>{item['shift_code']}</strong>"
+                    f"<span style='background:{status_bg};color:{status_fg};padding:2px 8px;border-radius:5px;font-size:11px;font-weight:700;'>{item['total_assigned']}/{item['target']} · {status_txt}</span>"
+                    "</div>"
+                    f"<div style='font-size:11px;color:#64748B;margin-bottom:8px;'>{rule_badge}</div>"
+                    f"{members_block}"
+                    "</div>"
+                )
+                st.markdown(card_cov, unsafe_allow_html=True)
+
+        st.divider()
+        st.subheader("Resumen Semanal de Cobertura Técnico / AT por Turno y Día")
         tech_cfg = role_configs.get("Técnico de Operaciones", {})
         tech_shifts = get_all_cargo_shifts(tech_cfg)
-
-        c3_m1, c3_m2, c3_m3 = st.columns(3)
-        c3_m1.metric("Total coberturas AT en la semana", sum(len(x["at_members"]) for x in daily_cov))
-        gaps_t = sum(x["missing"] for x in daily_cov)
-        c3_m2.metric("Estado cobertura Técnicos", "100% cubierto" if gaps_t == 0 else f"{gaps_t} faltante(s)")
-        c3_m3.metric("Personal habilitado AT activo", sum(1 for e in employees if e["activo"] and e["puede_at"]))
-
-        th3 = "padding:8px 10px;border:1px solid #CBD5E1;background:#F1F5F9;color:#0F172A;font-size:12px;text-align:left;white-space:nowrap;"
-        start_dt3 = dt.date.fromisoformat(active_week["start_date"])
-        d_hdrs3 = [f"{SHORT_DAYS_ES[i]} {(start_dt3 + dt.timedelta(days=i)).day}-{MONTHS_ES[(start_dt3 + dt.timedelta(days=i)).month - 1]}" for i in range(7)]
-        hdr3_html = f"<th style='{th3}'>Turno Técnico</th><th style='{th3}'>Meta L-V/Sáb/Dom</th>" + "".join(
-            f"<th style='{th3}min-width:155px;'>{dh}</th>" for dh in d_hdrs3
-        )
-
-        body3_rows = []
+        tech_rows = []
         for s in tech_shifts:
             no_at = is_tech_no_at(s)
-            m_wk = get_shift_target_for_day(tech_cfg, s, 0)
-            m_sat = get_shift_target_for_day(tech_cfg, s, 5)
-            m_sun = get_shift_target_for_day(tech_cfg, s, 6)
-            tds = [
-                f"<td style='padding:8px 10px;border:1px solid #E2E8F0;font-weight:700;'>{s}<br><span style='font-size:10px;font-weight:500;color:#64748B;'>{'Solo Técnico directo' if no_at else 'Acepta AT'}</span></td>",
-                f"<td style='padding:8px 10px;border:1px solid #E2E8F0;text-align:center;font-family:monospace;font-weight:700;'>{m_wk}/{m_sat}/{m_sun}</td>",
-            ]
-            for d_idx in range(7):
-                item = next((x for x in daily_cov if x["day_idx"] == d_idx and x["shift_code"] == s), None)
-                if not item:
-                    tds.append("<td style='padding:8px;border:1px solid #E2E8F0;'>—</td>")
-                    continue
-                dir_codes = ", ".join(f"{m['codigo']} ({m['nombre'].split()[0]})" for m in item["direct_members"])
-                at_codes = ", ".join(f"{m['codigo']} ({m['nombre'].split()[0]}) [AT]" for m in item["at_members"])
-                dir_html = f"<div style='color:#1E3A8A;font-size:11px;font-weight:700;'>Téc: {dir_codes}</div>" if dir_codes else ""
-                at_html = f"<div style='color:#9D174D;font-size:11px;font-weight:700;'>{at_codes}</div>" if at_codes else ""
-                empty_html = "<div style='color:#94A3B8;font-size:11px;'>Sin asignación</div>" if (not dir_codes and not at_codes) else ""
-                bg_c = "#FFFBEB" if (item["missing"] > 0 and item["target"] > 0) else "#FFFFFF"
-                badge_color = "#047857" if item["missing"] == 0 else "#B45309"
-                tds.append(
-                    f"<td style='padding:7px 9px;border:1px solid #E2E8F0;background:{bg_c};vertical-align:top;'>"
-                    f"<div style='font-family:monospace;font-weight:800;font-size:12px;color:{badge_color};margin-bottom:4px;'>{item['total_assigned']}/{item['target']}</div>"
-                    f"{dir_html}{at_html}{empty_html}</td>"
-                )
-            body3_rows.append(f"<tr>{''.join(tds)}</tr>")
-
-        st.markdown(
-            "<div style='overflow-x:auto;border:1px solid #CBD5E1;border-radius:8px;background:#FFFFFF;'>"
-            "<table style='border-collapse:collapse;width:100%;font-family:system-ui,-apple-system,sans-serif;font-size:12px;'>"
-            f"<thead><tr>{hdr3_html}</tr></thead>"
-            f"<tbody>{''.join(body3_rows)}</tbody>"
-            "</table></div>",
-            unsafe_allow_html=True,
-        )
-
-        sel_day_det = st.selectbox("Inspeccionar detalle diario exacto", DAYS_ES, key="t3_day_det")
-        sel_day_idx = DAYS_ES.index(sel_day_det)
-        det_items = [x for x in daily_cov if x["day_idx"] == sel_day_idx]
-        d_cols = st.columns(max(1, len(det_items)))
-        for idx_c, item in enumerate(det_items):
-            with d_cols[idx_c]:
-                st.markdown(f"**{item['shift_code']}** ({item['total_assigned']}/{item['target']})")
-                for m in item["direct_members"]:
-                    st.caption(f"Téc · **{m['codigo']}** — {m['nombre']}")
-                for m in item["at_members"]:
-                    st.caption(f"AT · **{m['codigo']}** — {m['nombre']} ({m['cargo']})")
-                if item["missing"] > 0:
-                    st.warning(f"Faltan {item['missing']}")
+            row_d = {
+                "Turno": f"{s} ({'Solo Técnico' if no_at else 'Acepta AT'})",
+                "Meta L-V": get_shift_target_for_day(tech_cfg, s, 0),
+                "Meta Sáb": get_shift_target_for_day(tech_cfg, s, 5),
+                "Meta Dom": get_shift_target_for_day(tech_cfg, s, 6),
+            }
+            for d in range(7):
+                t = get_shift_target_for_day(tech_cfg, s, d)
+                match_cov = next((x for x in tech_cov if x["day_idx"] == d and x["shift_code"] == s), None)
+                d_codes = [m["codigo"] for m in (match_cov["direct_members"] if match_cov else [])]
+                a_codes = [f"{m['codigo']}AT" for m in (match_cov["at_members"] if match_cov else [])]
+                codes_str = ", ".join(d_codes + a_codes) if (d_codes or a_codes) else "—"
+                tot_a = match_cov["total_assigned"] if match_cov else 0
+                row_d[SHORT_DAYS_ES[d]] = f"{tot_a}/{t} [{codes_str}]"
+            tech_rows.append(row_d)
+        st.dataframe(pd.DataFrame(tech_rows), use_container_width=True, hide_index=True)
 
         st.divider()
         st.subheader("Tareas Sin Cubrir según Meta Diaria (Lun–Vie / Sáb / Dom)")
@@ -1992,156 +2138,7 @@ with tab3:
             )
 
 with tab4:
-    st.subheader("Turnos de Trabajo y Meta Diaria por Cargo (Crear, Modificar, Reordenar)")
-    sel_cargo_t4 = st.selectbox("Selecciona el cargo a configurar", CARGOS_ORDEN, key="t4_sel_cargo")
-    cfg_t4 = role_configs[sel_cargo_t4]
-    shifts_t4 = get_all_cargo_shifts(cfg_t4)
-
-    st.caption(f"Orden de rotación actual: {' → '.join(cfg_t4['rotation_pool']) if cfg_t4['rotation_pool'] else '—'}")
-    for s_idx, s_code in enumerate(shifts_t4):
-        in_pool = s_code in cfg_t4["rotation_pool"]
-        pool_pos = cfg_t4["rotation_pool"].index(s_code) if in_pool else -1
-        c_ord, c_name, c_wk, c_sat, c_sun, c_rot, c_del = st.columns([0.9, 1.5, 0.8, 0.8, 0.8, 0.8, 1.2])
-
-        with c_ord:
-            up_b, dn_b = st.columns(2)
-            if up_b.button("↑", key=f"t4_up_{sel_cargo_t4}_{s_code}", disabled=(not in_pool or pool_pos == 0)):
-                pool = cfg_t4["rotation_pool"]
-                pool[pool_pos], pool[pool_pos - 1] = pool[pool_pos - 1], pool[pool_pos]
-                st.rerun()
-            if dn_b.button("↓", key=f"t4_dn_{sel_cargo_t4}_{s_code}", disabled=(not in_pool or pool_pos == len(cfg_t4["rotation_pool"]) - 1)):
-                pool = cfg_t4["rotation_pool"]
-                pool[pool_pos], pool[pool_pos + 1] = pool[pool_pos + 1], pool[pool_pos]
-                st.rerun()
-
-        new_s_txt = c_name.text_input("Horario", value=s_code, key=f"t4_ren_{sel_cargo_t4}_{s_code}", label_visibility="collapsed")
-        cfg_t4["daily_targets"][s_code] = int(c_wk.number_input("Lun-Vie", 0, 30, value=int(cfg_t4["daily_targets"].get(s_code, 0)), key=f"t4_wk_{sel_cargo_t4}_{s_code}"))
-        cfg_t4.setdefault("saturday_targets", {})[s_code] = int(c_sat.number_input("Sáb", 0, 30, value=int(cfg_t4.get("saturday_targets", {}).get(s_code, cfg_t4["daily_targets"].get(s_code, 0))), key=f"t4_sat_{sel_cargo_t4}_{s_code}"))
-        cfg_t4.setdefault("sunday_targets", {})[s_code] = int(c_sun.number_input("Dom", 0, 30, value=int(cfg_t4.get("sunday_targets", {}).get(s_code, cfg_t4["daily_targets"].get(s_code, 0))), key=f"t4_sun_{sel_cargo_t4}_{s_code}"))
-
-        want_pool = c_rot.checkbox("Rotar", value=in_pool, key=f"t4_inpool_{sel_cargo_t4}_{s_code}")
-        if want_pool and not in_pool:
-            cfg_t4["rotation_pool"].append(s_code)
-            st.rerun()
-        elif not want_pool and in_pool and len(cfg_t4["rotation_pool"]) > 1:
-            cfg_t4["rotation_pool"].remove(s_code)
-            st.rerun()
-
-        with c_del:
-            b_ren, b_rm = st.columns(2)
-            if b_ren.button("Guardar", key=f"t4_save_sh_{sel_cargo_t4}_{s_code}"):
-                parsed_ren = parse_raw_cell(new_s_txt)
-                if parsed_ren["base"] and parsed_ren["start_min"] is not None:
-                    nc = parsed_ren["base"]
-                    if nc != s_code and nc not in shifts_t4:
-                        cfg_t4["rotation_pool"] = [nc if x == s_code else x for x in cfg_t4["rotation_pool"]]
-                        for bkt in ("daily_targets", "saturday_targets", "sunday_targets"):
-                            if s_code in cfg_t4.get(bkt, {}):
-                                cfg_t4[bkt][nc] = cfg_t4[bkt].pop(s_code)
-                        st.success(f"Turno {s_code} actualizado a {nc}.")
-                        st.rerun()
-                else:
-                    st.error("Formato inválido. Usa HH:MM-HH:MM.")
-            if b_rm.button("Quitar", key=f"t4_rm_sh_{sel_cargo_t4}_{s_code}", disabled=(len(shifts_t4) <= 1)):
-                cfg_t4["rotation_pool"] = [x for x in cfg_t4["rotation_pool"] if x != s_code]
-                for bkt in ("daily_targets", "saturday_targets", "sunday_targets"):
-                    cfg_t4.get(bkt, {}).pop(s_code, None)
-                st.rerun()
-
-    with st.expander(f"➕ Crear nuevo turno de trabajo para {sel_cargo_t4}"):
-        ns1, ns2, ns3, ns4, ns5 = st.columns([1.8, 0.9, 0.9, 0.9, 1.0])
-        new_sh_code = ns1.text_input("Nuevo horario (HH:MM-HH:MM)", placeholder="Ej. 14:00-22:00", key="t4_new_sh_code")
-        new_sh_wk = int(ns2.number_input("Cant. Lun-Vie", 0, 30, value=1, key="t4_new_sh_wk"))
-        new_sh_sat = int(ns3.number_input("Cant. Sábado", 0, 30, value=1, key="t4_new_sh_sat"))
-        new_sh_sun = int(ns4.number_input("Cant. Domingo", 0, 30, value=1, key="t4_new_sh_sun"))
-        with ns5:
-            st.write("")
-            st.write("")
-            if st.button("Crear turno", type="primary", use_container_width=True, key="t4_create_sh_btn"):
-                p_new = parse_raw_cell(new_sh_code)
-                if not p_new["base"] or p_new["start_min"] is None:
-                    st.error("Ingresa un horario válido HH:MM-HH:MM.")
-                elif p_new["base"] in get_all_cargo_shifts(cfg_t4):
-                    st.warning("Ese turno ya existe en este cargo.")
-                else:
-                    cb = p_new["base"]
-                    cfg_t4["rotation_pool"].append(cb)
-                    cfg_t4["daily_targets"][cb] = new_sh_wk
-                    cfg_t4.setdefault("saturday_targets", {})[cb] = new_sh_sat
-                    cfg_t4.setdefault("sunday_targets", {})[cb] = new_sh_sun
-                    st.success(f"Turno {cb} agregado a {sel_cargo_t4}.")
-                    st.rerun()
-
-    if st.button("Aplicar reglas, turnos y Re-rotar semana activa", type="primary", disabled=not has_weeks, key="t4_apply_rerotate"):
-        lbl_r, at_r = trigger_rerotate_active_week()
-        st.success(f"Reglas y metas aplicadas a '{lbl_r}' ({at_r} turno(s) AT).")
-        st.rerun()
-
-    st.divider()
-    st.subheader("Directorio de Personal (Activar / Desactivar Recursos y Habilitación AT)")
-    d_f1, d_f2, d_f3 = st.columns([2, 1.5, 1.2])
-    dir_q = d_f1.text_input("Buscar en directorio", placeholder="Código o nombre...", key="t4_dir_q")
-    dir_cargo = d_f2.selectbox("Cargo", ["TODOS"] + CARGOS_ORDEN, key="t4_dir_cargo")
-    dir_estado = d_f3.selectbox("Estado", ["Todos", "Activos", "Inactivos"], key="t4_dir_est")
-
-    with st.expander("➕ Agregar nuevo colaborador al directorio"):
-        ne1, ne2, ne3, ne4, ne5 = st.columns([1.0, 2.0, 1.8, 0.9, 1.0])
-        ne_cod = ne1.text_input("Código", key="t4_ne_cod")
-        ne_nom = ne2.text_input("Nombre completo", key="t4_ne_nom")
-        ne_car = ne3.selectbox("Cargo", CARGOS_ORDEN, index=1, key="t4_ne_car")
-        ne_at = ne4.checkbox("AT", value=False, key="t4_ne_at", disabled=(ne_car not in ("Analista de Operaciones", "Auxiliar de Operaciones")))
-        with ne5:
-            st.write("")
-            st.write("")
-            if st.button("Agregar", type="primary", key="t4_ne_btn", use_container_width=True):
-                c_clean, n_clean = ne_cod.strip(), ne_nom.strip()
-                if not c_clean or not n_clean:
-                    st.error("Completa código y nombre.")
-                elif any(x["codigo"] == c_clean or x["id"] == c_clean for x in employees):
-                    st.error(f"Ya existe el código {c_clean}.")
-                else:
-                    employees.append({
-                        "id": c_clean,
-                        "codigo": c_clean,
-                        "nombre": n_clean,
-                        "cargo": ne_car,
-                        "puede_at": bool(ne_at and ne_car in ("Analista de Operaciones", "Auxiliar de Operaciones")),
-                        "activo": True,
-                    })
-                    st.success(f"{n_clean} agregado al directorio.")
-                    st.rerun()
-
-    dir_list = sorted(
-        employees,
-        key=lambda x: (0 if x["activo"] else 1, CARGOS_ORDEN.index(x["cargo"]) if x["cargo"] in CARGOS_ORDEN else 99, x["nombre"]),
-    )
-    if dir_cargo != "TODOS":
-        dir_list = [x for x in dir_list if x["cargo"] == dir_cargo]
-    if dir_estado == "Activos":
-        dir_list = [x for x in dir_list if x["activo"]]
-    elif dir_estado == "Inactivos":
-        dir_list = [x for x in dir_list if not x["activo"]]
-    if dir_q.strip():
-        dq = dir_q.strip().lower()
-        dir_list = [x for x in dir_list if dq in x["nombre"].lower() or dq in x["codigo"].lower()]
-
-    for e in dir_list:
-        ec1, ec2, ec3, ec4, ec5, ec6 = st.columns([0.8, 1.9, 1.8, 1.0, 0.9, 1.2])
-        ec1.write(e["codigo"])
-        ec2.write(e["nombre"] if e["activo"] else f"~~{e['nombre']}~~")
-        ec3.write(e["cargo"])
-        if e["cargo"] in ("Analista de Operaciones", "Auxiliar de Operaciones"):
-            e["puede_at"] = ec4.checkbox("Habilitado AT", value=e["puede_at"], disabled=not e["activo"], key=f"t4_at_{e['id']}")
-        else:
-            ec4.caption("—")
-        ec5.write("Activo" if e["activo"] else "Inactivo")
-        btn_lbl = "Desactivar" if e["activo"] else "Reactivar"
-        if ec6.button(btn_lbl, key=f"t4_toggle_{e['id']}", use_container_width=True):
-            e["activo"] = not e["activo"]
-            st.rerun()
-
-    st.divider()
-    st.subheader("Novedades Programadas y Reglas Automáticas")
+    st.subheader("Novedades Programadas (Antes de Generar Próximas Semanas)")
     nov_default_start = active_week["start_date"] if active_week else current_monday_iso()
     render_novedad_form("t4_nov", employees, nov_default_start, allow_rerotate=True, active_week_exists=has_weeks)
 
@@ -2161,6 +2158,8 @@ with tab4:
                 st.session_state["scheduled_novedades"].pop(idx_n)
                 st.rerun()
 
+    st.divider()
+    st.subheader("Reglas Automáticas de Descanso y Rotación")
     r1, r2, r3 = st.columns(3)
     rules["min_rest_between"] = int(r1.number_input("Descanso mínimo entre turnos (h)", 8, 16, value=int(rules["min_rest_between"]), key="t4_min_rest_between"))
     rules["min_rest_off"] = int(r2.number_input("Descanso en Día Libre L (h)", 12, 48, value=int(rules["min_rest_off"]), key="t4_min_rest_off"))
@@ -2176,6 +2175,136 @@ with tab4:
         st.write("")
         st.write("")
         rules["auto_assign_at"] = st.checkbox("Auto-asignar cobertura AT al generar semana", value=bool(rules["auto_assign_at"]), key="t4_auto_at")
+
+    st.divider()
+    st.subheader("Gestión de Turnos, Orden de Rotación y Meta Diaria por Cargo")
+    for cargo in CARGOS_ORDEN:
+        cfg = role_configs[cargo]
+        with st.expander(cargo, expanded=True):
+            add1, add2, add3, add4, add5 = st.columns([2.0, 0.8, 0.8, 0.8, 1.0])
+            new_s_raw = add1.text_input("Nuevo turno (HH:MM-HH:MM)", placeholder="Ej. 07:00-15:00", key=f"t4_new_s_{cargo}")
+            new_wk = int(add2.number_input("Lun–Vie", 0, 20, value=1, key=f"t4_new_wk_{cargo}"))
+            new_sat = int(add3.number_input("Sáb", 0, 20, value=1, key=f"t4_new_sat_{cargo}"))
+            new_sun = int(add4.number_input("Dom", 0, 20, value=1, key=f"t4_new_sun_{cargo}"))
+            with add5:
+                st.write("")
+                st.write("")
+                if st.button("Crear turno", key=f"t4_add_s_btn_{cargo}", use_container_width=True):
+                    norm = normalize_shift_code(new_s_raw)
+                    if not norm:
+                        st.error("Usa formato HH:MM-HH:MM (ej. 07:00-15:00).")
+                    else:
+                        if norm not in cfg["rotation_pool"]:
+                            cfg["rotation_pool"].append(norm)
+                        cfg["daily_targets"][norm] = new_wk
+                        cfg.setdefault("saturday_targets", {})[norm] = new_sat
+                        cfg.setdefault("sunday_targets", {})[norm] = new_sun
+                        st.success(f"Turno {norm} agregado a {cargo}.")
+                        st.rerun()
+
+            shifts_all = get_all_cargo_shifts(cfg)
+            for idx_s, s in enumerate(shifts_all):
+                c_up, c_dn, c_name, c_ren, c_wk, c_sat, c_sun, c_del = st.columns([0.45, 0.45, 1.4, 0.7, 0.9, 0.9, 0.9, 0.55])
+                if c_up.button("↑", key=f"up_{cargo}_{s}", disabled=(s not in cfg["rotation_pool"] or cfg["rotation_pool"].index(s) == 0)):
+                    pos = cfg["rotation_pool"].index(s)
+                    cfg["rotation_pool"][pos - 1], cfg["rotation_pool"][pos] = cfg["rotation_pool"][pos], cfg["rotation_pool"][pos - 1]
+                    st.rerun()
+                if c_dn.button("↓", key=f"dn_{cargo}_{s}", disabled=(s not in cfg["rotation_pool"] or cfg["rotation_pool"].index(s) == len(cfg["rotation_pool"]) - 1)):
+                    pos = cfg["rotation_pool"].index(s)
+                    cfg["rotation_pool"][pos + 1], cfg["rotation_pool"][pos] = cfg["rotation_pool"][pos], cfg["rotation_pool"][pos + 1]
+                    st.rerun()
+
+                edited_code = c_name.text_input("Horario", value=s, key=f"ren_txt_{cargo}_{s}", label_visibility="collapsed")
+                if c_ren.button("Ren.", key=f"ren_btn_{cargo}_{s}", help="Guardar nuevo horario para este turno"):
+                    norm_ed = normalize_shift_code(edited_code)
+                    if not norm_ed:
+                        st.error("Formato válido: HH:MM-HH:MM")
+                    elif norm_ed != s:
+                        cfg["rotation_pool"] = [norm_ed if x == s else x for x in cfg["rotation_pool"]]
+                        for tmap_k in ("daily_targets", "saturday_targets", "sunday_targets"):
+                            tmap = cfg.setdefault(tmap_k, {})
+                            if s in tmap:
+                                tmap[norm_ed] = tmap.pop(s)
+                        st.rerun()
+
+                cfg["daily_targets"][s] = int(c_wk.number_input("Lun–Vie", 0, 20, value=int(cfg["daily_targets"].get(s, 0)), key=f"tgt_wk_{cargo}_{s}"))
+                cfg.setdefault("saturday_targets", {})[s] = int(c_sat.number_input("Sáb", 0, 20, value=int(cfg.get("saturday_targets", {}).get(s, cfg["daily_targets"].get(s, 0))), key=f"tgt_sat_{cargo}_{s}"))
+                cfg.setdefault("sunday_targets", {})[s] = int(c_sun.number_input("Dom", 0, 20, value=int(cfg.get("sunday_targets", {}).get(s, cfg["daily_targets"].get(s, 0))), key=f"tgt_sun_{cargo}_{s}"))
+
+                if c_del.button("✕", key=f"del_s_{cargo}_{s}", help="Eliminar turno", disabled=len(shifts_all) <= 1):
+                    cfg["rotation_pool"] = [x for x in cfg["rotation_pool"] if x != s]
+                    for tmap_k in ("daily_targets", "saturday_targets", "sunday_targets"):
+                        cfg.get(tmap_k, {}).pop(s, None)
+                    st.rerun()
+
+    if st.button("Aplicar reglas y Re-rotar semana activa", type="primary", disabled=not has_weeks, key="t4_apply_rerotate_btn"):
+        reg, at_c = trigger_rerotate_active_week(employees, role_configs, rules)
+        if reg:
+            st.success(f"Reglas y metas aplicadas a '{reg['label']}' ({at_c} turno(s) AT).")
+            st.rerun()
+
+    st.divider()
+    st.subheader("Directorio de Personal, Estado (Activo / Desactivado) y Habilitación AT")
+
+    with st.expander("➕ Agregar nuevo colaborador al directorio"):
+        ne1, ne2, ne3, ne4, ne5 = st.columns([1.0, 2.0, 1.8, 1.0, 1.0])
+        new_cod = ne1.text_input("Código", placeholder="Ej. 14200", key="t4_new_emp_cod")
+        new_nom = ne2.text_input("Nombre completo", placeholder="Ej. Carlos Mendoza", key="t4_new_emp_nom")
+        new_car = ne3.selectbox("Cargo", CARGOS_ORDEN, key="t4_new_emp_car")
+        new_at = ne4.checkbox("Habilitado AT", value=False, key="t4_new_emp_at")
+        with ne5:
+            st.write("")
+            st.write("")
+            if st.button("Agregar", type="primary", key="t4_new_emp_btn", use_container_width=True):
+                cod_c = new_cod.strip()
+                nom_c = new_nom.strip()
+                if not cod_c or not nom_c:
+                    st.error("Ingresa código y nombre.")
+                elif any(x["codigo"] == cod_c or x["id"] == cod_c for x in employees):
+                    st.error(f"Ya existe un colaborador con el código {cod_c}.")
+                else:
+                    employees.append({
+                        "id": cod_c,
+                        "codigo": cod_c,
+                        "nombre": nom_c,
+                        "cargo": new_car,
+                        "puede_at": bool(new_at and new_car in ("Analista de Operaciones", "Auxiliar de Operaciones")),
+                        "activo": True,
+                    })
+                    for w in st.session_state["weeks"]:
+                        w["assignments"].setdefault(cod_c, [parse_raw_cell("") for _ in range(7)])
+                    st.success(f"Colaborador {cod_c} {nom_c} agregado.")
+                    st.rerun()
+
+    df1, df2, df3 = st.columns([2.0, 1.6, 1.2])
+    dir_q = df1.text_input("Buscar en directorio", placeholder="Código o nombre...", key="t4_dir_q")
+    dir_cargo = df2.selectbox("Filtrar por cargo", ["TODOS"] + CARGOS_ORDEN, key="t4_dir_cargo")
+    dir_status = df3.selectbox("Estado", ["Todos", "Solo Activos", "Solo Desactivados"], key="t4_dir_status")
+
+    dir_list = sorted(employees, key=lambda x: (CARGOS_ORDEN.index(x["cargo"]) if x["cargo"] in CARGOS_ORDEN else 99, x["nombre"]))
+    if dir_cargo != "TODOS":
+        dir_list = [x for x in dir_list if x["cargo"] == dir_cargo]
+    if dir_status == "Solo Activos":
+        dir_list = [x for x in dir_list if x["activo"]]
+    elif dir_status == "Solo Desactivados":
+        dir_list = [x for x in dir_list if not x["activo"]]
+    if dir_q.strip():
+        dq = dir_q.strip().lower()
+        dir_list = [x for x in dir_list if dq in x["nombre"].lower() or dq in x["codigo"].lower()]
+
+    for e in dir_list:
+        ec1, ec2, ec3, ec4, ec5 = st.columns([0.8, 2.0, 1.9, 1.1, 1.1])
+        ec1.write(e["codigo"])
+        ec2.write(e["nombre"] if e["activo"] else f"~~{e['nombre']}~~ _(Desactivado)_")
+        ec3.write(e["cargo"])
+        if e["cargo"] in ("Analista de Operaciones", "Auxiliar de Operaciones") and e["activo"]:
+            e["puede_at"] = ec4.checkbox("Habilitado AT", value=e["puede_at"], key=f"t4_at_{e['id']}")
+        else:
+            ec4.caption("—")
+        btn_lbl = "Desactivar" if e["activo"] else "Reactivar"
+        if ec5.button(btn_lbl, key=f"t4_tog_{e['id']}", use_container_width=True):
+            e["activo"] = not e["activo"]
+            st.rerun()
 
 with tab5:
     st.subheader("Cargar Programación como Semana Activa (Excel o Pegado)")
@@ -2195,6 +2324,9 @@ with tab5:
                 st.session_state["weeks"] = [new_week]
                 st.session_state["active_week_idx"] = 0
                 st.session_state["rerotate_offset"] = 0
+                st.session_state["preview_seed_offset"] = 0
+                st.session_state["preview_draft_week"] = None
+                st.session_state["preview_draft_sig"] = None
                 st.success(f"Cargados {len(new_emps)} colaboradores. '{new_week['label']}' es ahora tu Semana Activa.")
                 st.rerun()
             except Exception as exc:
@@ -2210,16 +2342,29 @@ with tab5:
                 st.session_state["weeks"] = [new_week]
                 st.session_state["active_week_idx"] = 0
                 st.session_state["rerotate_offset"] = 0
+                st.session_state["preview_seed_offset"] = 0
+                st.session_state["preview_draft_week"] = None
+                st.session_state["preview_draft_sig"] = None
                 st.success(f"Cargados {len(new_emps)} colaboradores desde texto pegado. '{new_week['label']}' es ahora tu Semana Activa.")
                 st.rerun()
             except Exception as exc:
                 st.error(f"Error al interpretar texto pegado: {exc}")
 
     st.divider()
-    if st.button("Cargar plantilla de ejemplo (opcional)", key="t5_load_seed"):
+    c_seed, c_reset = st.columns(2)
+    if c_seed.button("Cargar plantilla de ejemplo (opcional)", key="t5_load_seed", use_container_width=True):
         st.session_state["employees"] = copy.deepcopy(SEED_EMPLOYEES)
         st.session_state["weeks"] = [seed_week()]
         st.session_state["active_week_idx"] = 0
         st.session_state["rerotate_offset"] = 0
+        st.session_state["preview_seed_offset"] = 0
+        st.session_state["preview_draft_week"] = None
+        st.session_state["preview_draft_sig"] = None
         st.success("Se cargó la semana de ejemplo como Semana Activa.")
+        st.rerun()
+    if c_reset.button("Restaurar turnos y reglas por defecto", key="t5_reset_defaults", use_container_width=True):
+        st.session_state["role_configs"] = copy.deepcopy(DEFAULT_ROLE_CONFIGS)
+        st.session_state["rules"] = copy.deepcopy(DEFAULT_RULES)
+        st.session_state["preview_draft_sig"] = None
+        st.success("Reglas y turnos por defecto restaurados.")
         st.rerun()
